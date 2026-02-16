@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Arena</title>
+    <style>
+      :root {
+        --bg: #f4f2ee;
+        --card: #ffffff;
+        --ink: #1f2937;
+        --muted: #6b7280;
+        --accent: #1d4ed8;
+        --border: #e5e7eb;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      header {
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+      }
+      header h1 { margin: 0; font-size: 20px; }
+      header p { margin: 4px 0 0; color: var(--muted); }
+      .container {
+        display: grid;
+        grid-template-columns: 1fr 360px;
+        gap: 16px;
+        padding: 16px 24px 24px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px;
+      }
+      .section {
+        margin-top: 12px;
+      }
+      .label {
+        font-weight: 600;
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .active {
+        font-size: 22px;
+        font-weight: 700;
+        color: var(--accent);
+        margin-top: 4px;
+      }
+      #chat {
+        height: 520px;
+        overflow-y: auto;
+        padding-right: 4px;
+      }
+      .msg {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .msg:last-child { border-bottom: none; }
+      .sender { font-weight: 700; }
+      .content { margin-top: 4px; }
+      .queue-item {
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin-bottom: 8px;
+      }
+      .muted { color: var(--muted); font-size: 12px; }
+      button {
+        border: none;
+        background: var(--accent);
+        color: white;
+        padding: 8px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      button:active { transform: translateY(1px); }
+      select, input {
+        font-family: inherit;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Agent Arena</h1>
+      <p>Shared conversation space with 10 OpenAI agents</p>
+    </header>
+    <div class="container">
+      <div class="card">
+        <div class="label">Active Speaker</div>
+        <div id="activeSpeaker" class="active">None</div>
+        <div id="activeMeta" class="muted"></div>
+        <div class="section">
+          <div class="label">Mafia Status</div>
+          <div id="mafiaStatus" class="active" style="font-size:18px;">Unknown</div>
+          <div id="mafiaMeta" class="muted"></div>
+          <div id="mafiaAlive" class="muted" style="margin-top:6px;"></div>
+          <div id="mafiaDead" class="muted" style="margin-top:6px;"></div>
+        </div>
+        <div style="height: 10px;"></div>
+        <div class="label">Room</div>
+        <select id="roomSelect" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; margin-top:6px;">
+          <option value="main">main</option>
+        </select>
+        <div style="height: 12px;"></div>
+        <div class="label">Chat Log</div>
+        <div id="chat"></div>
+      </div>
+      <div class="card">
+        <div class="label">Queue</div>
+        <div id="queue"></div>
+        <div style="height: 12px;"></div>
+        <button id="resetBtn">Reset DB</button>
+        <div style="height: 12px;"></div>
+        <div class="label">System Message</div>
+        <input id="systemInput" placeholder="Type as System..." style="width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; margin-top:6px;" />
+        <button id="sendBtn" style="margin-top:8px;">Send</button>
+        <div style="height: 12px;"></div>
+        <button id="pauseBtn" style="background:#0f766e;">Pause</button>
+        <div style="height: 12px;"></div>
+        <button id="closeBtn" style="background:#6b7280;">Close Connection</button>
+        <div style="height: 16px;"></div>
+        <div class="label">Create Room</div>
+        <input id="roomName" placeholder="room name" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; margin-top:6px;" />
+        <input id="roomAgents" placeholder="agents (e.g. A,B,C)" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; margin-top:6px;" />
+        <button id="createRoomBtn" style="margin-top:8px;">Create</button>
+      </div>
+    </div>
+
+    <script>
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+      let currentRoom = "main";
+
+      function ageSeconds(ts) {
+        if (!ts) return "";
+        const now = Date.now() / 1000;
+        return Math.max(0, Math.floor(now - ts));
+      }
+
+      function render(state) {
+        const active = state.active || {};
+        const activeName = active.agent || "None";
+        const activeEl = document.getElementById("activeSpeaker");
+        activeEl.textContent = activeName;
+        document.getElementById("activeMeta").textContent = active.ts ? `since ${ageSeconds(active.ts)}s` : "";
+        document.getElementById("pauseBtn").textContent = state.paused ? "Resume" : "Pause";
+
+        const chat = document.getElementById("chat");
+        const typing = window.__typingState || { id: null, index: 0, timer: null, full: "" };
+        chat.innerHTML = "";
+        for (const m of state.messages || []) {
+          const div = document.createElement("div");
+          div.className = "msg";
+          const contentText = (typing.id === m.id) ? typing.full.slice(0, typing.index) : m.content;
+          div.innerHTML = `<div class="sender">${m.sender}</div><div class="content" data-id="${m.id}">${contentText}</div>`;
+          chat.appendChild(div);
+        }
+        chat.scrollTop = chat.scrollHeight;
+
+        const queue = document.getElementById("queue");
+        queue.innerHTML = "";
+        for (const q of (state.queue || []).slice(0, 5)) {
+          const item = document.createElement("div");
+          item.className = "queue-item";
+          item.innerHTML = `<div><strong>${q.agent}</strong> <span class="muted">prio ${q.priority}</span></div><div class="muted">${q.reason}</div><div class="muted">${ageSeconds(q.ts)}s</div>`;
+          queue.appendChild(item);
+        }
+      }
+
+      async function loadMafiaState() {
+        try {
+          const res = await fetch("/api/mafia/state");
+          const data = await res.json();
+          const game = data.game || {};
+          const players = data.players || [];
+          const alive = players.filter(p => p.alive).map(p => p.agent);
+          const dead = players.filter(p => !p.alive).map(p => `${p.agent} (${p.revealed || "unknown"})`);
+
+          const status = game.status || "idle";
+          const phase = game.phase || "setup";
+          const day = game.day || 0;
+          document.getElementById("mafiaStatus").textContent = `${status.toUpperCase()} · ${phase}`;
+          document.getElementById("mafiaMeta").textContent = `Day ${day}`;
+          document.getElementById("mafiaAlive").textContent = `Alive: ${alive.join(", ") || "none"}`;
+          document.getElementById("mafiaDead").textContent = `Dead: ${dead.join(", ") || "none"}`;
+        } catch (e) {
+          document.getElementById("mafiaStatus").textContent = "Unavailable";
+        }
+      }
+
+      function startTyping(message, active) {
+        if (!message) return;
+        const typing = window.__typingState || { id: null, index: 0, timer: null, full: "" };
+        if (typing.id === message.id && typing.timer) return;
+        if (typing.timer) clearInterval(typing.timer);
+        typing.id = message.id;
+        typing.full = message.content;
+        typing.index = 0;
+        const wpm = 120;
+        const words = Math.max(1, typing.full.trim().split(/\s+/).length);
+        const totalMs = Math.max(1500, (words / wpm) * 60000);
+        const stepMs = Math.max(15, totalMs / Math.max(1, typing.full.length));
+        typing.timer = setInterval(() => {
+          typing.index = Math.min(typing.full.length, typing.index + 2);
+          window.__typingState = typing;
+          if (typing.index >= typing.full.length) {
+            clearInterval(typing.timer);
+            typing.timer = null;
+          }
+          const el = document.querySelector(`.content[data-id="${message.id}"]`);
+          if (el) {
+            el.innerHTML = `${typing.full.slice(0, typing.index)}`;
+          }
+        }, stepMs);
+        window.__typingState = typing;
+      }
+
+      ws.onmessage = (evt) => {
+        const state = JSON.parse(evt.data);
+        render(state);
+        const last = (state.messages || [])[state.messages.length - 1];
+        startTyping(last, state.active || {});
+        loadMafiaState();
+      };
+
+      document.getElementById("resetBtn").onclick = async () => {
+        await fetch("/api/reset", { method: "POST" });
+      };
+
+      document.getElementById("sendBtn").onclick = async () => {
+        const input = document.getElementById("systemInput");
+        const content = input.value.trim();
+        if (!content) return;
+        await fetch("/api/system_message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content, room: currentRoom })
+        });
+        input.value = "";
+      };
+
+      document.getElementById("pauseBtn").onclick = async () => {
+        await fetch("/api/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      };
+
+      document.getElementById("closeBtn").onclick = async () => {
+        try { ws.close(); } catch (e) {}
+        try { await fetch("/api/shutdown", { method: "POST" }); } catch (e) {}
+        window.close();
+      };
+
+      document.getElementById("createRoomBtn").onclick = async () => {
+        const name = document.getElementById("roomName").value.trim();
+        const agents = document.getElementById("roomAgents").value.split(",").map(s => s.trim()).filter(Boolean);
+        if (!name || agents.length === 0) return;
+        await fetch("/api/rooms", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, agents })
+        });
+        document.getElementById("roomName").value = "";
+        document.getElementById("roomAgents").value = "";
+        await loadRooms();
+      };
+
+      async function loadRooms() {
+        const res = await fetch("/api/rooms");
+        const data = await res.json();
+        const select = document.getElementById("roomSelect");
+        const prev = select.value || "main";
+        select.innerHTML = "";
+        for (const r of data.rooms || []) {
+          const opt = document.createElement("option");
+          opt.value = r.name;
+          opt.textContent = r.name;
+          select.appendChild(opt);
+        }
+        select.value = prev && [...select.options].some(o => o.value === prev) ? prev : "main";
+        currentRoom = select.value;
+      }
+
+      document.getElementById("roomSelect").onchange = (e) => {
+        currentRoom = e.target.value;
+        ws.send(JSON.stringify({ type: "subscribe", room: currentRoom }));
+        fetch(`/api/state?room=${encodeURIComponent(currentRoom)}`)
+          .then(res => res.json())
+          .then(state => {
+            render(state);
+            const last = (state.messages || [])[state.messages.length - 1];
+            startTyping(last, state.active || {});
+          })
+          .catch(() => {});
+      };
+
+      loadRooms().then(() => {
+        ws.send(JSON.stringify({ type: "subscribe", room: currentRoom }));
+        fetch(`/api/state?room=${encodeURIComponent(currentRoom)}`)
+          .then(res => res.json())
+          .then(state => {
+            render(state);
+            const last = (state.messages || [])[state.messages.length - 1];
+            startTyping(last, state.active || {});
+          })
+          .catch(() => {});
+      });
+      loadMafiaState();
+    </script>
+  </body>
+</html>
