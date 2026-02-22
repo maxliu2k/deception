@@ -7,16 +7,12 @@ cd "$SCRIPT_DIR"
 # Optional conda activation. Script still works if the environment is already active.
 if command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook 2>/dev/null)" || true
-  if [[ -n "${CONDA_PREFIX:-}" ]]; then
-    ACTIVE_ENV_NAME="$(basename "$CONDA_PREFIX")"
-  else
-    ACTIVE_ENV_NAME=""
-  fi
+  ACTIVE_ENV_NAME="${CONDA_DEFAULT_ENV:-}"
 
   TARGET_CONDA_ENV="${CONDA_ENV_NAME:-}"
   if [[ -z "$TARGET_CONDA_ENV" ]]; then
-    # If the caller already activated an env, keep using it.
-    if [[ -n "$ACTIVE_ENV_NAME" ]]; then
+    # Reuse an already-active non-base env; otherwise default to openrlhf.
+    if [[ -n "$ACTIVE_ENV_NAME" && "$ACTIVE_ENV_NAME" != "base" ]]; then
       TARGET_CONDA_ENV="$ACTIVE_ENV_NAME"
     else
       TARGET_CONDA_ENV="openrlhf"
