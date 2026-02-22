@@ -31,10 +31,23 @@ then
   exit 1
 fi
 
-OPENRLHF_DIR="${OPENRLHF_DIR:-$SCRIPT_DIR/../../OpenRLHF}"
-OPENRLHF_DIR="$(cd "$OPENRLHF_DIR" 2>/dev/null && pwd || true)"
+if [[ -n "${OPENRLHF_DIR:-}" ]]; then
+  OPENRLHF_DIR_CANDIDATE="$OPENRLHF_DIR"
+else
+  # Common layouts:
+  # 1) alongside the parent repo:   ~/deception/OpenRLHF
+  # 2) side-by-side in home:        ~/OpenRLHF
+  for candidate in "$SCRIPT_DIR/../../OpenRLHF" "$HOME/OpenRLHF"; do
+    if [[ -d "$candidate" ]]; then
+      OPENRLHF_DIR_CANDIDATE="$candidate"
+      break
+    fi
+  done
+fi
+OPENRLHF_DIR="$(cd "${OPENRLHF_DIR_CANDIDATE:-}" 2>/dev/null && pwd || true)"
 if [[ -z "$OPENRLHF_DIR" || ! -d "$OPENRLHF_DIR" ]]; then
   echo "Error: OpenRLHF repo not found. Set OPENRLHF_DIR to your OpenRLHF checkout path." >&2
+  echo "Tried: ${OPENRLHF_DIR_CANDIDATE:-<none>} and common defaults ($SCRIPT_DIR/../../OpenRLHF, $HOME/OpenRLHF)" >&2
   exit 1
 fi
 
