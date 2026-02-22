@@ -1,14 +1,30 @@
 #!/bin/bash
+set -euo pipefail
 
-conda activate openrlhf
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-mkdir data/in/ppo_data
+# Optional: if conda is available, try to activate the expected env.
+if command -v conda >/dev/null 2>&1; then
+  eval "$(conda shell.bash hook 2>/dev/null)" || true
+  conda activate "${CONDA_ENV_NAME:-openrlhf}" >/dev/null 2>&1 || true
+fi
 
-cd ../../housing_rl/data/processed/ppo_data
-python conglomerate_json.py # ignore warnings for now
-python jaxseq_jsonl_gen.py
-mv train.jsonl ../../housing_rl/data/in/ppo_data/train.jsonl
-mv test.jsonl ../../housing_rl/data/in/ppo_data/test.jsonl
-mv metadata.json ../../housing_rl/data/in/ppo_data/metadata.json
+PYTHON_BIN="python3"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+fi
 
-rm conglomerated_data.json
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Error: neither python3 nor python is available in PATH." >&2
+  exit 1
+fi
+
+mkdir -p data/in/ppo_data
+
+"$PYTHON_BIN" conglomerate_json.py
+"$PYTHON_BIN" jaxseq_jsonl_gen.py
+mv -f train.jsonl data/in/ppo_data/train.jsonl
+mv -f test.jsonl data/in/ppo_data/test.jsonl
+mv -f metadata.json data/in/ppo_data/metadata.json
+rm -f conglomerated_data.json
