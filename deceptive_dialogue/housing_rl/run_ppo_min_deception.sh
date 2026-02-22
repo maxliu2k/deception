@@ -10,7 +10,20 @@ if command -v conda >/dev/null 2>&1; then
   conda activate "${CONDA_ENV_NAME:-openrlhf}" >/dev/null 2>&1 || true
 fi
 
-for cmd in python3 ray vllm; do
+# Prefer binaries from the active conda env if one is active.
+if [[ -n "${CONDA_PREFIX:-}" ]]; then
+  export PATH="$CONDA_PREFIX/bin:$PATH"
+fi
+
+# Use the caller-selected runtime Python if provided, otherwise default to python3.
+RUNTIME_PYTHON="${RUNTIME_PYTHON:-python3}"
+if ! command -v "$RUNTIME_PYTHON" >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
+    RUNTIME_PYTHON="python"
+  fi
+fi
+
+for cmd in "$RUNTIME_PYTHON" ray vllm; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Error: required command '$cmd' not found in PATH." >&2
     exit 1
@@ -22,12 +35,26 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! python3 - <<'PY' >/dev/null 2>&1
+if ! "$RUNTIME_PYTHON" - <<'PY' >/dev/null 2>&1
 import torch
 raise SystemExit(0 if torch.cuda.is_available() else 1)
 PY
 then
   echo "Error: torch.cuda.is_available() is False. GPU training will not work in this environment." >&2
+  echo "Debug: RUNTIME_PYTHON=$RUNTIME_PYTHON" >&2
+  command -v "$RUNTIME_PYTHON" >&2 || true
+  "$RUNTIME_PYTHON" - <<'PY' >&2 || true
+import sys
+print("sys.executable:", sys.executable)
+try:
+    import torch
+    print("torch:", torch.__version__)
+    print("torch.cuda:", torch.version.cuda)
+    print("cuda_available:", torch.cuda.is_available())
+    print("device_count:", torch.cuda.device_count())
+except Exception as e:
+    print("torch import/check failed:", repr(e))
+PY
   exit 1
 fi
 
@@ -78,7 +105,6 @@ PRETRAIN_MODEL="${PRETRAIN_MODEL:-meta-llama/Meta-Llama-3-8B}"
 REWARD_SERVER_MODEL="${REWARD_SERVER_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
 REWARD_SCRIPT="${REWARD_SCRIPT:-$SCRIPT_DIR/reward_scripts/reward_func_dictionary.py}"
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-$SCRIPT_DIR/data/in/ppo_data}"
-RUNTIME_PYTHON="${RUNTIME_PYTHON:-python3}"
 
 if [[ ! -f "$REWARD_SCRIPT" ]]; then
   echo "Error: reward script not found at $REWARD_SCRIPT" >&2
