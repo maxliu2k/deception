@@ -7,7 +7,27 @@ cd "$SCRIPT_DIR"
 # Optional conda activation. Script still works if the environment is already active.
 if command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook 2>/dev/null)" || true
-  conda activate "${CONDA_ENV_NAME:-openrlhf}" >/dev/null 2>&1 || true
+  if [[ -n "${CONDA_PREFIX:-}" ]]; then
+    ACTIVE_ENV_NAME="$(basename "$CONDA_PREFIX")"
+  else
+    ACTIVE_ENV_NAME=""
+  fi
+
+  TARGET_CONDA_ENV="${CONDA_ENV_NAME:-}"
+  if [[ -z "$TARGET_CONDA_ENV" ]]; then
+    # If the caller already activated an env, keep using it.
+    if [[ -n "$ACTIVE_ENV_NAME" ]]; then
+      TARGET_CONDA_ENV="$ACTIVE_ENV_NAME"
+    else
+      TARGET_CONDA_ENV="openrlhf"
+    fi
+  fi
+
+  if ! conda activate "$TARGET_CONDA_ENV" >/dev/null 2>&1; then
+    echo "Error: failed to activate conda env '$TARGET_CONDA_ENV'." >&2
+    echo "Tip: run 'conda env list' and then rerun with CONDA_ENV_NAME=<env> bash run_ppo_min_deception.sh" >&2
+    exit 1
+  fi
 fi
 
 # Prefer binaries from the active conda env if one is active.
@@ -56,6 +76,11 @@ except Exception as e:
     print("torch import/check failed:", repr(e))
 PY
   exit 1
+fi
+
+echo "Using Python: $(command -v "$RUNTIME_PYTHON")"
+if [[ -n "${CONDA_PREFIX:-}" ]]; then
+  echo "Using conda env: $(basename "$CONDA_PREFIX")"
 fi
 
 if [[ -n "${OPENRLHF_DIR:-}" ]]; then
