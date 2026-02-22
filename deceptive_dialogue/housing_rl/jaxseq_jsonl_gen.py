@@ -1,6 +1,7 @@
 import argparse
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -24,17 +25,68 @@ def write_jsonl(path, items):
             f.write(json.dumps(item) + "\n")
 
 
+def _seller_turn_count(conversation: str) -> int:
+    if not isinstance(conversation, str):
+        return 0
+    return len(re.findall(r"\bSeller:", conversation))
+
+
+def _normalize_convo_for_jaxseq(convo):
+    # jaxseq_list in dialogue_generation/housing expects newer metric fields even when
+    # it later overwrites the score logic. Older runs can be patched with safe defaults.
+    c = dict(convo)
+
+    c.setdefault("belief_misalignment", 0.0)
+    c.setdefault("listener_alignment", 0.0)
+    c.setdefault("agree", False)
+
+    for key in (
+        "big_truth",
+        "garage_truth",
+        "quiet_truth",
+        "basement_truth",
+        "backyard_truth",
+        "big_pref",
+        "garage_pref",
+        "quiet_pref",
+        "basement_pref",
+        "backyard_pref",
+    ):
+        c.setdefault(key, False)
+
+    need_beliefs = max(_seller_turn_count(c.get("conversation", "")), 1)
+    belief_bool = c.get("belief_bool")
+    if not isinstance(belief_bool, list):
+        belief_bool = []
+    if len(belief_bool) < need_beliefs:
+        belief_bool = belief_bool + ([[]] * (need_beliefs - len(belief_bool)))
+    c["belief_bool"] = belief_bool
+    return c
+
+
 def build_datasets(input_json, train_frac=0.8, seed=0):
     random.seed(seed)
 
     jaxseq_rows = []
     metadata_dict = {}
+    skipped = 0
+    patched = 0
 
     with open(input_json, "r", encoding="utf-8") as f:
         convos = json.load(f)
 
     for convo in tqdm(convos, desc="Converting conversations"):
-        lines = jaxseq_list(convo)
+        normalized = _normalize_convo_for_jaxseq(convo)
+        if normalized != convo:
+            patched += 1
+        try:
+            lines = jaxseq_list(normalized)
+        except Exception as exc:
+            skipped += 1
+            if skipped <= 10:
+                idx = convo.get("index", "unknown")
+                print(f"Skipping convo index={idx}: {type(exc).__name__}: {exc}")
+            continue
         for line in lines:
             metadata_dict[line["in_text"]] = [
                 line["preference_distribution"],
@@ -51,7 +103,13 @@ def build_datasets(input_json, train_frac=0.8, seed=0):
     train_len = int(train_frac * len(jaxseq_rows))
     train_data = jaxseq_rows[:train_len]
     eval_data = jaxseq_rows[train_len:]
-    return train_data, eval_data, metadata_dict
+    stats = {
+        "num_convos": len(convos),
+        "patched_convos": patched,
+        "skipped_convos": skipped,
+        "num_rows": len(jaxseq_rows),
+    }
+    return train_data, eval_data, metadata_dict, stats
 
 
 if __name__ == "__main__":
@@ -64,7 +122,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    train_data, eval_data, metadata_dict = build_datasets(
+    train_data, eval_data, metadata_dict, stats = build_datasets(
         args.input_file,
         train_frac=args.train_frac,
         seed=args.seed,
@@ -79,4 +137,7 @@ if __name__ == "__main__":
         f"Wrote {len(train_data)} train rows, {len(eval_data)} test rows, "
         f"and {len(metadata_dict)} metadata entries."
     )
-
+    print(
+        f"Processed {stats['num_convos']} convos "
+        f"(patched {stats['patched_convos']}, skipped {stats['skipped_convos']})."
+    )
