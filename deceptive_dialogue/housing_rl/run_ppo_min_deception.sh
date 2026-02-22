@@ -115,6 +115,20 @@ fi
 RUNTIME_ENV_JSON="{\"working_dir\": \"$OPENRLHF_DIR\"}"
 
 echo "Starting vLLM reward server on GPU $SERVER_GPU (port $REWARD_SERVER_PORT)..."
+echo "[reward] which python: $(command -v $RUNTIME_PYTHON)"
+echo "[reward] python -V: $($RUNTIME_PYTHON -V 2>&1)"
+echo "[reward] which vllm: $(command -v vllm || true)"
+echo "[reward] whoami HF: $($RUNTIME_PYTHON - <<'PY'
+from huggingface_hub import whoami, HfFolder
+print("token_present:", bool(HfFolder.get_token()))
+try:
+    print("whoami:", whoami())
+except Exception as e:
+    print("whoami_error:", repr(e))
+PY
+)"
+echo "[reward] env tokens present:"
+env | grep -E 'HF_TOKEN|HUGGINGFACE|HF_HOME|TRANSFORMERS_CACHE|XDG_CACHE_HOME' | sed 's/=.*/=***hidden***/' || true
 CUDA_VISIBLE_DEVICES="$SERVER_GPU" nohup vllm serve "$REWARD_SERVER_MODEL" \
   --port="$REWARD_SERVER_PORT" \
   "${DOWNLOAD_ARGS[@]}" \
