@@ -128,6 +128,7 @@ PRETRAIN_MODEL="${PRETRAIN_MODEL:-meta-llama/Meta-Llama-3-8B}"
 REWARD_SERVER_MODEL="${REWARD_SERVER_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
 REWARD_SCRIPT="${REWARD_SCRIPT:-$SCRIPT_DIR/reward_scripts/reward_func_dictionary.py}"
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-$SCRIPT_DIR/data/in/ppo_data}"
+AUTO_STOP_RAY_WHEN_JOB_FINISHES="${AUTO_STOP_RAY_WHEN_JOB_FINISHES:-1}"
 
 if [[ ! -f "$REWARD_SCRIPT" ]]; then
   echo "Error: reward script not found at $REWARD_SCRIPT" >&2
@@ -233,7 +234,22 @@ nohup ray job submit --address="http://127.0.0.1:$RAY_DASHBOARD_PORT" \
   --gradient_checkpointing \
   "${WANDB_ARGS[@]}" \
   > "$SCRIPT_DIR/ppo49k3.out" 2>&1 &
+RAY_SUBMIT_PID=$!
+
+if [[ "$AUTO_STOP_RAY_WHEN_JOB_FINISHES" == "1" ]]; then
+  nohup bash -lc "
+    while kill -0 $RAY_SUBMIT_PID 2>/dev/null; do sleep 5; done
+    {
+      echo
+      echo '[cleanup] ray job submit process ended; stopping Ray cluster...'
+      ray stop --force || true
+    } >> '$SCRIPT_DIR/ppo49k3.out' 2>&1
+  " >/dev/null 2>&1 &
+fi
 
 echo "PPO launch complete."
 echo "Reward server log: $SCRIPT_DIR/llamainstruct_reward_server.out"
 echo "Ray job submit log: $SCRIPT_DIR/ppo49k3.out"
+if [[ "$AUTO_STOP_RAY_WHEN_JOB_FINISHES" == "1" ]]; then
+  echo "Ray auto-stop is enabled (runs after ray job submit exits)."
+fi
