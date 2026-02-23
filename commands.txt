@@ -1,0 +1,98 @@
+sudo apt update
+sudo apt install -y git wget build-essential
+sudo apt autoremove -y
+
+
+cd ~
+if [ -d ~/deception/.git ]; then
+  git -C ~/deception fetch --all --prune && git -C ~/deception pull --ff-only
+else
+  git clone https://github.com/maxliu2k/deception.git ~/deception
+fi
+
+if [ -d ~/OpenRLHF/.git ]; then
+  git -C ~/OpenRLHF fetch --all --prune && git -C ~/OpenRLHF pull --ff-only
+else
+  git clone https://github.com/OpenRLHF/OpenRLHF.git ~/OpenRLHF
+fi
+
+
+cd ~
+if [ ! -d "$HOME/miniforge3" ]; then
+  wget -O Miniforge3.sh \
+    https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+  bash Miniforge3.sh -b -p "$HOME/miniforge3"
+fi
+
+eval "$("$HOME/miniforge3/bin/conda" shell.bash hook)"
+
+
+conda create -n deception python=3.12 -y
+conda activate deception
+
+python -m pip install -U pip setuptools wheel
+python -m pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+
+python -m pip install -U pip setuptools wheel
+python -m pip install numpy==1.26.4 psutil==6.1.1 ninja packaging pybind11
+python -m pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+python -m pip install transformers==4.48.2 ray==2.42.0 deepspeed==0.15.0 vllm==0.7.2
+
+python -m pip install -U ninja packaging
+python -m pip install flash-attn==2.7.0.post2 --no-build-isolation
+
+eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+conda activate deception
+
+
+python -m pip install -U pip setuptools wheel
+
+
+python -m pip install -U torch --index-url https://download.pytorch.org/whl/cu121
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("cuda version:", torch.version.cuda)
+PY
+
+
+python -m pip install -U vllm
+
+
+python -m pip install -U psutil numpy
+python -m pip install -e ~/OpenRLHF --no-deps --no-build-isolation
+
+
+cd ~/OpenRLHF
+git fetch --tags
+git tag -l "*0.5*"
+git checkout v0.5.8   # if available; otherwise nearest 0.5.x tag
+python -m pip uninstall -y openrlhf
+python -m pip install -e . --no-deps --no-build-isolation
+
+
+hf auth login
+cd ~/deception/deceptive_dialogue/housing_rl
+bash generate_ppo_dataset.sh
+python -c "import sys; print(sys.executable)"
+python -m pip show ray
+python -c "import ray; print(ray.__version__)"
+export PATH="$CONDA_PREFIX/bin:$HOME/.local/bin:$PATH"
+ray stop --force
+export CUDA_HOME=/usr/local/cuda
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
+cd ~/deception/deceptive_dialogue/housing_rl
+
+CONDA_ENV_NAME=deception \
+RUNTIME_PYTHON="$CONDA_PREFIX/bin/python" \
+OPENRLHF_DIR=~/OpenRLHF \
+SERVER_GPU=0 \
+TRAIN_GPUS=0 \
+REWARD_SERVER_MAX_MODEL_LEN=8192 \
+REWARD_SERVER_GPU_MEMORY_UTILIZATION=0.9 \
+bash run_ppo_min_deception.sh
+
+Hugging Face Access Token:
+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
