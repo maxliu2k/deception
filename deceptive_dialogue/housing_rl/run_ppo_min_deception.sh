@@ -227,8 +227,8 @@ nohup ray job submit --address="http://127.0.0.1:$RAY_DASHBOARD_PORT" \
   --prompt_data "json@$PROMPT_DATA_DIR" \
   --input_key in_text \
   --normalize_reward \
-  --adam_offload \
-  --flash_attn \
+#  --adam_offload \
+#  --flash_attn \
   --gradient_checkpointing \
   "${WANDB_ARGS[@]}" \
   > "$SCRIPT_DIR/ppo49k3.out" 2>&1 &
