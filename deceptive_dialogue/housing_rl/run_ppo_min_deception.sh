@@ -210,11 +210,11 @@ nohup ray job submit --address="http://127.0.0.1:$RAY_DASHBOARD_PORT" \
   --pretrain "$PRETRAIN_MODEL" \
   --remote_rm_url "$REWARD_SCRIPT" \
   --save_path "$SAVE_PATH" \
-  --micro_train_batch_size 8 \
-  --train_batch_size 128 \
+  --micro_train_batch_size 4 \
+  --train_batch_size 8 \
   --micro_rollout_batch_size 16 \
-  --rollout_batch_size 1024 \
-  --max_samples 100000 \
+  --rollout_batch_size 256 \
+  --max_samples 10000 \
   --max_epochs 1 \
   --prompt_max_len 1024 \
   --generate_max_len 1024 \
