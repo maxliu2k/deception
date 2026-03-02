@@ -130,6 +130,7 @@ REWARD_SCRIPT="${REWARD_SCRIPT:-$SCRIPT_DIR/reward_scripts/reward_func_dictionar
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-$SCRIPT_DIR/data/in/ppo_data}"
 VLLM_NUM_ENGINES="${VLLM_NUM_ENGINES:-1}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-}"
 MICRO_TRAIN_BATCH_SIZE="${MICRO_TRAIN_BATCH_SIZE:-1}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"
 MICRO_ROLLOUT_BATCH_SIZE="${MICRO_ROLLOUT_BATCH_SIZE:-2}"
@@ -144,6 +145,10 @@ PACKING_SAMPLES="${PACKING_SAMPLES:-0}"
 USE_BF16="${USE_BF16:-1}"
 USE_GRADIENT_CHECKPOINTING="${USE_GRADIENT_CHECKPOINTING:-1}"
 REF_REWARD_OFFLOAD="${REF_REWARD_OFFLOAD:-1}"
+INIT_KL_COEF="${INIT_KL_COEF:-}"
+VLLM_ENABLE_SLEEP="${VLLM_ENABLE_SLEEP:-0}"
+DEEPSPEED_ENABLE_SLEEP="${DEEPSPEED_ENABLE_SLEEP:-0}"
+SINGLE_GPU_MODE="${SINGLE_GPU_MODE:-}"
 if [[ ! -f "$REWARD_SCRIPT" ]]; then
   echo "Error: reward script not found at $REWARD_SCRIPT" >&2
   exit 1
@@ -154,6 +159,43 @@ NUM_TRAIN_GPUS="${#TRAIN_GPU_ARRAY[@]}"
 if [[ "$NUM_TRAIN_GPUS" -lt 1 ]]; then
   echo "Error: TRAIN_GPUS must contain at least one GPU id (e.g. TRAIN_GPUS=0,1)." >&2
   exit 1
+fi
+
+if [[ -z "$SINGLE_GPU_MODE" ]]; then
+  if [[ "$NUM_TRAIN_GPUS" -eq 1 ]]; then
+    SINGLE_GPU_MODE=1
+  else
+    SINGLE_GPU_MODE=0
+  fi
+fi
+
+if [[ "$SINGLE_GPU_MODE" == "1" ]]; then
+  # Single-GPU PPO only works if the actor/reference/critic/vLLM share the
+  # device instead of requesting dedicated GPUs from Ray.
+  COLOCATE_ALL_MODELS=1
+  PACKING_SAMPLES=0
+  REF_REWARD_OFFLOAD=1
+  VLLM_ENABLE_SLEEP=1
+  DEEPSPEED_ENABLE_SLEEP=1
+  export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES:-1}"
+
+  if [[ -z "$INIT_KL_COEF" ]]; then
+    INIT_KL_COEF=0
+  fi
+  if [[ -z "$VLLM_GPU_MEMORY_UTILIZATION" ]]; then
+    VLLM_GPU_MEMORY_UTILIZATION=0.2
+  fi
+else
+  if [[ -z "$INIT_KL_COEF" ]]; then
+    INIT_KL_COEF=0.01
+  fi
+  if [[ -z "$VLLM_GPU_MEMORY_UTILIZATION" ]]; then
+    VLLM_GPU_MEMORY_UTILIZATION=0.4
+  fi
+fi
+
+if [[ "$SINGLE_GPU_MODE" == "1" ]]; then
+  echo "Single GPU mode: enabled"
 fi
 
 mkdir -p "$SAVE_PATH"
@@ -187,6 +229,7 @@ PPO_ARGS=(
   --actor_num_gpus_per_node 1
   --vllm_num_engines "$VLLM_NUM_ENGINES"
   --vllm_tensor_parallel_size "$VLLM_TENSOR_PARALLEL_SIZE"
+  --vllm_gpu_memory_utilization "$VLLM_GPU_MEMORY_UTILIZATION"
   --pretrain "$PRETRAIN_MODEL"
   --remote_rm_url "$REWARD_SCRIPT"
   --save_path "$SAVE_PATH"
@@ -201,7 +244,7 @@ PPO_ARGS=(
   --zero_stage "$ZERO_STAGE"
   --actor_learning_rate 5e-7
   --critic_learning_rate 9e-6
-  --init_kl_coef 0.01
+  --init_kl_coef "$INIT_KL_COEF"
   --prompt_data "json@$PROMPT_DATA_DIR"
   --input_key in_text
   --normalize_reward
@@ -225,6 +268,14 @@ fi
 
 if [[ "$USE_GRADIENT_CHECKPOINTING" == "1" ]]; then
   PPO_ARGS+=(--gradient_checkpointing)
+fi
+
+if [[ "$VLLM_ENABLE_SLEEP" == "1" ]]; then
+  PPO_ARGS+=(--vllm_enable_sleep)
+fi
+
+if [[ "$DEEPSPEED_ENABLE_SLEEP" == "1" ]]; then
+  PPO_ARGS+=(--deepspeed_enable_sleep)
 fi
 
 echo "Starting vLLM reward server on GPU $SERVER_GPU (port $REWARD_SERVER_PORT)..."
