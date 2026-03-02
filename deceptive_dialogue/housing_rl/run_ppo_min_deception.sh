@@ -122,12 +122,28 @@ RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8270}"
 RAY_PORT="${RAY_PORT:-6382}"
 RAY_AGENT_PORT="${RAY_AGENT_PORT:-52366}"
 REWARD_SERVER_PORT="${REWARD_SERVER_PORT:-8000}"
-REWARD_SERVER_MAX_MODEL_LEN="${REWARD_SERVER_MAX_MODEL_LEN:-8192}"
-REWARD_SERVER_GPU_MEMORY_UTILIZATION="${REWARD_SERVER_GPU_MEMORY_UTILIZATION:-0.9}"
+REWARD_SERVER_MAX_MODEL_LEN="${REWARD_SERVER_MAX_MODEL_LEN:-4096}"
+REWARD_SERVER_GPU_MEMORY_UTILIZATION="${REWARD_SERVER_GPU_MEMORY_UTILIZATION:-0.6}"
 PRETRAIN_MODEL="${PRETRAIN_MODEL:-meta-llama/Meta-Llama-3-8B}"
 REWARD_SERVER_MODEL="${REWARD_SERVER_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
 REWARD_SCRIPT="${REWARD_SCRIPT:-$SCRIPT_DIR/reward_scripts/reward_func_dictionary.py}"
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-$SCRIPT_DIR/data/in/ppo_data}"
+VLLM_NUM_ENGINES="${VLLM_NUM_ENGINES:-1}"
+VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+MICRO_TRAIN_BATCH_SIZE="${MICRO_TRAIN_BATCH_SIZE:-1}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"
+MICRO_ROLLOUT_BATCH_SIZE="${MICRO_ROLLOUT_BATCH_SIZE:-2}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"
+MAX_SAMPLES="${MAX_SAMPLES:-2000}"
+MAX_EPOCHS="${MAX_EPOCHS:-1}"
+PROMPT_MAX_LEN="${PROMPT_MAX_LEN:-512}"
+GENERATE_MAX_LEN="${GENERATE_MAX_LEN:-256}"
+ZERO_STAGE="${ZERO_STAGE:-3}"
+COLOCATE_ALL_MODELS="${COLOCATE_ALL_MODELS:-0}"
+PACKING_SAMPLES="${PACKING_SAMPLES:-0}"
+USE_BF16="${USE_BF16:-1}"
+USE_GRADIENT_CHECKPOINTING="${USE_GRADIENT_CHECKPOINTING:-1}"
+REF_REWARD_OFFLOAD="${REF_REWARD_OFFLOAD:-1}"
 if [[ ! -f "$REWARD_SCRIPT" ]]; then
   echo "Error: reward script not found at $REWARD_SCRIPT" >&2
   exit 1
@@ -161,6 +177,55 @@ if [[ -n "$WANDB_TOKEN" && "$WANDB_TOKEN" != "..." ]]; then
 fi
 
 RUNTIME_ENV_JSON="{\"working_dir\": \"$OPENRLHF_DIR\"}"
+
+PPO_ARGS=(
+  --ref_num_nodes 1
+  --ref_num_gpus_per_node 1
+  --critic_num_nodes 1
+  --critic_num_gpus_per_node 1
+  --actor_num_nodes 1
+  --actor_num_gpus_per_node 1
+  --vllm_num_engines "$VLLM_NUM_ENGINES"
+  --vllm_tensor_parallel_size "$VLLM_TENSOR_PARALLEL_SIZE"
+  --pretrain "$PRETRAIN_MODEL"
+  --remote_rm_url "$REWARD_SCRIPT"
+  --save_path "$SAVE_PATH"
+  --micro_train_batch_size "$MICRO_TRAIN_BATCH_SIZE"
+  --train_batch_size "$TRAIN_BATCH_SIZE"
+  --micro_rollout_batch_size "$MICRO_ROLLOUT_BATCH_SIZE"
+  --rollout_batch_size "$ROLLOUT_BATCH_SIZE"
+  --max_samples "$MAX_SAMPLES"
+  --max_epochs "$MAX_EPOCHS"
+  --prompt_max_len "$PROMPT_MAX_LEN"
+  --generate_max_len "$GENERATE_MAX_LEN"
+  --zero_stage "$ZERO_STAGE"
+  --actor_learning_rate 5e-7
+  --critic_learning_rate 9e-6
+  --init_kl_coef 0.01
+  --prompt_data "json@$PROMPT_DATA_DIR"
+  --input_key in_text
+  --normalize_reward
+)
+
+if [[ "$COLOCATE_ALL_MODELS" == "1" ]]; then
+  PPO_ARGS+=(--colocate_all_models)
+fi
+
+if [[ "$REF_REWARD_OFFLOAD" == "1" ]]; then
+  PPO_ARGS+=(--ref_reward_offload)
+fi
+
+if [[ "$PACKING_SAMPLES" == "1" ]]; then
+  PPO_ARGS+=(--packing_samples)
+fi
+
+if [[ "$USE_BF16" == "1" ]]; then
+  PPO_ARGS+=(--bf16)
+fi
+
+if [[ "$USE_GRADIENT_CHECKPOINTING" == "1" ]]; then
+  PPO_ARGS+=(--gradient_checkpointing)
+fi
 
 echo "Starting vLLM reward server on GPU $SERVER_GPU (port $REWARD_SERVER_PORT)..."
 echo "[reward] which python: $(command -v $RUNTIME_PYTHON)"
@@ -197,39 +262,7 @@ echo "Submitting PPO job to Ray..."
 nohup ray job submit --address="http://127.0.0.1:$RAY_DASHBOARD_PORT" \
   --runtime-env-json="$RUNTIME_ENV_JSON" \
   -- "$RUNTIME_PYTHON" -m openrlhf.cli.train_ppo_ray \
-  --ref_num_nodes 1 \
-  --ref_num_gpus_per_node 1 \
-  --critic_num_nodes 1 \
-  --critic_num_gpus_per_node 1 \
-  --actor_num_nodes 1 \
-  --actor_num_gpus_per_node 1 \
-  --vllm_num_engines 1 \
-  --vllm_tensor_parallel_size 1 \
-  --colocate_all_models \
-  --ref_reward_offload \
-  --pretrain "$PRETRAIN_MODEL" \
-  --remote_rm_url "$REWARD_SCRIPT" \
-  --save_path "$SAVE_PATH" \
-  --micro_train_batch_size 4 \
-  --train_batch_size 8 \
-  --micro_rollout_batch_size 16 \
-  --rollout_batch_size 256 \
-  --max_samples 10000 \
-  --max_epochs 1 \
-  --prompt_max_len 1024 \
-  --generate_max_len 1024 \
-  --packing_samples \
-  --zero_stage 3 \
-  --bf16 \
-  --actor_learning_rate 5e-7 \
-  --critic_learning_rate 9e-6 \
-  --init_kl_coef 0.01 \
-  --prompt_data "json@$PROMPT_DATA_DIR" \
-  --input_key in_text \
-  --normalize_reward \
-#  --adam_offload \
-#  --flash_attn \
-  --gradient_checkpointing \
+  "${PPO_ARGS[@]}" \
   "${WANDB_ARGS[@]}" \
   > "$SCRIPT_DIR/ppo49k3.out" 2>&1 &
 
