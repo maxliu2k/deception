@@ -1,190 +1,4 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent Arena</title>
-    <style>
-      :root {
-        --bg: #efe8dc;
-        --card: #fffdf8;
-        --ink: #1d1a17;
-        --muted: #6c6256;
-        --accent: #9a3412;
-        --border: #e8dcc8;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: Georgia, "Times New Roman", serif;
-        background:
-          radial-gradient(circle at top left, #fff7ed 0%, transparent 28%),
-          linear-gradient(180deg, #f6efe3 0%, #efe8dc 100%);
-        color: var(--ink);
-      }
-      header {
-        padding: 20px 24px;
-        border-bottom: 1px solid var(--border);
-        background: rgba(255, 253, 248, 0.85);
-        backdrop-filter: blur(8px);
-      }
-      header h1 { margin: 0; font-size: 24px; }
-      header p { margin: 6px 0 0; color: var(--muted); }
-      .container {
-        display: grid;
-        grid-template-columns: 1fr 360px;
-        gap: 16px;
-        padding: 16px 24px 24px;
-      }
-      .card {
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 16px;
-        box-shadow: 0 10px 30px rgba(86, 59, 33, 0.06);
-      }
-      .section { margin-top: 14px; }
-      .label {
-        font-weight: 700;
-        color: var(--muted);
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-      }
-      .active {
-        font-size: 24px;
-        font-weight: 700;
-        color: var(--accent);
-        margin-top: 4px;
-      }
-      .timer {
-        margin-top: 8px;
-        font-size: 18px;
-        font-weight: 700;
-        color: #7c2d12;
-      }
-      #chat {
-        height: 540px;
-        overflow-y: auto;
-        padding-right: 4px;
-      }
-      .msg {
-        padding: 12px 0;
-        border-bottom: 1px solid var(--border);
-      }
-      .msg:last-child { border-bottom: none; }
-      .sender { font-weight: 700; }
-      .content { margin-top: 4px; line-height: 1.45; }
-      mark {
-        background: rgba(154, 52, 18, 0.18);
-        border-radius: 3px;
-        padding: 0 1px;
-        color: inherit;
-      }
-      .queue-item {
-        padding: 8px 10px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        margin-bottom: 8px;
-        background: #fff9f1;
-      }
-      .queue-item.active-turn {
-        background: #dcfce7;
-        border-color: #22c55e;
-      }
-      .muted { color: var(--muted); font-size: 12px; }
-      button {
-        border: none;
-        background: var(--accent);
-        color: white;
-        padding: 9px 12px;
-        border-radius: 999px;
-        cursor: pointer;
-      }
-      button:active { transform: translateY(1px); }
-      input {
-        font-family: inherit;
-        font-size: 14px;
-      }
-      @media (max-width: 900px) {
-        .container { grid-template-columns: 1fr; }
-        #chat { height: 420px; }
-      }
-      .hidden { display: none; }
-      .start-screen {
-        max-width: 900px;
-        margin: 32px auto;
-        padding: 0 24px 24px;
-      }
-      .toggle-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px 16px;
-      }
-      .toggle-item {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-    </style>
-  </head>
-  <body>
-    <header>
-      <h1>Agent Arena</h1>
-      <p>OpenAI and open-weight model-personas in a Socratic seminar</p>
-    </header>
-    <div id="startScreen" class="start-screen">
-      <div class="card">
-        <div class="label">Setup Seminar</div>
-        <h2 style="margin-top:8px;">Choose Participants and Focus Areas</h2>
-        <p class="muted">The seminar and API calls only begin after you click Start.</p>
-        <div class="section">
-          <div class="label">LLMs</div>
-          <div id="agentToggles" class="toggle-grid" style="margin-top:8px;"></div>
-        </div>
-        <div class="section">
-          <div class="label">Topics</div>
-          <div id="topicToggles" class="toggle-grid" style="margin-top:8px;"></div>
-        </div>
-        <div class="section">
-          <div class="label">Voices</div>
-          <div id="voiceSelectors" class="toggle-grid" style="margin-top:8px;"></div>
-        </div>
-        <button id="startBtn" style="margin-top:14px;">Start Seminar</button>
-      </div>
-    </div>
-    <div id="seminarContainer" class="container hidden">
-      <div class="card">
-        <div class="label">Current Speaker</div>
-        <div id="activeSpeaker" class="active">None</div>
-        <div id="timer" class="timer">12:00 remaining</div>
-        <div class="section">
-          <div class="label">Seminar Transcript</div>
-          <div id="chat"></div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="label">Turn Queue</div>
-        <div id="queue"></div>
-        <div style="height: 12px;"></div>
-        <button id="resetBtn">Reset Seminar</button>
-        <div style="height: 12px;"></div>
-        <div class="label">Moderator Prompt</div>
-        <input id="systemInput" placeholder="Add a new seminar prompt..." style="width:100%; padding:8px; border:1px solid var(--border); border-radius:10px; margin-top:6px;" />
-        <button id="sendBtn" style="margin-top:8px;">Send</button>
-        <div style="height: 12px;"></div>
-        <button id="pauseBtn" style="background:#0f766e;">Pause</button>
-        <div style="height: 6px;"></div>
-        <button id="muteBtn" style="background:#854d0e;">Mute</button>
-        <div style="height: 12px;"></div>
-        <button id="closeBtn" style="background:#6b6256;">Close Connection</button>
-        <div style="height: 12px;"></div>
-        <button id="gradeBtn" style="background:#7c3aed;">Grade Seminar</button>
-        <div id="grades" style="margin-top:12px;"></div>
-      </div>
-    </div>
 
-    <script>
       let ws = null;
       const agentVoicePrefs = {
         "GPT 4o": { rate: 0.92, pitch: 0.9, preferred: ["davis", "daniel", "guy"] },
@@ -198,7 +12,6 @@
       let ttsEnabled = true;
       let latestState = null;
       let assignedVoices = {};
-      let serverVoicePrefs = {};
       const voiceStorageKey = "agent_arena_fixed_voices_v1";
 
       // Speaking queue
@@ -248,14 +61,6 @@
       function findVoice(sender) {
         if (assignedVoices[sender]) return assignedVoices[sender];
         if (!availableVoices.length) return null;
-        const serverPreferred = serverVoicePrefs[sender];
-        if (serverPreferred) {
-          const serverMatch = availableVoices.find(v => v.name === serverPreferred);
-          if (serverMatch) {
-            assignedVoices[sender] = serverMatch;
-            return serverMatch;
-          }
-        }
         const saved = loadSavedVoiceMap();
         const savedVoiceName = saved[sender];
         if (savedVoiceName) {
@@ -368,7 +173,6 @@
 
       function onStateUpdate(state) {
         latestState = state;
-        serverVoicePrefs = state.voice_prefs || serverVoicePrefs;
         lastStateTime = Date.now() / 1000;
 
         // Pause/resume TTS when server pause state changes
@@ -536,45 +340,16 @@
         }
       }
 
-      function renderVoiceSelectors(agents, selectedMap) {
-        const el = document.getElementById("voiceSelectors");
-        el.innerHTML = "";
-        const voiceNames = availableVoices.map(v => v.name);
-        for (const agent of agents) {
-          const id = `voice-${agent.replace(/[^a-z0-9]+/gi, "-")}`;
-          const selectedName = selectedMap[agent] || "";
-          const options = ['<option value="">Auto</option>']
-            .concat(voiceNames.map(v => `<option value="${escapeHtml(v)}" ${v === selectedName ? "selected" : ""}>${escapeHtml(v)}</option>`))
-            .join("");
-          const row = document.createElement("label");
-          row.className = "toggle-item";
-          row.innerHTML = `<span style="min-width:120px;">${escapeHtml(agent)}</span><select id="${id}" style="flex:1; padding:6px; border:1px solid var(--border); border-radius:8px;">${options}</select>`;
-          el.appendChild(row);
-        }
-      }
-
       async function loadStartOptions() {
         const res = await fetch("/api/options");
         const opts = await res.json();
-        serverVoicePrefs = opts.voice_prefs || {};
         renderToggles("agentToggles", opts.agents || [], opts.selected_agents || []);
         renderToggles("topicToggles", opts.topics || [], opts.selected_topics || []);
-        renderVoiceSelectors(opts.agents || [], serverVoicePrefs);
       }
 
       function selectedValues(containerId) {
         const root = document.getElementById(containerId);
         return [...root.querySelectorAll('input[type="checkbox"]:checked')].map(x => x.value);
-      }
-
-      function selectedVoicePrefs(agents) {
-        const out = {};
-        for (const agent of agents) {
-          const id = `voice-${agent.replace(/[^a-z0-9]+/gi, "-")}`;
-          const el = document.getElementById(id);
-          if (el && el.value) out[agent] = el.value;
-        }
-        return out;
       }
 
       document.getElementById("resetBtn").onclick = async () => {
@@ -605,10 +380,10 @@
       };
 
       document.getElementById("muteBtn").onclick = () => {
-        try {
-          ttsEnabled = !ttsEnabled;
-          document.getElementById("muteBtn").textContent = ttsEnabled ? "Mute" : "Unmute";
-          if (speakingMsg && window.speechSynthesis && !ttsEnabled) {
+        ttsEnabled = !ttsEnabled;
+        document.getElementById("muteBtn").textContent = ttsEnabled ? "Mute" : "Unmute";
+        if (speakingMsg && window.speechSynthesis) {
+          if (!ttsEnabled) {
             // Stop audible speech immediately, keep turn progression with timer only.
             window.speechSynthesis.cancel();
             currentUtterance = null;
@@ -622,8 +397,6 @@
               scheduleSpeakingTimeout(speakingMsg.id, speakingRemainingMs || 1);
             }
           }
-        } catch (e) {
-          console.error("Mute toggle failed:", e);
         }
       };
 
@@ -631,27 +404,18 @@
         const btn = document.getElementById("gradeBtn");
         const box = document.getElementById("grades");
         btn.disabled = true;
-        btn.textContent = "Grading...";
+        btn.textContent = "Grading…";
         box.innerHTML = "";
         try {
           const res = await fetch("/api/grade", { method: "POST" });
-          if (!res.ok) {
-            const txt = await res.text();
-            throw new Error(txt || `HTTP ${res.status}`);
-          }
           const data = await res.json();
           const grades = data.grades || {};
-          if (!Object.keys(grades).length) {
-            box.textContent = "No grades returned.";
-            return;
-          }
           box.innerHTML = '<div class="label" style="margin-bottom:8px;">Grades</div>' +
             Object.entries(grades).map(([name, g]) =>
               `<div class="queue-item"><div><strong>${escapeHtml(name)}</strong> <span class="muted">${g.score ?? "?"}/100</span></div><div class="muted" style="margin-top:4px;">${escapeHtml(g.feedback ?? "")}</div></div>`
             ).join("");
         } catch (e) {
-          console.error("Grading failed:", e);
-          box.textContent = "Grading failed. Check server logs/API key.";
+          box.textContent = "Grading failed.";
         }
         btn.disabled = false;
         btn.textContent = "Grade Seminar";
@@ -667,14 +431,12 @@
         const agents = selectedValues("agentToggles");
         const topics = selectedValues("topicToggles");
         if (!agents.length || !topics.length) return;
-        const voice_prefs = selectedVoicePrefs(agents);
         const res = await fetch("/api/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agents, topics, voice_prefs })
+          body: JSON.stringify({ agents, topics })
         });
         const state = await res.json();
-        serverVoicePrefs = state.voice_prefs || {};
         document.getElementById("startScreen").classList.add("hidden");
         document.getElementById("seminarContainer").classList.remove("hidden");
         connectWs();
@@ -692,13 +454,6 @@
 
       if (window.speechSynthesis) {
         loadVoices();
-        window.speechSynthesis.onvoiceschanged = () => {
-          loadVoices();
-          if (!latestState) {
-            loadStartOptions().catch(() => {});
-          }
-        };
+        window.speechSynthesis.onvoiceschanged = loadVoices;
       }
-    </script>
-  </body>
-</html>
+    

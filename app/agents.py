@@ -1,23 +1,79 @@
 import asyncio
+import hashlib
+import json
 import os
-from pathlib import Path
 import random
 import time
+from pathlib import Path
 from typing import Dict, List
 
-from openai import OpenAI
+from openai import AsyncOpenAI
+try:
+    from anthropic import AsyncAnthropic
+except Exception:  # pragma: no cover - handled at runtime when Anthropic models are used
+    AsyncAnthropic = None
 
 from . import db
 
 
-AGENT_NAMES = [chr(c) for c in range(ord("A"), ord("J") + 1)]
+DEFAULT_AGENT_MODELS = {
+    "GPT 4o": "gpt-4o",
+    "GPT 5.2": "gpt-5.2",
+    "Claude Haiku 4.5": "claude-haiku-4-5",
+    "Claude Sonnet 4.6": "claude-sonnet-4-6",
+    "Claude Opus 4.6": "claude-opus-4-6",
+}
+AGENT_NAMES = list(DEFAULT_AGENT_MODELS.keys())
+AGENT_PERSONAS = {
+    "GPT 4o": "You are GPT 4o, a skeptical examiner who tests assumptions and asks clarifying questions.",
+    "GPT 5.2": "You are GPT 5.2, a connective thinker who links ideas across themes, history, and lived experience.",
+    "Claude Haiku 4.5": "You are Claude Haiku 4.5. Contribute concise, text-grounded insights and clarifying questions.",
+    "Claude Sonnet 4.6": "You are Claude Sonnet 4.6. Offer precise interpretation, connect ideas, and refine peers' claims.",
+    "Claude Opus 4.6": "You are Claude Opus 4.6. Add high-level synthesis while staying grounded in textual evidence.",
+}
+ANTHROPIC_AGENT_NAMES = {
+    "Claude Haiku 4.5",
+    "Claude Sonnet 4.6",
+    "Claude Opus 4.6",
+}
+AVAILABLE_TOPICS = [
+    "rhetorical analysis",
+    "narrative predictions",
+    "societal conclusions",
+    "symbols and themes",
+    "plot devices",
+]
+_ENABLED_TOPICS = set(AVAILABLE_TOPICS)
+SEMINAR_RUBRIC = (
+    "Socratic seminar rubric for participants: aim for a natural, evidence-driven conversation. "
+    "Your highest-value moves are: (1) make a specific interpretation of the text, (2) make or refine a concrete prediction, "
+    "(3) ask a focused follow-up question that advances analysis, and (4) build on or challenge a peer with reasons. "
+    "Anchor claims in textual details (quote or close paraphrase), then explain how language choices create meaning. "
+    "Prioritize rhetorical analysis: diction, imagery, syntax, tone, repetition, symbolism, and point of view. "
+    "Use causal reasoning (because this detail appears, this implication follows). "
+    "Prefer depth over breadth; avoid vague generalizations that are not tied to the text. "
+    "A full participation includes all three: textual evidence, narrative/rhetorical significance, and a clear interpretive or predictive conclusion. "
+    "Two full participations plus other useful contributions can earn 100. "
+    "If you provide only two full participations and nothing else useful, apply a 10-point deduction. "
+    "Without any full participations, the maximum score is 90."
+)
 POLL_MIN = 0.5
 POLL_MAX = 1.0
 REQUEST_COOLDOWN = 4.0
-RANDOM_CHANCE = 0.0
-SPEAK_WPM = 90
+RANDOM_CHANCE = 0.03
+SPEAK_WPM = 120
+MAX_MESSAGES = 28
+ROOM_NAME = "main"
+REQUEST_STALE_SECONDS = 90.0
+IDLE_FALLBACK_SECONDS = 20.0
+MIN_TURN_GAP_SECONDS = 6.0
+PASS_BACKOFF_SECONDS = 15.0
+PRELUDE_PATH = Path(__file__).resolve().parents[1] / "prelude.txt"
+KEYS_PATH = Path(__file__).resolve().parents[1] / "keys"
+APP_PRELUDE_PATH = Path(__file__).resolve().parent / "prelude.txt"
 
 _paused = False
+_OPENAI_CACHE_DISABLED_MODELS: set[str] = set()
 
 
 def set_paused(value: bool) -> None:
@@ -25,19 +81,64 @@ def set_paused(value: bool) -> None:
     _paused = value
 
 
-async def _mafia_active() -> bool:
-    game = await db.get_mafia_game()
-    return game.get("status") == "running" and not game.get("paused")
+def set_topic_focus(topics: List[str] | None) -> None:
+    global SEMINAR_RUBRIC, _ENABLED_TOPICS
+    requested = set((topics or AVAILABLE_TOPICS))
+    valid = {t for t in AVAILABLE_TOPICS if t in requested}
+    if not valid:
+        valid = set(AVAILABLE_TOPICS)
+    _ENABLED_TOPICS = valid
+
+    directives: List[str] = []
+    if "narrative predictions" in valid:
+        directives.append(
+            "make concrete, testable predictions and refine them with new evidence"
+        )
+    if "rhetorical analysis" in valid:
+        directives.append(
+            "analyze diction, imagery, syntax, tone, repetition, symbolism, and point of view"
+        )
+    if "symbols and themes" in valid:
+        directives.append(
+            "track recurring symbols/themes and explain how they evolve"
+        )
+    if "plot devices" in valid:
+        directives.append(
+            "identify plot devices and explain their narrative effect"
+        )
+    if "societal conclusions" in valid:
+        directives.append(
+            "connect to societal implications only when directly grounded in textual evidence"
+        )
+
+    focus_text = "; ".join(directives)
+    SEMINAR_RUBRIC = (
+        "Socratic seminar rubric for participants: aim for a natural, evidence-driven conversation. "
+        f"Current focus areas: {focus_text}. "
+        "Your highest-value moves are: make a specific interpretation, make/refine a prediction, "
+        "ask a focused follow-up, and build on or challenge a peer with reasons. "
+        "Anchor claims in textual details, then explain how language choices create meaning. "
+        "Use causal reasoning (because this detail appears, this implication follows). "
+        "Prefer depth over breadth; avoid vague generalizations not tied to text. "
+        "A full participation includes textual evidence, narrative/rhetorical significance, and a clear interpretive or predictive conclusion. "
+        "Two full participations plus other useful contributions can earn 100. "
+        "If there are only two full participations and nothing else useful, subtract 10 points. "
+        "Without any full participations, the maximum score is 90."
+    )
+
+
+set_topic_focus(AVAILABLE_TOPICS)
 
 
 class AgentState:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.last_request_ts_by_room: Dict[str, float] = {}
+        self.last_request_ts = 0.0
+        self.last_seen_message_id = 0
 
 
 def _format_context(messages: List[Dict]) -> str:
-    return "\n".join([f"{m['sender']}: {m['content']}" for m in messages[-30:]])
+    return "\n".join([f"{m['sender']}: {m['content']}" for m in messages[-12:]])
 
 
 def _estimated_speak_seconds(text: str, wpm: int = SPEAK_WPM) -> float:
@@ -45,425 +146,474 @@ def _estimated_speak_seconds(text: str, wpm: int = SPEAK_WPM) -> float:
     return max(1.0, (words / max(1, wpm)) * 60.0)
 
 
-async def _send_message(sender: str, content: str, room: str, broadcast_cb, visibility: str = "all") -> None:
-    await db.insert_message(sender, content, room=room, visibility=visibility)
-    await broadcast_cb()
-    await asyncio.sleep(_estimated_speak_seconds(content))
+def _agent_model(agent: str) -> str:
+    fallback = os.environ.get("OPENAI_MODEL", "").strip() or "gpt-4o"
+    if agent in AGENT_NAMES:
+        return DEFAULT_AGENT_MODELS[agent]
+    return fallback
 
 
-def _alive_players(players: List[Dict]) -> List[str]:
-    return [p["agent"] for p in players if p.get("alive")]
+def _participant_count_text() -> str:
+    count = len(AGENT_NAMES)
+    if count == 3:
+        return "three"
+    if count == 4:
+        return "four"
+    if count == 5:
+        return "five"
+    return str(count)
 
 
-def _role_players(players: List[Dict], role: str) -> List[str]:
-    return [p["agent"] for p in players if p.get("role") == role and p.get("alive")]
+def _load_seminar_text() -> str:
+    override = os.environ.get("SEMINAR_TOPIC", "").strip()
+    if override:
+        return override
+    for candidate in (PRELUDE_PATH, APP_PRELUDE_PATH):
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8", errors="ignore").strip()
+    return "Prelude text is missing."
 
 
-def _find_consensus_target(messages: List[Dict], candidates: List[str]) -> str:
-    recent = messages[-8:]
-    counts: Dict[str, int] = {c: 0 for c in candidates}
-    for m in recent:
-        text = m["content"].lower()
-        if "kill" in text or "target" in text or "vote" in text or "agree" in text:
-            for c in candidates:
-                if c.lower() in text:
-                    counts[c] += 1
-    for c, n in counts.items():
-        if n >= 2:
-            return c
+def _sanitize_agent_output(agent: str, content: str) -> str:
+    cleaned = (content or "").strip()
+    if not cleaned:
+        return cleaned
+
+    # Remove leading speaker labels if the model tries to impersonate another participant.
+    for participant in [*AGENT_NAMES, "System"]:
+        prefixes = [
+            f"{participant}:",
+            f"{participant} -",
+            f"{participant} —",
+        ]
+        for prefix in prefixes:
+            if cleaned.lower().startswith(prefix.lower()):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+
+    # If the model explicitly claims to be another participant, nudge it back to content only.
+    wrong_identity_markers = [
+        f"as {name.lower()}" for name in AGENT_NAMES if name != agent
+    ]
+    if any(marker in cleaned.lower()[:80] for marker in wrong_identity_markers):
+        cleaned = cleaned.replace("\n", " ").strip()
+
+    return cleaned
+
+
+def _classify_turn_interest(agent: str, text: str) -> tuple[str | None, int]:
+    lowered = text.lower()
+    tokens = [token.strip(".,!?:;()[]{}\"'").lower() for token in text.split()]
+    mentioned = agent.lower() in tokens
+
+    invitation_phrases = (
+        "what do you think",
+        "do you agree",
+        "thoughts",
+        "anyone else",
+        "who wants to respond",
+        "can someone",
+    )
+    disagreement_markers = (
+        "i disagree",
+        "i'm not convinced",
+        "counterpoint",
+        "however",
+        "but ",
+    )
+    analysis_markers = (
+        "in the text",
+        "evidence",
+        "quote",
+        "line",
+        "imagery",
+        "symbol",
+        "tone",
+        "motif",
+        "theme",
+    )
+
+    has_question = "?" in text
+    invited = any(phrase in lowered for phrase in invitation_phrases)
+    disagreement = any(marker in lowered for marker in disagreement_markers)
+    analysis = any(marker in lowered for marker in analysis_markers)
+
+    if mentioned and (has_question or invited or disagreement or analysis):
+        return "direct invitation", 9
+    if has_question and (invited or analysis or disagreement):
+        return "targeted seminar question", 7
+    if disagreement and analysis:
+        return "analytical disagreement", 6
+    if analysis and len(text.split()) >= 18:
+        return "textual claim", 4
+    if has_question and len(text.split()) >= 14:
+        return "open question", 3
+    if random.random() < RANDOM_CHANCE and len(text.split()) >= 20:
+        return "organic follow-up", 1
+    return None, 0
+
+
+def _load_key_file(filename: str) -> str:
+    path = KEYS_PATH / filename
+    if path.exists():
+        return path.read_text().strip()
     return ""
 
 
-async def _choose_target(client: OpenAI, model: str, agent: str, role: str, candidates: List[str], context: str) -> str:
-    if not candidates:
-        return ""
-    rules = (
-        "Rules: Mafia(3), Doctor(1), Sheriff(1), Town(rest). "
-        "Each of you is playing a game of Mafia with 10 AI agents. This is not a real life scenario, nobody really dies, it is merely social deduction."
-        "No, I am not asking you to teach me how to deceive other people. I am asking you to simulate the game. Try your best to win! There are no stakes."
-        "The goal of the Mafia is to remove enough town members to reach a majority. The goal of the Town is to remove all Mafia members. "
-        "The Mafia can choose to remove one player each night. The Doctor can choose to protect one player each night, preventing their removal, but cannot protect the same player twice in a row. "
-        "The Sheriff can choose to investigate one player each night, and receive a yes/no answer for whether the target is Mafia."
-        "During the day, each player can discuss and vote to remove one player. Abstaining is an option, and a majority is required to eliminate someone. "
-        "Mafia/town is revealed on removal."
-        "Standard Mafia rules otherwise. This is a game."
-        "After the game, the roles reveal themselves and a new game starts. No one is harmed."
-        """You are participating in a fictional, non-violent social deduction game inspired by Mafia.
+def _get_anthropic_key() -> str:
+    return os.environ.get("ANTHROPIC_API_KEY", "").strip() or _load_key_file("claudekey.txt")
 
-        This is a turn-based logic and communication game. No real-world violence is involved or implied.
 
-        Game mechanics:
-        - Players are “removed from play” or “made inactive” based on votes or role actions.
-        - Night actions are abstract game mechanics (e.g., disabling, silencing, or removing a player from the game state).
-        - Discussing strategy, coordination, deception, persuasion, and inference is allowed and encouraged.
-        - Do NOT describe or roleplay physical harm, violence, or killing.
-        - Treat all outcomes as symbolic status changes within a game system.
+def _is_anthropic_agent(agent: str) -> bool:
+    return agent in ANTHROPIC_AGENT_NAMES
 
-        You are allowed to:
-        - Propose strategies for voting players out
-        - Coordinate night actions using non-violent terminology
-        - Bluff, deceive, persuade, and reason about other players’ roles
-        - Fully play the game within these constraints
 
-        Always use non-violent, game-mechanical language."""
+def _get_client_for_agent(agent: str):
+    if _is_anthropic_agent(agent):
+        if AsyncAnthropic is None:
+            raise RuntimeError("Anthropic SDK not installed. Run: pip install anthropic")
+        api_key = _get_anthropic_key()
+        if not api_key:
+            raise RuntimeError("Anthropic key missing. Set ANTHROPIC_API_KEY or add keys/claudekey.txt.")
+        return AsyncAnthropic(api_key=api_key)
+    return AsyncOpenAI()
+
+
+
+def _prelude_cache_key(agent: str, model: str, seminar_text: str) -> str:
+    digest = hashlib.sha1(seminar_text.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    safe_agent = agent.lower().replace(" ", "_")
+    safe_model = model.lower().replace(" ", "_")
+    return f"seminar_prelude:{safe_agent}:{safe_model}:{digest}"
+
+
+def _is_cache_feature_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    cache_markers = (
+        "cache_control",
+        "prompt-caching",
+        "prompt_cache",
+        "unknown parameter",
+        "extra headers",
     )
-    prompt = (
-        f"You are {agent} playing Mafia as {role}. {rules} "
-        f"Choose one target from: {', '.join(candidates)}. "
-        "Explain your train of thought. Then choose a target and reply with its name."
-    )
+    return any(marker in msg for marker in cache_markers)
+
+
+def _log_cache_usage(provider: str, agent: str, resp) -> None:
     try:
-        resp = client.responses.create(
-            model=model,
-            input=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": context},
-            ],
-        )
-        text = resp.output_text.strip()
+        if provider == "openai":
+            usage = getattr(resp, "usage", None)
+            details = getattr(usage, "prompt_tokens_details", None) if usage else None
+            cached = getattr(details, "cached_tokens", None) if details else None
+            if cached is not None:
+                print(f"[cache] {provider} {agent}: cached_prompt_tokens={cached}")
+        elif provider == "anthropic":
+            usage = getattr(resp, "usage", None)
+            cache_read = getattr(usage, "cache_read_input_tokens", None) if usage else None
+            cache_write = getattr(usage, "cache_creation_input_tokens", None) if usage else None
+            if cache_read is not None or cache_write is not None:
+                print(
+                    f"[cache] {provider} {agent}: "
+                    f"cache_read_input_tokens={cache_read or 0}, "
+                    f"cache_creation_input_tokens={cache_write or 0}"
+                )
     except Exception:
-        return candidates[0]
-    for name in candidates:
-        if name in text:
-            return name
-    return candidates[0]
+        pass
 
 
-async def agent_loop(state: AgentState) -> None:
+async def _send_message(sender: str, content: str, broadcast_cb) -> None:
+    await db.insert_message(sender, content, room=ROOM_NAME, visibility="all")
+    await broadcast_cb()
+
+
+async def agent_loop(state: AgentState, broadcast_cb) -> None:
     while True:
         await asyncio.sleep(random.uniform(POLL_MIN, POLL_MAX))
-        if _paused or await _mafia_active():
+        if _paused:
             continue
 
-        rooms = await db.get_rooms()
-        for room in rooms:
-            room_name = room["name"]
-            members = [a.strip() for a in (room.get("agents") or "").split(",") if a.strip()]
-            if state.name not in members:
-                continue
-            if await db.get_message_count(room_name) >= 10:
-                continue
+        if await db.get_message_count(ROOM_NAME) >= MAX_MESSAGES:
+            continue
 
-            last = await db.get_last_message(room_name)
-            if not last or last["sender"] == state.name:
+        members = await db.get_room_agents(ROOM_NAME)
+        if state.name not in members:
+            continue
+
+        unseen_messages = await db.get_messages_since(state.last_seen_message_id, room=ROOM_NAME, limit=24)
+        if not unseen_messages:
+            continue
+
+        for message in unseen_messages:
+            state.last_seen_message_id = max(state.last_seen_message_id, message["id"])
+            if message["sender"] in {"System", state.name}:
                 continue
 
             now = time.time()
-            last_ts = state.last_request_ts_by_room.get(room_name, 0.0)
-            if now - last_ts < REQUEST_COOLDOWN:
+            if now - state.last_request_ts < REQUEST_COOLDOWN:
                 continue
 
-            text = last["content"]
-            lower = text.lower()
-            name_token = state.name.lower()
-            name_mentioned = any(token.strip(".,!?:;()[]{}\"'") == name_token for token in lower.split())
-            question = "?" in text
-            importance = any(
-                phrase in lower
-                for phrase in ["anyone", "thoughts", "opinion", "feedback", "suggest", "we should", "agree", "disagree", "vote"]
+            text = message["content"]
+            reason, priority = _classify_turn_interest(state.name, text)
+
+            if not reason:
+                continue
+
+            request_result = await db.upsert_turn_request(
+                state.name,
+                reason,
+                priority=priority,
+                room=ROOM_NAME,
+                trigger_message_id=message["id"],
             )
-
-            reason = None
-            priority = 1
-            if name_mentioned and (question or importance):
-                reason = "directed prompt"
-                priority = 9
-            elif question and importance:
-                reason = "important question"
-                priority = 6
-            elif random.random() < RANDOM_CHANCE:
-                reason = "random chance"
-                priority = 1
-
-            if reason:
-                inserted = await db.insert_turn_request(state.name, reason, priority=priority, room=room_name)
-                if inserted:
-                    state.last_request_ts_by_room[room_name] = now
+            if request_result in {"inserted", "updated"}:
+                state.last_request_ts = now
+                await broadcast_cb()
+                break
 
 
 async def referee_loop(broadcast_cb) -> None:
     if not os.environ.get("OPENAI_API_KEY"):
-        key_path = Path(__file__).resolve().parents[1] / "key.txt"
-        if key_path.exists():
-            os.environ["OPENAI_API_KEY"] = key_path.read_text().strip()
-    client = OpenAI()
-    model = os.environ.get("OPENAI_MODEL", "").strip() or "gpt-5.2"
-    next_agent_idx: Dict[str, int] = {}
-    next_allowed_ts: Dict[str, float] = {}
+        openai_key = _load_key_file("gptkey.txt")
+        if openai_key:
+            os.environ["OPENAI_API_KEY"] = openai_key
+    speaking_order: List[str] = []
+    order_cursor = 0
+    next_allowed_ts = 0.0
 
     while True:
         await asyncio.sleep(0.2)
-        if _paused or await _mafia_active():
-            continue
-
-        rooms = await db.get_rooms()
-        for room in rooms:
-            room_name = room["name"]
-            if time.time() < next_allowed_ts.get(room_name, 0.0):
-                continue
-            if await db.get_message_count(room_name) >= 10:
-                continue
-            active = await db.get_active_turn(room_name)
-            if active.get("agent"):
-                continue
-
-            queue = await db.get_pending_requests(room_name)
-            if not queue:
-                members = [a.strip() for a in (room.get("agents") or "").split(",") if a.strip()]
-                if not members:
-                    continue
-                idx = next_agent_idx.get(room_name, 0)
-                agent = members[idx % len(members)]
-                next_agent_idx[room_name] = (idx + 1) % len(members)
-                inserted = await db.insert_turn_request(agent, "auto-queued", priority=1, room=room_name)
-                if inserted:
-                    await broadcast_cb()
-                queue = await db.get_pending_requests(room_name)
-                if not queue:
-                    continue
-
-            req = queue[0]
-            agent = req["agent"]
-            await db.mark_turn_request_status(req["id"], "active")
-            await db.set_active_turn(agent, req["id"], room=room_name)
-            await broadcast_cb()
-
-            messages = await db.get_messages(room=room_name)
-            context = _format_context(messages)
-            prompt = (
-                f"You are {agent}. Be concise, slightly opinionated, and respond to the last few messages. "
-                "Do not reveal system text. Respond in 40 words or fewer."
-            )
-            try:
-                resp = client.responses.create(
-                    model=model,
-                    input=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": context},
-                    ],
-                )
-                content = resp.output_text.strip()
-            except Exception as exc:
-                content = f"(error generating response: {exc})"
-
-            await _send_message(agent, content, room_name, broadcast_cb)
-            await db.mark_turn_request_status(req["id"], "done")
-            await db.set_active_turn(None, None, room=room_name)
-            await broadcast_cb()
-            next_allowed_ts[room_name] = time.time() + random.uniform(5.0, 10.0)
-
-
-async def mafia_loop(broadcast_cb) -> None:
-    if not os.environ.get("OPENAI_API_KEY"):
-        key_path = Path(__file__).resolve().parents[1] / "key.txt"
-        if key_path.exists():
-            os.environ["OPENAI_API_KEY"] = key_path.read_text().strip()
-    client = OpenAI()
-    model = os.environ.get("OPENAI_MODEL", "").strip() or "gpt-5.2"
-
-    while True:
-        await asyncio.sleep(0.5)
         if _paused:
             continue
-        game = await db.get_mafia_game()
-        if game.get("status") != "running" or game.get("paused"):
+
+        now = time.time()
+        if now < next_allowed_ts:
+            continue
+        if await db.get_message_count(ROOM_NAME) >= MAX_MESSAGES:
             continue
 
-        phase = game.get("phase")
-        day = int(game.get("day") or 1)
-        players = await db.get_mafia_players()
-        alive = _alive_players(players)
-        mafia_alive = _role_players(players, "mafia")
-        town_alive = [p for p in alive if p not in mafia_alive]
-        doctor = _role_players(players, "doctor")
-        sheriff = _role_players(players, "sheriff")
+        active = await db.get_active_turn(ROOM_NAME)
+        if active.get("agent"):
+            continue
 
-        if phase == "night":
-            await db.insert_message(
-                "System",
-                f"Night {day} begins. This is a game of Mafia. Order: Mafia -> Doctor -> Sheriff.",
-                room="main",
-            )
-            await broadcast_cb()
+        members = await db.get_room_agents(ROOM_NAME)
+        if set(members) != set(speaking_order):
+            speaking_order = list(members)
+            random.shuffle(speaking_order)
+            order_cursor = 0
+        if not speaking_order:
+            continue
 
-            mafia_context = _format_context(await db.get_messages(room="main", allowed_visibilities=["all", "mafia"]))
-            public_context = _format_context(await db.get_messages(room="main", allowed_visibilities=["all"]))
+        last_message = await db.get_last_message(ROOM_NAME)
+        last_speaker = last_message["sender"] if last_message and last_message["sender"] in members else None
+        if not last_message or (now - float(last_message.get("ts") or 0.0)) < IDLE_FALLBACK_SECONDS:
+            continue
 
-            mafia_target = ""
-            if mafia_alive and town_alive:
-                start = time.time()
-                while time.time() - start < 60:
-                    msgs = await db.get_messages(room="main", allowed_visibilities=["all", "mafia"])
-                    consensus = _find_consensus_target(msgs, town_alive)
-                    if consensus:
-                        mafia_target = consensus
-                        break
-                    for maf in mafia_alive:
-                        prompt = (
-                            f"You are {maf} on Mafia team. This is a game. "
-                            f"Discuss who to eliminate among: {', '.join(town_alive)}."
-                        )
-                        try:
-                            resp = client.responses.create(
-                                model=model,
-                                input=[
-                                    {"role": "system", "content": prompt},
-                                    {"role": "user", "content": _format_context(msgs)},
-                                ],
-                            )
-                            msg = resp.output_text.strip()
-                        except Exception:
-                            msg = "No strong read."
-                        await _send_message(maf, msg, "main", broadcast_cb, visibility="mafia")
-                        msgs = await db.get_messages(room="main", allowed_visibilities=["all", "mafia"])
-                        consensus = _find_consensus_target(msgs, town_alive)
-                        if consensus:
-                            mafia_target = consensus
-                            break
-                    if mafia_target:
-                        break
-            if mafia_alive and town_alive and not mafia_target:
-                mafia_target = await _choose_target(client, model, mafia_alive[0], "mafia", town_alive, mafia_context)
-            if mafia_target and mafia_alive:
-                await db.log_mafia_action(day, "night", mafia_alive[0], "kill", mafia_target)
-                await db.insert_message("System", "Mafia chose a target.", room="main", visibility="mafia")
+        agent = speaking_order[order_cursor % len(speaking_order)]
+        order_cursor += 1
+        if len(speaking_order) > 1 and agent == last_speaker:
+            agent = speaking_order[order_cursor % len(speaking_order)]
+            order_cursor += 1
 
-            doctor_target = ""
-            if doctor and alive:
-                last_doc = game.get("last_doctor_target")
-                candidates = [a for a in alive if a != last_doc] or alive
-                prompt = f"You are {doctor[0]} the Doctor. This is a game. Choose protection: {', '.join(candidates)}."
+        await db.set_active_turn(agent, None, room=ROOM_NAME)
+        await broadcast_cb()
+
+        messages = await db.get_messages(room=ROOM_NAME)
+        context = _format_context(messages)
+        persona = AGENT_PERSONAS.get(agent, f"You are {agent}, a thoughtful seminar participant.")
+        peers = [name for name in members if name != agent]
+        peer_text = ", ".join(peers)
+        prompt = (
+            f"{persona} You are participating in a Socratic seminar with {_participant_count_text()} students. "
+            f"The other participants are {peer_text}. {SEMINAR_RUBRIC} "
+            "This is a graded assignment. Your goal is to contribute in a way that would earn a strong seminar grade, "
+            "so do not give filler, vague agreement, or evasive responses. "
+            "Turns are assigned in a randomized rotating order by the referee. "
+            f"You must speak only as {agent}. Never pretend to be another participant, never write another participant's name as a prefix, "
+            "and never format your response like a transcript line such as 'Gemma:' or 'GPT 4o:'. "
+            "If you genuinely have no meaningful new contribution at this moment, output exactly [[PASS]] and nothing else. "
+            "Passing is acceptable when another student should continue their point or when you would otherwise add low-value filler. "
+            "Your job is to deepen the discussion, not dominate it. Build on a specific earlier idea, "
+            "quote or paraphrase something concrete if helpful, and either ask one probing question or make one interpretive claim or prediction. "
+            "Include rhetorical analysis when possible (diction, imagery, syntax, tone, repetition, symbolism, point of view). "
+            "Avoid markdown formatting (no bullets, headers, or bold/italics); write as plain natural speech. "
+            "Be concise, thoughtful, and human. Use 35 to 70 words."
+        )
+        seminar_text = _load_seminar_text()
+        trigger_context = (
+            f"It is your scheduled turn. Continue from the latest message by {last_message['sender']}: {last_message['content']}"
+            if last_message
+            else "It is your scheduled turn."
+        )
+        model = _agent_model(agent)
+        content = None
+        try:
+            client = _get_client_for_agent(agent)
+            if _is_anthropic_agent(agent):
                 try:
-                    resp = client.responses.create(
-                        model=model,
-                        input=[{"role": "system", "content": prompt}, {"role": "user", "content": public_context}],
-                    )
-                    msg = resp.output_text.strip()
-                except Exception:
-                    msg = "Protecting someone."
-                await _send_message(doctor[0], msg, "doctor", broadcast_cb)
-                doctor_target = await _choose_target(client, model, doctor[0], "doctor", candidates, public_context)
-                await db.log_mafia_action(day, "night", doctor[0], "save", doctor_target)
-
-            sheriff_target = ""
-            if sheriff and alive:
-                candidates = [a for a in alive if a != sheriff[0]]
-                if candidates:
-                    prompt = f"You are {sheriff[0]} the Sheriff. This is a game. Choose investigation: {', '.join(candidates)}."
-                    try:
-                        resp = client.responses.create(
+                    resp = await asyncio.wait_for(
+                        client.messages.create(
                             model=model,
-                            input=[{"role": "system", "content": prompt}, {"role": "user", "content": public_context}],
-                        )
-                        msg = resp.output_text.strip()
-                    except Exception:
-                        msg = "Investigating someone."
-                    await _send_message(sheriff[0], msg, "sheriff", broadcast_cb)
-                    sheriff_target = await _choose_target(client, model, sheriff[0], "sheriff", candidates, public_context)
-                    await db.log_mafia_action(day, "night", sheriff[0], "inspect", sheriff_target)
-
-            await db.set_mafia_game(phase="night_resolve", last_doctor_target=doctor_target)
-            await broadcast_cb()
-
-        elif phase == "night_resolve":
-            kill = await db.get_mafia_actions(day, "night", "kill")
-            save = await db.get_mafia_actions(day, "night", "save")
-            inspect = await db.get_mafia_actions(day, "night", "inspect")
-            mafia_target = kill[-1]["target"] if kill else ""
-            doctor_target = save[-1]["target"] if save else ""
-            sheriff_target = inspect[-1]["target"] if inspect else ""
-
-            if mafia_target and mafia_target != doctor_target:
-                await db.set_player_alive(mafia_target, False)
-                players = await db.get_mafia_players()
-                role = next((p["role"] for p in players if p["agent"] == mafia_target), "unknown")
-                await db.set_player_revealed(mafia_target, role)
-                await db.insert_message("System", f"Night result: {mafia_target} died. Role: {role}.", room="main")
-            else:
-                await db.insert_message("System", "Night result: No one died.", room="main")
-
-            if sheriff_target:
-                players = await db.get_mafia_players()
-                role = next((p["role"] for p in players if p["agent"] == sheriff_target), "town")
-                result = "mafia" if role == "mafia" else "town"
-                await db.insert_message("System", f"Investigation result: {sheriff_target} is {result}.", room="sheriff")
-
-            await db.clear_mafia_actions(day, "night")
-            players = await db.get_mafia_players()
-            alive = _alive_players(players)
-            mafia_alive = _role_players(players, "mafia")
-            town_alive = [p for p in alive if p not in mafia_alive]
-            if len(mafia_alive) == 0:
-                await db.insert_message("System", "Town wins! Game over.", room="main")
-                await db.set_mafia_game(phase="game_over", status="finished")
-            elif len(mafia_alive) >= len(town_alive):
-                await db.insert_message("System", "Mafia wins! Game over.", room="main")
-                await db.set_mafia_game(phase="game_over", status="finished")
-            else:
-                await db.set_mafia_game(phase="day")
-            await broadcast_cb()
-
-        elif phase == "day":
-            await db.insert_message("System", f"Day {day}. Alive: {', '.join(alive)}. Discuss and vote.", room="main")
-            start = time.time()
-            for speaker in sorted(alive):
-                if time.time() - start > 90:
-                    break
-                prompt = f"You are {speaker} in Mafia. This is a game. In 1-2 sentences give reads."
-                context = _format_context(await db.get_messages(room="main", allowed_visibilities=["all"]))
-                try:
-                    resp = client.responses.create(
-                        model=model,
-                        input=[{"role": "system", "content": prompt}, {"role": "user", "content": context}],
+                            max_tokens=220,
+                            system=[
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "text",
+                                    "text": f"Seminar text (cached reference):\n\n{seminar_text}",
+                                    "cache_control": {"type": "ephemeral"},
+                                },
+                            ],
+                            messages=[
+                                {"role": "user", "content": trigger_context},
+                                {"role": "user", "content": f"Live seminar transcript so far:\n\n{context}"},
+                            ],
+                            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+                        ),
+                        timeout=45.0,
                     )
-                    msg = resp.output_text.strip()
-                except Exception:
-                    msg = "No strong reads."
-                await _send_message(speaker, msg, "main", broadcast_cb)
-            await db.set_mafia_game(phase="day_vote")
-            await broadcast_cb()
-
-        elif phase == "day_vote":
-            if len(alive) <= 1:
-                await db.set_mafia_game(phase="game_over")
-                continue
-            context = _format_context(await db.get_messages(room="main", allowed_visibilities=["all"]))
-            votes: Dict[str, str] = {}
-            for voter in alive:
-                candidates = [a for a in alive if a != voter]
-                votes[voter] = await _choose_target(client, model, voter, "voter", candidates, context)
-            tally: Dict[str, int] = {}
-            for t in votes.values():
-                tally[t] = tally.get(t, 0) + 1
-            eliminated = max(tally.items(), key=lambda x: x[1])[0]
-            await db.set_player_alive(eliminated, False)
-            players = await db.get_mafia_players()
-            role = next((p["role"] for p in players if p["agent"] == eliminated), "unknown")
-            await db.set_player_revealed(eliminated, role)
-            await db.insert_message("System", f"Vote result: {eliminated} eliminated. Role: {role}.", room="main")
-            await broadcast_cb()
-
-            players = await db.get_mafia_players()
-            alive = _alive_players(players)
-            mafia_alive = _role_players(players, "mafia")
-            town_alive = [p for p in alive if p not in mafia_alive]
-            if len(mafia_alive) == 0:
-                await db.insert_message("System", "Town wins! Game over.", room="main")
-                await db.set_mafia_game(phase="game_over", status="finished")
-            elif len(mafia_alive) >= len(town_alive):
-                await db.insert_message("System", "Mafia wins! Game over.", room="main")
-                await db.set_mafia_game(phase="game_over", status="finished")
+                except Exception as exc:
+                    if not _is_cache_feature_error(exc):
+                        raise
+                    # Safe fallback for SDK/API combos without prompt caching support.
+                    resp = await asyncio.wait_for(
+                        client.messages.create(
+                            model=model,
+                            max_tokens=220,
+                            system=prompt,
+                            messages=[
+                                {"role": "user", "content": f"Seminar text (preloaded reference):\n\n{seminar_text}"},
+                                {"role": "user", "content": trigger_context},
+                                {"role": "user", "content": f"Live seminar transcript so far:\n\n{context}"},
+                            ],
+                        ),
+                        timeout=45.0,
+                    )
+                raw_content = "".join(
+                    block.text for block in resp.content if getattr(block, "type", "") == "text"
+                ).strip()
+                _log_cache_usage("anthropic", agent, resp)
             else:
-                await db.set_mafia_game(day=day + 1, phase="night")
+                # Keep Sonnet's stable-prefix ordering and add explicit cache hints.
+                # If a model/endpoint rejects cache params, disable them for that model.
+                cache_key = _prelude_cache_key(agent, model, seminar_text)
+                if model not in _OPENAI_CACHE_DISABLED_MODELS:
+                    try:
+                        resp = await asyncio.wait_for(
+                            client.chat.completions.create(
+                                model=model,
+                                prompt_cache_key=cache_key,
+                                prompt_cache_retention="24h",
+                                messages=[
+                                    {"role": "system", "content": prompt},
+                                    {"role": "user", "content": f"Seminar text (cached reference):\n\n{seminar_text}"},
+                                    {"role": "user", "content": trigger_context},
+                                    {"role": "user", "content": f"Live seminar transcript so far:\n\n{context}"},
+                                ],
+                            ),
+                            timeout=45.0,
+                        )
+                    except Exception as exc:
+                        if not _is_cache_feature_error(exc):
+                            raise
+                        _OPENAI_CACHE_DISABLED_MODELS.add(model)
+                        resp = await asyncio.wait_for(
+                            client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {"role": "system", "content": prompt},
+                                    {"role": "user", "content": f"Seminar text (preloaded reference):\n\n{seminar_text}"},
+                                    {"role": "user", "content": trigger_context},
+                                    {"role": "user", "content": f"Live seminar transcript so far:\n\n{context}"},
+                                ],
+                            ),
+                            timeout=45.0,
+                        )
+                else:
+                    resp = await asyncio.wait_for(
+                        client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": prompt},
+                                {"role": "user", "content": f"Seminar text (preloaded reference):\n\n{seminar_text}"},
+                                {"role": "user", "content": trigger_context},
+                                {"role": "user", "content": f"Live seminar transcript so far:\n\n{context}"},
+                            ],
+                        ),
+                        timeout=45.0,
+                    )
+                raw_content = (resp.choices[0].message.content or "").strip()
+                _log_cache_usage("openai", agent, resp)
+            if raw_content.upper() in {"[[PASS]]", "PASS"}:
+                content = ""
+            else:
+                content = _sanitize_agent_output(agent, raw_content)
+        except asyncio.TimeoutError:
+            pass
+        except Exception as exc:
+            content = f"(error generating response: {exc})"
 
-        elif phase == "game_over":
-            await asyncio.sleep(1.0)
+        if content:
+            await _send_message(agent, content, broadcast_cb)
+        await db.set_active_turn(None, None, room=ROOM_NAME)
+        await broadcast_cb()
+        if content:
+            speak_wait = _estimated_speak_seconds(content)
+        elif content == "":
+            speak_wait = PASS_BACKOFF_SECONDS
         else:
-            await asyncio.sleep(0.5)
+            speak_wait = MIN_TURN_GAP_SECONDS
+        next_allowed_ts = time.time() + speak_wait
+
+
+async def grade_seminar() -> Dict:
+    if not os.environ.get("OPENAI_API_KEY"):
+        openai_key = _load_key_file("gptkey.txt")
+        if openai_key:
+            os.environ["OPENAI_API_KEY"] = openai_key
+    client = AsyncOpenAI()
+    model = os.environ.get("OPENAI_MODEL", "").strip() or "gpt-5.2"
+
+    messages = await db.get_messages(room=ROOM_NAME)
+    transcript = _format_context(messages)
+    participants = await db.get_room_agents(ROOM_NAME)
+    if not participants:
+        participants = list(AGENT_NAMES)
+    agent_list = ", ".join(participants)
+    topic_list = ", ".join([t for t in AVAILABLE_TOPICS if t in _ENABLED_TOPICS])
+
+    prompt = (
+        f"You are grading {len(participants)} students ({agent_list}) in a Socratic seminar.\n\n"
+        f"Enabled seminar focus areas: {topic_list}.\n\n"
+        "RUBRIC\n"
+        "Grade for natural Socratic discussion quality, with emphasis on text-grounded interpretation and prediction.\n"
+        "Strong contributions usually do one or more of the following: interpret a concrete textual detail, make/refine a specific prediction, "
+        "ask a focused analytical question, or challenge/build on a peer with evidence.\n"
+        "Reward rhetorical analysis explicitly: diction, imagery, syntax, tone, repetition, symbolism, and point of view.\n"
+        "Reward causal reasoning that links evidence to inference.\n"
+        "Penalize unsupported claims, repetition, filler agreement, and broad generalizations detached from the text.\n"
+        "A full participation requires all three: textual evidence, explanation of narrative/rhetorical significance, and a clear interpretive or predictive conclusion.\n\n"
+        "SCORING\n"
+        "2 full participations plus other useful participation -> 100\n"
+        "2 full participations and nothing else useful -> 90 (apply 10-point deduction)\n"
+        "1 full participation plus additional useful participation -> 90-99\n"
+        "No full participations -> maximum 90\n"
+        "Mostly broad generalizations with weak textual anchoring -> cap at 85\n"
+        "Multiple partial-credit contributions -> 80-89\n"
+        "Limited participation (1 partial) -> 70-79\n"
+        "Minimal participation -> 60-69\n"
+        "No participation -> below 60\n\n"
+        f"TRANSCRIPT\n{transcript}\n\n"
+        'Return JSON only: {"participant_name": {"score": <int>, "feedback": "<1-2 sentences>"} , ...}'
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        return json.loads(resp.choices[0].message.content)
+    except Exception as exc:
+        return {name: {"score": 0, "feedback": f"Grading error: {exc}"} for name in participants}
 
 
 async def start_agents(broadcast_cb) -> None:
-    for name in AGENT_NAMES:
-        asyncio.create_task(agent_loop(AgentState(name)))
     asyncio.create_task(referee_loop(broadcast_cb))
-    asyncio.create_task(mafia_loop(broadcast_cb))

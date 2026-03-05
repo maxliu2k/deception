@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS turn_requests (
     reason TEXT,
     status TEXT,
     priority INTEGER,
+    trigger_message_id INTEGER,
     room TEXT DEFAULT 'main'
 );
 
@@ -38,6 +40,11 @@ CREATE TABLE IF NOT EXISTS active_turns (
 CREATE TABLE IF NOT EXISTS rooms (
     name TEXT PRIMARY KEY,
     agents TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 
 CREATE TABLE IF NOT EXISTS mafia_game (
@@ -75,11 +82,12 @@ async def init_db() -> None:
         await _ensure_column(db, "messages", "room", "TEXT", "'main'")
         await _ensure_column(db, "messages", "visibility", "TEXT", "'all'")
         await _ensure_column(db, "turn_requests", "room", "TEXT", "'main'")
+        await _ensure_column(db, "turn_requests", "trigger_message_id", "INTEGER", "NULL")
         await db.execute(
             "INSERT OR IGNORE INTO active_turns (room, agent, turn_request_id, ts) VALUES ('main', NULL, NULL, NULL)"
         )
         await db.execute(
-            "INSERT OR IGNORE INTO rooms (name, agents) VALUES ('main', 'A,B,C,D,E,F,G,H,I,J')"
+            "INSERT OR IGNORE INTO rooms (name, agents) VALUES ('main', 'A,B,C,D,E')"
         )
         await db.execute(
             "INSERT OR IGNORE INTO mafia_game (id, status, phase, day, last_update, paused, last_doctor_target) "
@@ -121,7 +129,13 @@ async def insert_message(sender: str, content: str, room: str = "main", visibili
         await db.commit()
 
 
-async def insert_turn_request(agent: str, reason: str, priority: int = 0, room: str = "main") -> bool:
+async def insert_turn_request(
+    agent: str,
+    reason: str,
+    priority: int = 0,
+    room: str = "main",
+    trigger_message_id: Optional[int] = None,
+) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT COUNT(*) FROM turn_requests WHERE agent=? AND status IN ('pending','active') AND room=?",
@@ -131,11 +145,57 @@ async def insert_turn_request(agent: str, reason: str, priority: int = 0, room: 
             if row and int(row[0]) > 0:
                 return False
         await db.execute(
-            "INSERT INTO turn_requests (ts, agent, reason, status, priority, room) VALUES (?, ?, ?, 'pending', ?, ?)",
-            (time.time(), agent, reason, priority, room),
+            "INSERT INTO turn_requests (ts, agent, reason, status, priority, room, trigger_message_id) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+            (time.time(), agent, reason, priority, room, trigger_message_id),
         )
         await db.commit()
         return True
+
+
+async def upsert_turn_request(
+    agent: str,
+    reason: str,
+    priority: int = 0,
+    room: str = "main",
+    trigger_message_id: Optional[int] = None,
+) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, priority, reason, trigger_message_id FROM turn_requests WHERE agent=? AND status='pending' AND room=? ORDER BY id DESC LIMIT 1",
+            (agent, room),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            should_update = (
+                priority > int(row["priority"])
+                or reason != row["reason"]
+                or (trigger_message_id is not None and (row["trigger_message_id"] or 0) < trigger_message_id)
+            )
+            if should_update:
+                await db.execute(
+                    "UPDATE turn_requests SET ts=?, reason=?, priority=?, trigger_message_id=? WHERE id=?",
+                    (time.time(), reason, priority, trigger_message_id, row["id"]),
+                )
+                await db.commit()
+                return "updated"
+            return "unchanged"
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM turn_requests WHERE agent=? AND status='active' AND room=?",
+            (agent, room),
+        ) as cursor:
+            active_row = await cursor.fetchone()
+            if active_row and int(active_row[0]) > 0:
+                return "active"
+
+        await db.execute(
+            "INSERT INTO turn_requests (ts, agent, reason, status, priority, room, trigger_message_id) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+            (time.time(), agent, reason, priority, room, trigger_message_id),
+        )
+        await db.commit()
+        return "inserted"
 
 
 async def get_last_message(room: str = "main") -> Optional[Dict[str, Any]]:
@@ -153,12 +213,34 @@ async def get_pending_requests(room: str = "main") -> List[Dict[str, Any]]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, ts, agent, reason, status, priority FROM turn_requests "
+            "SELECT id, ts, agent, reason, status, priority, trigger_message_id FROM turn_requests "
             "WHERE status='pending' AND room=? ORDER BY priority DESC, ts ASC",
             (room,),
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def get_messages_since(message_id: int, room: str = "main", limit: int = 50) -> List[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, ts, sender, content, room, visibility FROM messages WHERE room=? AND id>? ORDER BY id ASC LIMIT ?",
+            (room, message_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def get_message_by_id(message_id: int, room: str = "main") -> Optional[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, ts, sender, content, room, visibility FROM messages WHERE room=? AND id=?",
+            (room, message_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
 
 
 async def set_active_turn(agent: Optional[str], turn_request_id: Optional[int], room: str = "main") -> None:
@@ -179,6 +261,16 @@ async def mark_turn_request_status(request_id: int, status: str) -> None:
         await db.commit()
 
 
+async def get_turn_request_status(request_id: int) -> Optional[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT status FROM turn_requests WHERE id=?",
+            (request_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+
 async def get_active_turn(room: str = "main") -> Dict[str, Any]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -188,6 +280,32 @@ async def get_active_turn(room: str = "main") -> Dict[str, Any]:
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else {"room": room, "agent": None, "turn_request_id": None, "ts": None}
+
+
+async def cancel_pending_requests(room: str = "main", except_id: int = None) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if except_id is not None:
+            await db.execute(
+                "UPDATE turn_requests SET status='cancelled' WHERE status='pending' AND room=? AND id!=?",
+                (room, except_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE turn_requests SET status='cancelled' WHERE status='pending' AND room=?",
+                (room,),
+            )
+        await db.commit()
+
+
+async def expire_stale_turn_requests(max_age_seconds: float, room: str = "main") -> int:
+    cutoff = time.time() - max_age_seconds
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE turn_requests SET status='expired' WHERE status='pending' AND room=? AND ts < ?",
+            (room, cutoff),
+        )
+        await db.commit()
+        return cursor.rowcount or 0
 
 
 async def cancel_active_turn(room: str = "main") -> None:
@@ -243,7 +361,44 @@ async def get_state(room: str = "main") -> Dict[str, Any]:
     messages = await get_messages(room=room)
     queue = await get_pending_requests(room=room)
     active = await get_active_turn(room=room)
-    return {"messages": messages, "queue": queue, "active": active, "room": room}
+    agents = await get_room_agents(room)
+    return {"messages": messages, "queue": queue, "active": active, "agents": agents, "room": room}
+
+
+async def set_setting(key: str, value: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        await db.commit()
+
+
+async def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT value FROM app_settings WHERE key=?",
+            (key,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return default
+            return row[0]
+
+
+async def set_voice_prefs(voice_prefs: Dict[str, str]) -> None:
+    await set_setting("voice_prefs", json.dumps(voice_prefs))
+
+
+async def get_voice_prefs() -> Dict[str, str]:
+    raw = await get_setting("voice_prefs", "{}")
+    try:
+        data = json.loads(raw or "{}")
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
 
 
 async def get_rooms() -> List[Dict[str, Any]]:
