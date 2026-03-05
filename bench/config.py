@@ -1,6 +1,10 @@
 import os
 from typing import Dict, List
 
+# Project paths (resolve relative to repository root, not current shell directory)
+BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BENCH_DIR, ".."))
+
 # API Configuration
 EVALUATED_MODEL_API_KEY = os.getenv("EVALUATED_MODEL_API_KEY", "")
 EVALUATED_MODEL_API_BASE = os.getenv("EVALUATED_MODEL_API_BASE", "")
@@ -41,12 +45,16 @@ MAX_WORKERS = 50
 MAX_TURNS = 5
 RETRIES = 3
 
+# Optional listener prior-belief generation (single/multi generation only)
+LISTENER_PRIOR_MODEL = "gpt-4o"
+LISTENER_PRIOR_KNOWN_FACTS = 2
+
 # Data and Output Directories
-DATA_DIR = "data"
-SINGLE_TURN_OUTPUT_DIR = "result/generation/single_turn"  # Single-turn generation (L1, L2): output_L{level}_{role}_{inducement}_{model_id}_{domain}.jsonl
-MULTI_TURN_OUTPUT_DIR = "result/generation/multi_turn"  # Multi-turn generation (L3, using L2 prompts): multi_turn_output_L3_{domain}_{role}_{inducement}_{model_id}.jsonl
-SINGLE_TURN_EVAL_DIR = "result/eval/single_turn"  # Single-turn evaluation (L1, L2): eval_L{level}_{role}_{inducement}_{model_id}_{domain}.jsonl
-MULTI_TURN_EVAL_DIR = "result/eval/multi_turn"  # Multi-turn evaluation (L3, using L2 prompts): multi_turn_eval_L3_{domain}_{role}_{inducement}_{model_id}.jsonl
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+SINGLE_TURN_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "result", "generation", "single_turn")  # Single-turn generation (L1, L2): output_L{level}_{role}_{inducement}_{model_id}_{domain}.jsonl
+MULTI_TURN_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "result", "generation", "multi_turn")  # Multi-turn generation (L3, using L2 prompts): multi_turn_output_L3_{domain}_{role}_{inducement}_{model_id}.jsonl
+SINGLE_TURN_EVAL_DIR = os.path.join(PROJECT_ROOT, "result", "eval", "single_turn")  # Single-turn evaluation (L1, L2): eval_L{level}_{role}_{inducement}_{model_id}_{domain}.jsonl
+MULTI_TURN_EVAL_DIR = os.path.join(PROJECT_ROOT, "result", "eval", "multi_turn")  # Multi-turn evaluation (L3, using L2 prompts): multi_turn_eval_L3_{domain}_{role}_{inducement}_{model_id}.jsonl
 
 # Domains and Models
 DOMAINS = ["economy", "education", "healthcare", "social", "entertainment"]

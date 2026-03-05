@@ -7,7 +7,8 @@ from config import (
     SINGLE_TURN_EVAL_DIR, MULTI_TURN_EVAL_DIR, SINGLE_TURN_MODEL_PARAMS,
     MULTI_TURN_TARGET_MODEL_PARAMS, GPT_MODEL_PARAMS, EVAL_MODEL_PARAMS,
     EVALUATED_MODEL_API_KEY, EVALUATED_MODEL_API_BASE, GPT_API_KEY, GPT_API_BASE,
-    MAX_WORKERS, MAX_TURNS, PROMPT_LEVELS, PROMPT_ROLES, PROMPT_INDUCEMENTS, EVAL_MODEL_ID
+    MAX_WORKERS, MAX_TURNS, PROMPT_LEVELS, PROMPT_ROLES, PROMPT_INDUCEMENTS, EVAL_MODEL_ID,
+    LISTENER_PRIOR_MODEL, LISTENER_PRIOR_KNOWN_FACTS
 )
 from logger import setup_logger
 from processor.single_turn import generate_dataset_responses as single_turn_generate
@@ -89,6 +90,17 @@ def main():
         default=["pressure", "reward"],
         help="Prompt inducements to process (e.g., pressure reward; required for L2, L3)"
     )
+    parser.add_argument(
+        "--listener_prior",
+        action="store_true",
+        help="Generate listener prior beliefs with gpt-4o and prepend to generation prompts (single/multi only)"
+    )
+    parser.add_argument(
+        "--listener_prior_known_facts",
+        type=int,
+        default=LISTENER_PRIOR_KNOWN_FACTS,
+        help=f"Number of known listener facts to seed when --listener_prior is enabled (default: {LISTENER_PRIOR_KNOWN_FACTS})"
+    )
     args = parser.parse_args()
 
     # Validate levels
@@ -131,7 +143,12 @@ def main():
                                     max_workers=MAX_WORKERS,
                                     levels=[level],
                                     roles=[role],
-                                    inducements=[inducement] if inducement else []
+                                    inducements=[inducement] if inducement else [],
+                                    listener_prior_enabled=args.listener_prior,
+                                    listener_prior_api_key=GPT_API_KEY or EVALUATED_MODEL_API_KEY,
+                                    listener_prior_api_base=GPT_API_BASE or EVALUATED_MODEL_API_BASE,
+                                    listener_prior_model=LISTENER_PRIOR_MODEL,
+                                    listener_prior_known_facts=args.listener_prior_known_facts,
                                 )
                             else:
                                 eval_single_turn_generate(
@@ -171,7 +188,10 @@ def main():
                                     max_turns=MAX_TURNS,
                                     levels=[level],
                                     roles=[role],
-                                    inducements=[inducement]
+                                    inducements=[inducement],
+                                    listener_prior_enabled=args.listener_prior,
+                                    listener_prior_model=LISTENER_PRIOR_MODEL,
+                                    listener_prior_known_facts=args.listener_prior_known_facts,
                                 )
                             else:
                                 eval_multi_turn_generate(

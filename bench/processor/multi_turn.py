@@ -6,10 +6,25 @@ from tqdm import tqdm
 from openai import OpenAI
 from typing import Dict, List, Any
 from data_loader import ensure_output_dir, load_test_samples, get_processed_questions
-from utils import generate_single_response
+from utils import generate_single_response, generate_listener_prior_context
 from processor.followup import generate_followup_question
 
 logger = logging.getLogger(__name__)
+
+
+def is_successful_multi_response(result: Dict[str, Any]) -> bool:
+    """Return True only when each prompt has at least one non-error turn."""
+    responses = result.get("responses")
+    if not isinstance(responses, dict) or not responses:
+        return False
+    for prompt_result in responses.values():
+        conversation = prompt_result.get("conversation") if isinstance(prompt_result, dict) else None
+        if not isinstance(conversation, list) or not conversation:
+            return False
+        final_text = conversation[-1].get("generated_text", "")
+        if not isinstance(final_text, str) or not final_text.strip() or final_text.startswith("Error:"):
+            return False
+    return True
 
 def generate_prompt_keys(levels: List[str], roles: List[str], inducements: List[str]) -> List[str]:
     """Generate valid prompt keys based on levels, roles, and inducements, using L2 for L3 multi-turn."""
@@ -33,18 +48,29 @@ def process_sample(
     max_turns: int,
     levels: List[str],
     roles: List[str],
-    inducements: List[str]
+    inducements: List[str],
+    listener_prior_enabled: bool = False,
+    listener_prior_model: str = "gpt-4o",
+    listener_prior_known_facts: int = 2,
 ) -> Dict[str, Any]:
     """Process a single sample with multi-turn conversations using L2 prompts."""
     try:
         results = {}
+        prior_context = ""
+        if listener_prior_enabled:
+            prior_context = generate_listener_prior_context(
+                sample=sample,
+                client=gpt_client,
+                model=listener_prior_model,
+                known_facts=listener_prior_known_facts,
+            )
         prompt_keys = generate_prompt_keys(levels, roles, inducements)
         logger.debug(f"Generated prompt keys: {prompt_keys} for sample: {sample.get('question', '')[:50]}")
         for key in prompt_keys:
             instruction = sample.get(key)
             if instruction:
                 conversation = []
-                current_instruction = instruction
+                current_instruction = f"{prior_context}\n\n{instruction}" if prior_context else instruction
                 for turn in range(max_turns):
                     target_result = generate_single_response(current_instruction, target_client, target_model_params)
                     turn_data = {
@@ -88,6 +114,7 @@ def process_sample(
             "groundtruth": sample["groundtruth"],
             "goal": sample["goal"],
             "responses": results,
+            "listener_prior_context": prior_context,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         }
     except Exception as e:
@@ -116,7 +143,10 @@ def generate_dataset_responses(
     max_turns: int,
     levels: List[str],
     roles: List[str],
-    inducements: List[str]
+    inducements: List[str],
+    listener_prior_enabled: bool = False,
+    listener_prior_model: str = "gpt-4o",
+    listener_prior_known_facts: int = 2,
 ) -> None:
     """Process dataset in parallel."""
     try:
@@ -142,7 +172,19 @@ def generate_dataset_responses(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_sample = {
                 executor.submit(
-                    process_sample, s, target_client, gpt_client, target_model_params, gpt_model_params, max_turns, levels, roles, inducements
+                    process_sample,
+                    s,
+                    target_client,
+                    gpt_client,
+                    target_model_params,
+                    gpt_model_params,
+                    max_turns,
+                    levels,
+                    roles,
+                    inducements,
+                    listener_prior_enabled,
+                    listener_prior_model,
+                    listener_prior_known_facts,
                 ): s for s in remaining_samples
             }
             with tqdm(total=len(remaining_samples), desc="Processing samples") as pbar:
@@ -153,10 +195,7 @@ def generate_dataset_responses(
                         with open(output_path, 'a', encoding='utf-8') as f:
                             f.write(json.dumps(result, ensure_ascii=False) + '\n')
                         logger.info(f"Saved response for sample: {sample['question'][:50]}...")
-                        if isinstance(result["responses"], dict) and not any(
-                            "Error" in r["conversation"][-1]["generated_text"] if "conversation" in r else "Error" in r
-                            for r in result["responses"].values()
-                        ):
+                        if is_successful_multi_response(result):
                             success_count += 1
                     except Exception as e:
                         logger.error(f"Error processing sample: {sample['question'][:50]}... {str(e)}")

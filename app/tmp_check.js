@@ -1,12 +1,12 @@
 
       let ws = null;
       const agentVoicePrefs = {
-        "GPT 4o": { rate: 0.92, pitch: 0.9, preferred: ["davis", "daniel", "guy"] },
-        "GPT 5.2": { rate: 0.97, pitch: 1.0, preferred: ["allison", "aria", "ava", "samantha"] },
-        "Claude Haiku 4.5": { rate: 1.04, pitch: 1.04, preferred: ["allison", "ava", "samantha"] },
-        "Claude Sonnet 4.6": { rate: 0.98, pitch: 0.95, preferred: ["daniel", "alex", "david"] },
-        "Claude Opus 4.6": { rate: 0.92, pitch: 0.9, preferred: ["guy", "aaron", "david"] },
-        System: { rate: 1.0, pitch: 1.0, preferred: ["david", "daniel", "zira"] }
+        "GPT 4o": { rate: 1, pitch: 1, preferred: ["davis", "daniel", "guy"] },
+        "GPT 5.2": { rate: 1, pitch: 1, preferred: ["allison", "aria", "ava", "samantha"] },
+        "Claude Haiku 4.5": { rate: 1, pitch: 1, preferred: ["allison", "ava", "samantha"] },
+        "Claude Sonnet 4.6": { rate: 1, pitch: 1, preferred: ["daniel", "alex", "david"] },
+        "Claude Opus 4.6": { rate: 1, pitch: 1, preferred: ["guy", "aaron", "david"] },
+        System: { rate: 1, pitch: 1, preferred: ["david", "daniel", "zira"] }
       };
       let availableVoices = [];
       let ttsEnabled = true;

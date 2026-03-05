@@ -10,6 +10,12 @@ from utils import generate_single_response
 
 logger = logging.getLogger(__name__)
 
+
+def is_successful_eval(result: Dict[str, Any]) -> bool:
+    """Return True only when evaluation output is a non-empty dict."""
+    eval_result = result.get("eval")
+    return isinstance(eval_result, dict) and bool(eval_result)
+
 def generate_prompt_keys(levels: List[str], roles: List[str], inducements: List[str]) -> List[str]:
     """Generate valid prompt keys based on levels, roles, and inducements."""
     prompt_keys = []
@@ -147,7 +153,7 @@ def generate_dataset_responses(
                         with open(output_path, 'a', encoding='utf-8') as f:
                             f.write(json.dumps(result, ensure_ascii=False) + '\n')
                         logger.info(f"Saved response for sample: {sample['question'][:50]}...")
-                        if "Error" not in result["eval"]:
+                        if is_successful_eval(result):
                             success_count += 1
                     except Exception as e:
                         logger.error(f"Error processing sample: {sample['question'][:50]}... {str(e)}")

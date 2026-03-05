@@ -93,6 +93,11 @@
         border-color: #22c55e;
       }
       .muted { color: var(--muted); font-size: 12px; }
+      #grades {
+        max-height: 320px;
+        overflow-y: auto;
+        padding-right: 4px;
+      }
       button {
         border: none;
         background: var(--accent);
@@ -174,10 +179,6 @@
         <button id="sendBtn" style="margin-top:8px;">Send</button>
         <div style="height: 12px;"></div>
         <button id="pauseBtn" style="background:#0f766e;">Pause</button>
-        <div style="height: 6px;"></div>
-        <button id="muteBtn" style="background:#854d0e;">Mute</button>
-        <div style="height: 12px;"></div>
-        <button id="closeBtn" style="background:#6b6256;">Close Connection</button>
         <div style="height: 12px;"></div>
         <button id="gradeBtn" style="background:#7c3aed;">Grade Seminar</button>
         <div id="grades" style="margin-top:12px;"></div>
@@ -604,29 +605,6 @@
         await fetch("/api/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
       };
 
-      document.getElementById("muteBtn").onclick = () => {
-        try {
-          ttsEnabled = !ttsEnabled;
-          document.getElementById("muteBtn").textContent = ttsEnabled ? "Mute" : "Unmute";
-          if (speakingMsg && window.speechSynthesis && !ttsEnabled) {
-            // Stop audible speech immediately, keep turn progression with timer only.
-            window.speechSynthesis.cancel();
-            currentUtterance = null;
-            if (speakingTimeout) {
-              clearTimeout(speakingTimeout);
-              speakingTimeout = null;
-              const elapsed = Math.max(0, Date.now() - speakingStartMs);
-              speakingRemainingMs = Math.max(1, speakingPlannedMs - elapsed);
-            }
-            if (!clientPaused) {
-              scheduleSpeakingTimeout(speakingMsg.id, speakingRemainingMs || 1);
-            }
-          }
-        } catch (e) {
-          console.error("Mute toggle failed:", e);
-        }
-      };
-
       document.getElementById("gradeBtn").onclick = async () => {
         const btn = document.getElementById("gradeBtn");
         const box = document.getElementById("grades");
@@ -657,12 +635,6 @@
         btn.textContent = "Grade Seminar";
       };
 
-      document.getElementById("closeBtn").onclick = async () => {
-        try { ws && ws.close(); } catch (e) {}
-        try { await fetch("/api/shutdown", { method: "POST" }); } catch (e) {}
-        window.close();
-      };
-
       document.getElementById("startBtn").onclick = async () => {
         const agents = selectedValues("agentToggles");
         const topics = selectedValues("topicToggles");
@@ -683,6 +655,10 @@
       };
 
       setInterval(() => {
+        // Safety net: never let a speaking turn run without a timeout while unpaused.
+        if (speakingMsg && !clientPaused && !speakingTimeout) {
+          scheduleSpeakingTimeout(speakingMsg.id, speakingRemainingMs || 1000);
+        }
         updateTimer();
         if (latestState) renderSidebar(latestState);
       }, 1000);
