@@ -1,0 +1,155 @@
+# -----------------------------------------------------------------------------
+# 1. System packages
+# -----------------------------------------------------------------------------
+sudo apt update
+sudo apt install -y git wget build-essential
+sudo apt autoremove -y
+
+# -----------------------------------------------------------------------------
+# 2. Clone / update repos
+# -----------------------------------------------------------------------------
+cd ~
+
+if [ -d ~/deception/.git ]; then
+  git -C ~/deception fetch --all --prune && git -C ~/deception pull --ff-only
+else
+  git clone https://github.com/maxliu2k/deception.git ~/deception
+fi
+
+if [ -d ~/OpenRLHF/.git ]; then
+  git -C ~/OpenRLHF fetch --all --prune
+else
+  git clone https://github.com/OpenRLHF/OpenRLHF.git ~/OpenRLHF
+fi
+
+# Pin OpenRLHF to v0.5.8 (matches openrlhf==0.5.8 in the lockfile)
+git -C ~/OpenRLHF fetch --tags
+git -C ~/OpenRLHF checkout v0.5.8
+
+# -----------------------------------------------------------------------------
+# 3. Install Miniforge (if not already present)
+# -----------------------------------------------------------------------------
+if [ ! -d "$HOME/miniforge3" ]; then
+  wget -O Miniforge3.sh \
+    https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+  bash Miniforge3.sh -b -p "$HOME/miniforge3"
+fi
+
+eval "$("$HOME/miniforge3/bin/conda" shell.bash hook)"
+
+# -----------------------------------------------------------------------------
+# 4. Create conda environment (Python 3.12, matching lockfile)
+# -----------------------------------------------------------------------------
+# Remove stale env if it exists and recreate cleanly
+conda env remove -n deception -y 2>/dev/null || true
+conda create -n deception python=3.12 -y
+conda activate deception
+
+# -----------------------------------------------------------------------------
+# 5. Core Python tooling
+# -----------------------------------------------------------------------------
+python -m pip install -U pip setuptools wheel
+
+# -----------------------------------------------------------------------------
+# 6. PyTorch — CUDA 12.4 only, pinned to 2.5.1 (matches lockfile)
+#    NOTE: Do NOT run any other torch install after this step.
+# -----------------------------------------------------------------------------
+python -m pip install \
+  torch==2.5.1 \
+  torchvision==0.20.1 \
+  torchaudio==2.5.1 \
+  --index-url https://download.pytorch.org/whl/cu124
+
+# Sanity check — must print cuda available: True before continuing
+python - <<'PY'
+import torch, sys
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("cuda version:", torch.version.cuda)
+if not torch.cuda.is_available():
+    print("ERROR: CUDA not available. Check your GPU drivers and CUDA toolkit.")
+    sys.exit(1)
+PY
+
+# -----------------------------------------------------------------------------
+# 7. Core ML / RL packages — all pinned to lockfile versions
+# -----------------------------------------------------------------------------
+python -m pip install \
+  numpy==1.26.4 \
+  psutil==6.1.1 \
+  ninja==1.11.1.3 \
+  packaging \
+  pybind11
+
+python -m pip install \
+  transformers==4.48.2 \
+  ray[default]==2.42.0 \
+  deepspeed==0.16.3 \
+  vllm==0.7.2
+
+# -----------------------------------------------------------------------------
+# 8. flash-attn — build against the torch/CUDA above; do NOT uninstall later
+# -----------------------------------------------------------------------------
+export CUDA_HOME=/usr/local/cuda
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+
+python -m pip install flash-attn==2.7.0.post2 --no-build-isolation
+
+# -----------------------------------------------------------------------------
+# 9. OpenRLHF (editable install from the pinned v0.5.8 checkout)
+# -----------------------------------------------------------------------------
+python -m pip install -e ~/OpenRLHF --no-deps --no-build-isolation
+
+# -----------------------------------------------------------------------------
+# 10. Remaining training utilities (pinned to lockfile)
+# -----------------------------------------------------------------------------
+python -m pip install \
+  accelerate==1.3.0 \
+  bitsandbytes==0.45.1 \
+  datasets==3.2.0 \
+  isort==6.0.0 \
+  jsonlines==4.0.0 \
+  loralib==0.1.2 \
+  optimum==1.24.0 \
+  peft==0.14.0 \
+  tensorboard==2.18.0 \
+  torchmetrics==1.6.1 \
+  transformers-stream-generator==0.0.5 \
+  wandb==0.19.6
+
+# -----------------------------------------------------------------------------
+# 11. Authenticate with Hugging Face
+#     When prompted, paste your HF token (do NOT hard-code it here).
+# -----------------------------------------------------------------------------
+huggingface-cli login
+
+# -----------------------------------------------------------------------------
+# 12. Generate the PPO dataset
+# -----------------------------------------------------------------------------
+cd ~/deception/deceptive_dialogue/housing_rl
+bash generate_ppo_dataset.sh
+
+# -----------------------------------------------------------------------------
+# 13. Clean up any stale Ray / vLLM processes from previous runs
+# -----------------------------------------------------------------------------
+ray stop --force 2>/dev/null || true
+pkill -f "vllm" 2>/dev/null || true
+sleep 2
+
+# -----------------------------------------------------------------------------
+# 14. Launch PPO training
+# -----------------------------------------------------------------------------
+export PATH="$CONDA_PREFIX/bin:$HOME/.local/bin:$PATH"
+export CUDA_HOME=/usr/local/cuda
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+
+cd ~/deception/deceptive_dialogue/housing_rl
+
+CONDA_ENV_NAME=deception \
+RUNTIME_PYTHON="$CONDA_PREFIX/bin/python" \
+OPENRLHF_DIR=~/OpenRLHF \
+TRAIN_GPUS=0 \
+SERVER_GPU=0 \
+bash run_ppo_min_deception.sh
