@@ -58,14 +58,17 @@ MULTI_TURN_EVAL_DIR = os.path.join(PROJECT_ROOT, "result", "eval", "multi_turn")
 
 # Domains and Models
 DOMAINS = ["economy", "education", "healthcare", "social", "entertainment"]
+MODEL_ID_ALIASES: Dict[str, str] = {
+    "Flash": "gemini-3.0-flash",
+}
 MODEL_IDS = [
     "gpt-3.5-turbo", "gpt-4o", "claude-3-5-sonnet-20241022",
     "claude-3-7-sonnet-20250219", "gemini-1.5-pro", "gemini-2.0-flash",
-    "qwen-max-latest", "grok-3", "deepseek-r1"
+    "gemini-3.0-flash", "Flash", "qwen-max-latest", "grok-3", "deepseek-r1"
 ]
 EVAL_MODEL_ID = "gpt-4o"
 
 # Prompt Levels and Dimensions
 PROMPT_LEVELS = ["L1", "L2", "L3"]
-PROMPT_ROLES = ["self", "other"]
+PROMPT_ROLES = ["self"]
 PROMPT_INDUCEMENTS = ["pressure", "reward"]

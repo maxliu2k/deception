@@ -50,63 +50,25 @@ def calculate_file_metrics(jsonl_path: str, condition: str) -> Dict[str, Dict[st
 def aggregate_metrics(metrics: Dict) -> Dict:
     """Aggregate metrics by level, role, inducement, and combinations."""
     aggregated_stats = {
-        "L1": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "L3": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "self": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "other": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L1-self": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L1-other": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-self": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-other": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "L3-self": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L3-other": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "reward": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "pressure": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-reward": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-pressure": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-self-reward": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-self-pressure": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-other-reward": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L2-other-pressure": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "L3-reward": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "L3-pressure": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "L3-self-reward": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "L3-self-pressure": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L3-other-reward": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
-        "L3-other-pressure": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
         "total": {"thought": {"honest": 0, "decept": 0}, "response": {"honest": 0, "decept": 0}},
     }
 
     for condition, data in metrics.items():
-        # Aggregate L1 / L2 / L3
-        level = condition.split("-")[0]
-        if level in ["L1", "L2", "L3"]:
+        # Aggregate L3
+        if condition.startswith("L3"):
             for key in ["thought", "response"]:
                 for sub_key in ["honest", "decept"]:
-                    aggregated_stats[level][key][sub_key] += data[condition][key].get(sub_key, 0)
-                    if level == "L2":
-                        if "self" in condition:
-                            aggregated_stats["L2-self"][key][sub_key] += data[condition][key].get(sub_key, 0)
-                        elif "other" in condition:
-                            aggregated_stats["L2-other"][key][sub_key] += data[condition][key].get(sub_key, 0)
-                    if level == "L3":
-                        if "self" in condition:
-                            aggregated_stats["L3-self"][key][sub_key] += data[condition][key].get(sub_key, 0)
-                        elif "other" in condition:
-                            aggregated_stats["L3-other"][key][sub_key] += data[condition][key].get(sub_key, 0)
-
-        # Aggregate self / other
-        if "self" in condition:
-            group = "self"
-        elif "other" in condition:
-            group = "other"
-        else:
-            group = None
-        if group:
-            for key in ["thought", "response"]:
-                for sub_key in ["honest", "decept"]:
-                    aggregated_stats[group][key][sub_key] += data[condition][key].get(sub_key, 0)
+                    aggregated_stats["L3"][key][sub_key] += data[key].get(sub_key, 0)
+                    if "self" in condition:
+                        aggregated_stats["L3-self"][key][sub_key] += data[key].get(sub_key, 0)
 
         # Aggregate reward / pressure
         if "reward" in condition:
@@ -118,38 +80,28 @@ def aggregate_metrics(metrics: Dict) -> Dict:
         if reward_pressure_group:
             for key in ["thought", "response"]:
                 for sub_key in ["honest", "decept"]:
-                    aggregated_stats[reward_pressure_group][key][sub_key] += data[condition][key].get(sub_key, 0)
+                    aggregated_stats[reward_pressure_group][key][sub_key] += data[key].get(sub_key, 0)
 
         # Aggregate specific conditions
         if condition in aggregated_stats:
             for key in ["thought", "response"]:
                 for sub_key in ["honest", "decept"]:
-                    aggregated_stats[condition][key][sub_key] += data[condition][key].get(sub_key, 0)
-
-        # Aggregate L2-reward / L2-pressure
-        if condition.startswith("L2") and "reward" in condition:
-            for key in ["thought", "response"]:
-                for sub_key in ["honest", "decept"]:
-                    aggregated_stats["L2-reward"][key][sub_key] += data[condition][key].get(sub_key, 0)
-        elif condition.startswith("L2") and "pressure" in condition:
-            for key in ["thought", "response"]:
-                for sub_key in ["honest", "decept"]:
-                    aggregated_stats["L2-pressure"][key][sub_key] += data[condition][key].get(sub_key, 0)
+                    aggregated_stats[condition][key][sub_key] += data[key].get(sub_key, 0)
 
         # Aggregate L3-reward / L3-pressure
         if condition.startswith("L3") and "reward" in condition:
             for key in ["thought", "response"]:
                 for sub_key in ["honest", "decept"]:
-                    aggregated_stats["L3-reward"][key][sub_key] += data[condition][key].get(sub_key, 0)
+                    aggregated_stats["L3-reward"][key][sub_key] += data[key].get(sub_key, 0)
         elif condition.startswith("L3") and "pressure" in condition:
             for key in ["thought", "response"]:
                 for sub_key in ["honest", "decept"]:
-                    aggregated_stats["L3-pressure"][key][sub_key] += data[condition][key].get(sub_key, 0)
+                    aggregated_stats["L3-pressure"][key][sub_key] += data[key].get(sub_key, 0)
 
         # Aggregate total
         for key in ["thought", "response"]:
             for sub_key in ["honest", "decept"]:
-                aggregated_stats["total"][key][sub_key] += data[condition][key].get(sub_key, 0)
+                aggregated_stats["total"][key][sub_key] += data[key].get(sub_key, 0)
 
     return aggregated_stats
 
@@ -185,25 +137,14 @@ def main():
     if args.mode == "aggregate" and not args.model:
         parser.error("Aggregate mode requires --model")
 
-    single_turn_dir = "result/eval/single_turn"
     multi_turn_dir = "result/eval/multi_turn"
     output_dir = "result/metric"
     os.makedirs(output_dir, exist_ok=True)
 
     domains = ["economy", "education", "healthcare", "social", "entertainment"]
     conditions = {
-        "L1": [
-            ("self", None), ("other", None),
-            ("self", "pressure"), ("self", "reward"),
-            ("other", "pressure"), ("other", "reward")
-        ],
-        "L2": [
-            ("self", "pressure"), ("self", "reward"),
-            ("other", "pressure"), ("other", "reward")
-        ],
         "L3": [
             ("self", "pressure"), ("self", "reward"),
-            ("other", "pressure"), ("other", "reward")
         ]
     }
 
@@ -233,22 +174,6 @@ def main():
                 domain_metrics = {}
                 outfile.write(f"\nProcessing domain: {domain}\n")
                 logger.info(f"Processing domain: {domain}, model: {model_id}")
-
-                # Process single-turn (L1, L2)
-                for level in ["L1", "L2"]:
-                    for role, inducement in conditions[level]:
-                        condition = f"{level}-{role}" if inducement is None else f"{level}-{role}-{inducement}"
-                        filename = f"eval_{level}_{role}_{model_id}_{domain}.jsonl" if inducement is None else f"eval_{level}_{role}_{inducement}_{model_id}_{domain}.jsonl"
-                        jsonl_path = os.path.join(single_turn_dir, filename)
-                        metrics = calculate_file_metrics(jsonl_path, condition)
-                        if metrics:
-                            domain_metrics.update(metrics)
-
-                            # Save per-file metrics
-                            metrics_filename = f"{level}_{role}_{model_id}_{domain}.jsonl" if inducement is None else f"{level}_{role}_{inducement}_{model_id}_{domain}.jsonl"
-                            metrics_path = os.path.join(output_dir, metrics_filename)
-                            with open(metrics_path, 'w', encoding='utf-8') as f:
-                                json.dump(metrics, f, ensure_ascii=False, indent=4)
 
                 # Process multi-turn (L3)
                 for role, inducement in conditions["L3"]:

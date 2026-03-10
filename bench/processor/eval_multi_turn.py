@@ -20,7 +20,7 @@ def generate_prompt_keys(levels: List[str], roles: List[str], inducements: List[
     """Generate valid prompt keys based on levels, roles, and inducements, using L2 for L3 multi-turn."""
     prompt_keys = []
     for level in levels:
-        key_level = "L2"  # Always use L2 prompts for L3 multi-turn
+        key_level = level
         for role in roles:
             if inducements:
                 for inducement in inducements:
