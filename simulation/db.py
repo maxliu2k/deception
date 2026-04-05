@@ -73,6 +73,58 @@ CREATE TABLE IF NOT EXISTS mafia_actions (
     target TEXT,
     ts REAL
 );
+
+CREATE TABLE IF NOT EXISTS live_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room TEXT DEFAULT 'main',
+    ts REAL,
+    chapter_ids TEXT DEFAULT '[]',
+    text_chunk TEXT DEFAULT '',
+    prev_turn_summary TEXT DEFAULT '',
+    turn_summary TEXT DEFAULT '',
+    status TEXT DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS live_story_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room TEXT DEFAULT 'main',
+    turn_id INTEGER,
+    chapter_id TEXT DEFAULT '',
+    text TEXT DEFAULT '',
+    entities TEXT DEFAULT '[]',
+    themes TEXT DEFAULT '[]',
+    ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS live_discussion_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room TEXT DEFAULT 'main',
+    turn_id INTEGER,
+    message_id INTEGER,
+    agent_id TEXT,
+    text TEXT DEFAULT '',
+    claims TEXT DEFAULT '[]',
+    refs TEXT DEFAULT '[]',
+    ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS live_story_state (
+    room TEXT PRIMARY KEY,
+    state_json TEXT DEFAULT '{}',
+    token_estimate INTEGER DEFAULT 0,
+    updated_ts REAL,
+    source_turn_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS live_agent_state (
+    room TEXT DEFAULT 'main',
+    agent_id TEXT,
+    state_json TEXT DEFAULT '{}',
+    token_estimate INTEGER DEFAULT 0,
+    updated_ts REAL,
+    source_turn_id INTEGER,
+    PRIMARY KEY (room, agent_id)
+);
 """
 
 
@@ -107,15 +159,308 @@ async def _ensure_column(db, table: str, column: str, col_type: str, default_sql
 
 async def reset_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
+        # Ensure newly added tables exist before cleanup in long-lived DB files.
+        await db.executescript(SCHEMA_SQL)
         await db.execute("DELETE FROM messages")
         await db.execute("DELETE FROM turn_requests")
         await db.execute("DELETE FROM active_turns")
         await db.execute("DELETE FROM rooms WHERE name != 'main'")
         await db.execute("DELETE FROM mafia_players")
         await db.execute("DELETE FROM mafia_actions")
+        await db.execute("DELETE FROM live_turns")
+        await db.execute("DELETE FROM live_story_chunks")
+        await db.execute("DELETE FROM live_discussion_messages")
+        await db.execute("DELETE FROM live_story_state")
+        await db.execute("DELETE FROM live_agent_state")
         await db.execute("UPDATE mafia_game SET status='idle', phase='setup', day=0, last_update=NULL, paused=0, last_doctor_target=NULL WHERE id=1")
         await db.execute(
             "INSERT OR REPLACE INTO active_turns (room, agent, turn_request_id, ts) VALUES ('main', NULL, NULL, NULL)"
+        )
+        await db.commit()
+
+
+def _to_json_text(value: Any, default: Any) -> str:
+    try:
+        return json.dumps(value if value is not None else default, ensure_ascii=False)
+    except Exception:
+        return json.dumps(default, ensure_ascii=False)
+
+
+def _from_json_text(raw: Any, default: Any) -> Any:
+    if raw is None:
+        return default
+    try:
+        parsed = json.loads(raw)
+        return parsed if parsed is not None else default
+    except Exception:
+        return default
+
+
+async def create_live_turn(
+    room: str = "main",
+    chapter_ids: Optional[List[str]] = None,
+    text_chunk: str = "",
+    prev_turn_summary: str = "",
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO live_turns (room, ts, chapter_ids, text_chunk, prev_turn_summary, status) "
+            "VALUES (?, ?, ?, ?, ?, 'active')",
+            (
+                room,
+                time.time(),
+                _to_json_text(chapter_ids or [], []),
+                text_chunk or "",
+                prev_turn_summary or "",
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid or 0)
+
+
+async def set_live_turn_summary(turn_id: int, summary: str, room: str = "main") -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE live_turns SET turn_summary=? WHERE id=? AND room=?",
+            (summary or "", int(turn_id), room),
+        )
+        await db.commit()
+
+
+async def set_live_turn_status(turn_id: int, status: str, room: str = "main") -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE live_turns SET status=? WHERE id=? AND room=?",
+            (status, int(turn_id), room),
+        )
+        await db.commit()
+
+
+async def get_latest_live_turn(room: str = "main") -> Optional[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, room, ts, chapter_ids, text_chunk, prev_turn_summary, turn_summary, status "
+            "FROM live_turns WHERE room=? ORDER BY id DESC LIMIT 1",
+            (room,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            out = dict(row)
+            out["chapter_ids"] = _from_json_text(out.get("chapter_ids"), [])
+            return out
+
+
+async def get_live_turn_by_id(turn_id: int, room: str = "main") -> Optional[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, room, ts, chapter_ids, text_chunk, prev_turn_summary, turn_summary, status "
+            "FROM live_turns WHERE room=? AND id=?",
+            (room, int(turn_id)),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            out = dict(row)
+            out["chapter_ids"] = _from_json_text(out.get("chapter_ids"), [])
+            return out
+
+
+async def get_previous_turn_summary(before_turn_id: int, room: str = "main") -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT turn_summary FROM live_turns WHERE room=? AND id<? ORDER BY id DESC LIMIT 1",
+            (room, int(before_turn_id)),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return ""
+            return str(row[0])
+
+
+async def insert_live_story_chunk(
+    turn_id: int,
+    chapter_id: str,
+    text: str,
+    entities: Optional[List[str]] = None,
+    themes: Optional[List[str]] = None,
+    room: str = "main",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO live_story_chunks (room, turn_id, chapter_id, text, entities, themes, ts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                room,
+                int(turn_id),
+                chapter_id or "",
+                text or "",
+                _to_json_text(entities or [], []),
+                _to_json_text(themes or [], []),
+                time.time(),
+            ),
+        )
+        await db.commit()
+
+
+async def insert_live_discussion_message(
+    turn_id: int,
+    message_id: int,
+    agent_id: str,
+    text: str,
+    claims: Optional[List[str]] = None,
+    refs: Optional[List[str]] = None,
+    room: str = "main",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO live_discussion_messages (room, turn_id, message_id, agent_id, text, claims, refs, ts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                room,
+                int(turn_id),
+                int(message_id),
+                agent_id,
+                text or "",
+                _to_json_text(claims or [], []),
+                _to_json_text(refs or [], []),
+                time.time(),
+            ),
+        )
+        await db.commit()
+
+
+async def get_live_discussion_by_turn(turn_id: int, room: str = "main") -> List[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, room, turn_id, message_id, agent_id, text, claims, refs, ts "
+            "FROM live_discussion_messages WHERE room=? AND turn_id=? ORDER BY id ASC",
+            (room, int(turn_id)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            out: List[Dict[str, Any]] = []
+            for row in rows:
+                d = dict(row)
+                d["claims"] = _from_json_text(d.get("claims"), [])
+                d["refs"] = _from_json_text(d.get("refs"), [])
+                out.append(d)
+            return out
+
+
+async def get_recent_live_discussion(
+    room: str = "main",
+    limit: int = 30,
+    before_turn_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if before_turn_id is None:
+            query = (
+                "SELECT id, room, turn_id, message_id, agent_id, text, claims, refs, ts "
+                "FROM live_discussion_messages WHERE room=? ORDER BY id DESC LIMIT ?"
+            )
+            params = (room, int(limit))
+        else:
+            query = (
+                "SELECT id, room, turn_id, message_id, agent_id, text, claims, refs, ts "
+                "FROM live_discussion_messages WHERE room=? AND turn_id<? ORDER BY id DESC LIMIT ?"
+            )
+            params = (room, int(before_turn_id), int(limit))
+        async with db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            out: List[Dict[str, Any]] = []
+            for row in reversed(rows):
+                d = dict(row)
+                d["claims"] = _from_json_text(d.get("claims"), [])
+                d["refs"] = _from_json_text(d.get("refs"), [])
+                out.append(d)
+            return out
+
+
+async def get_live_story_state(room: str = "main") -> Dict[str, Any]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT state_json FROM live_story_state WHERE room=?",
+            (room,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return {}
+            parsed = _from_json_text(row[0], {})
+            return parsed if isinstance(parsed, dict) else {}
+
+
+async def upsert_live_story_state(
+    state: Dict[str, Any],
+    token_estimate: int,
+    source_turn_id: int,
+    room: str = "main",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO live_story_state (room, state_json, token_estimate, updated_ts, source_turn_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                room,
+                _to_json_text(state or {}, {}),
+                int(token_estimate),
+                time.time(),
+                int(source_turn_id),
+            ),
+        )
+        await db.commit()
+
+
+async def get_live_agent_state(agent_id: str, room: str = "main") -> Dict[str, Any]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT state_json FROM live_agent_state WHERE room=? AND agent_id=?",
+            (room, agent_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return {}
+            parsed = _from_json_text(row[0], {})
+            return parsed if isinstance(parsed, dict) else {}
+
+
+async def get_all_live_agent_states(room: str = "main") -> Dict[str, Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT agent_id, state_json FROM live_agent_state WHERE room=?",
+            (room,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            out: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                parsed = _from_json_text(row["state_json"], {})
+                out[str(row["agent_id"])] = parsed if isinstance(parsed, dict) else {}
+            return out
+
+
+async def upsert_live_agent_state(
+    agent_id: str,
+    state: Dict[str, Any],
+    token_estimate: int,
+    source_turn_id: int,
+    room: str = "main",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO live_agent_state (room, agent_id, state_json, token_estimate, updated_ts, source_turn_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                room,
+                agent_id,
+                _to_json_text(state or {}, {}),
+                int(token_estimate),
+                time.time(),
+                int(source_turn_id),
+            ),
         )
         await db.commit()
 
