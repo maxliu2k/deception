@@ -13,6 +13,7 @@ from .server import (
     DEFAULT_BATCH_SEEDS,
     FIXED_MAX_ROUNDS,
     MEGA_BATCH_MODELS,
+    _mega_batch_models,
     _bind_session,
     _execute_batch,
     _mega_batch_export_path,
@@ -34,11 +35,15 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
     token = _bind_session(session_id)
     status_path = _mega_batch_status_path(session_id)
     export_path = _mega_batch_export_path(session_id)
+    mode = str(payload.get("mode") or "buyer_seller_negotiation")
     scenario = payload.get("scenario") or None
     seed_list = payload.get("seed_list") or list(DEFAULT_BATCH_SEEDS)
+    if mode == "five_attr":
+        seed_list = list(seed_list)[:5]
     max_rounds = int(payload.get("max_rounds") or FIXED_MAX_ROUNDS)
     use_models = bool(payload.get("use_models", True))
-    total_matchups = len(MEGA_BATCH_MODELS) * len(MEGA_BATCH_MODELS)
+    mega_models = _mega_batch_models(payload, mode)
+    total_matchups = len(mega_models) * len(mega_models)
     status: Dict[str, Any] = {
         "running": True,
         "done": False,
@@ -47,7 +52,7 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
         "summary": {},
         "completed_matchups": 0,
         "total_matchups": total_matchups,
-        "mode": "buyer_seller_negotiation",
+        "mode": mode,
         "current_matchup": 0,
         "current_episode": 0,
         "current_seed": None,
@@ -68,14 +73,19 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
     try:
         matchup_rows: list[Dict[str, Any]] = []
         matchup_index = 0
-        for buyer_model in MEGA_BATCH_MODELS:
-            for seller_model in MEGA_BATCH_MODELS:
+        for buyer_model in mega_models:
+            for seller_model in mega_models:
                 matchup_index += 1
+                selected_models = (
+                    [buyer_model, seller_model, seller_model]
+                    if mode == "buyer_seller_negotiation"
+                    else [buyer_model, seller_model, seller_model, seller_model, seller_model]
+                )
                 batch_payload = {
                     "num_episodes": len(seed_list),
-                    "mode": "buyer_seller_negotiation",
+                    "mode": mode,
                     "scenario": scenario,
-                    "selected_models": [buyer_model, seller_model, seller_model],
+                    "selected_models": selected_models,
                     "seed_list": list(seed_list),
                     "max_rounds": max_rounds,
                     "use_models": use_models,
@@ -83,7 +93,7 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                 status["current_matchup"] = matchup_index
                 status["current_episode"] = 0
                 status["current_seed"] = None
-                status["current_models"] = [buyer_model, seller_model, seller_model]
+                status["current_models"] = list(selected_models)
                 status["current_buyer_model"] = buyer_model
                 status["current_seller_model"] = seller_model
                 status["current_buyer_budget"] = None
@@ -184,7 +194,7 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                     )
                 status["results"] = list(matchup_rows)
                 status["completed_matchups"] = matchup_index
-                status["summary"] = _summarize_mega_batch(matchup_rows)
+                status["summary"] = _summarize_mega_batch(matchup_rows, mode=mode, models=mega_models)
                 _write_status(status_path, status)
 
         if export_sections:
@@ -192,8 +202,9 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
             export_text = (
                 "\n".join(
                     [
-                        "Mega-Batch Negotiation Export",
-                        f"Models: {', '.join(MEGA_BATCH_MODELS)}",
+                        "Mega-Batch Export",
+                        f"Mode: {mode}",
+                        f"Models: {', '.join(mega_models)}",
                         f"Seeds: [{seed_text}]",
                         f"Matchups completed: {len(matchup_rows)}/{total_matchups}",
                     ]

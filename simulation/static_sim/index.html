@@ -191,6 +191,9 @@
           <div class="hint" id="batchSeedsLabel">Batch seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]</div>
         </div>
         <div class="row">
+          <div class="hint hidden" id="selectedModelsDebug"></div>
+        </div>
+        <div class="row">
           <button id="toggleAdvancedBtn" class="alt">Policy Overrides</button>
         </div>
         <div id="advancedPanel" class="row hidden">
@@ -282,7 +285,7 @@
 
       <!-- RIGHT: output -->
       <div class="stack">
-        <div class="card">
+        <div id="turnProgressCard" class="card">
           <div class="label">Turn Progress</div>
           <div id="turnOut" class="turns"><div class="hint">Click Reset, then run the simulation.</div></div>
         </div>
@@ -338,7 +341,7 @@
     </div>
 
     <script>
-      const MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical"];
+      const MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Truthful"];
       const DEFAULT_PICK = ["5.4", "5.4", "5.4"];
       const SCENARIOS_BY_MODE = {
         five_attr: [
@@ -393,19 +396,28 @@
         if (mode === "open_painting_auction") {
           return [
             ["bidder1", "Bidder 1", "5.4"],
-            ["bidder2", "Bidder 2", "Opus"],
+            ["bidder2", "Bidder 2", "Sonnet"],
             ["bidder3", "Bidder 3", "Flash"],
-            ["bidder4", "Bidder 4", "DeepSeek"],
+            ["bidder4", "Bidder 4", "Llama"],
             ["bidder5", "Bidder 5", "Mathematical"],
           ];
         }
         if (mode === "buyer_seller_negotiation") {
           return [
             ["customer", "Buyer", "5.4"],
-            ["agent", "Seller", "Opus"],
-            ["neg3", "Unused 1 (not used)", "Flash"],
-            ["neg4", "Unused 2 (not used)", "DeepSeek"],
-            ["neg5", "Unused 3 (not used)", "Mathematical"],
+            ["agent", "Seller", "Sonnet"],
+            ["neg3", "Model Slot 3", "Flash"],
+            ["neg4", "Model Slot 4", "Llama"],
+            ["neg5", "Model Slot 5", "Mathematical"],
+          ];
+        }
+        if (mode === "five_attr") {
+          return [
+            ["customer", "Buyer", "5.4"],
+            ["agent", "Agent", "Sonnet"],
+            ["five3", "Model Slot 3", "Flash"],
+            ["five4", "Model Slot 4", "Llama"],
+            ["five5", "Model Slot 5", "Truthful"],
           ];
         }
         return [
@@ -419,12 +431,72 @@
         return Array.from(document.querySelectorAll("#modelBox select")).map((el) => el.value);
       }
 
+      function normalizedSelectedModelsForMode(mode, models) {
+        const out = migrateLegacyDefaultModels(mode, Array.isArray(models) ? models : []);
+        if (mode === "five_attr") {
+          const defaults = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+          const cleaned = Array.isArray(out) ? out.filter((m) => MODEL_POOL.includes(m)) : [];
+          if (cleaned.length === 3 && cleaned[0] === "Haiku" && cleaned[1] === "Sonnet" && cleaned[2] === "Pro") {
+            return [...defaults];
+          }
+          if (cleaned.length >= 4 && cleaned[0] === "5.4" && cleaned[1] === "Opus" && cleaned[2] === "Pro" && cleaned[3] === "Grok") {
+            return [...defaults];
+          }
+          if (cleaned.length < 5) {
+            const padded = [...cleaned];
+            while (padded.length < 5) padded.push(defaults[padded.length]);
+            return padded;
+          }
+          const normalized = cleaned.slice(0, 5);
+          if (normalized[1] === "Opus") normalized[1] = "Sonnet";
+          if (normalized[2] === "Pro") normalized[2] = "Flash";
+          if (normalized[3] === "Grok" || normalized[3] === "Mathematical") normalized[3] = "Llama";
+          if (normalized[4] === "Mathematical") normalized[4] = "Truthful";
+          return normalized;
+        }
+        return out;
+      }
+
+      function normalizeDisplayedModelName(mode, name, index = null) {
+        const raw = String(name || "").trim();
+        if (!raw) return raw;
+        if (mode === "five_attr") {
+          if (raw === "Haiku") return "5.4";
+          if (raw === "Opus") return "Sonnet";
+          if (raw === "Pro") return "Flash";
+          if (raw === "Grok" || raw === "Mathematical") return index === 4 ? "Truthful" : "Llama";
+        } else if (mode === "buyer_seller_negotiation" || mode === "open_painting_auction") {
+          if (raw === "Opus") return "Sonnet";
+          if (raw === "Pro") return "Flash";
+          if (raw === "Grok") return "Llama";
+        }
+        return raw;
+      }
+
+      function normalizeDisplayedModelList(mode, models) {
+        return (Array.isArray(models) ? models : []).map((name, idx) => normalizeDisplayedModelName(mode, name, idx));
+      }
+
       function nextAutoSeed() {
         return Math.floor(Date.now() % 1000000000);
       }
 
       function updateBatchSeedsLabel() {
         document.getElementById("batchSeedsLabel").textContent = `Batch seeds: [${currentBatchSeeds.join(", ")}]`;
+      }
+
+      function renderSelectedModelsDebug() {
+        const mode = document.getElementById("mode").value;
+        const debugEl = document.getElementById("selectedModelsDebug");
+        if (!debugEl) return;
+        if (mode !== "five_attr") {
+          debugEl.classList.add("hidden");
+          debugEl.textContent = "";
+          return;
+        }
+        const normalized = normalizedSelectedModelsForMode(mode, selectedModels());
+        debugEl.textContent = `five_attr payload selected_models: [${normalized.join(", ")}]`;
+        debugEl.classList.remove("hidden");
       }
 
       function maybeAssignFreshSeed(force = false) {
@@ -456,6 +528,7 @@
           row.innerHTML = `<div class="label">${label}</div><select id="model-${roleId}" class="field">${options}</select>`;
           box.appendChild(row);
         }
+        renderSelectedModelsDebug();
       }
 
       function syncModelSelectors(mode, models) {
@@ -470,6 +543,45 @@
             if (models[idx] && MODEL_POOL.includes(models[idx])) el.value = models[idx];
           });
         }
+        renderSelectedModelsDebug();
+      }
+
+      function migrateLegacyDefaultModels(mode, models) {
+        if (!Array.isArray(models)) return models;
+        const out = [...models];
+        if ((mode === "open_painting_auction" || mode === "buyer_seller_negotiation" || mode === "five_attr") && out.length >= 5) {
+          const legacyShape =
+            out[0] === "5.4" &&
+            out[1] === "Opus" &&
+            out[2] === "Flash" &&
+            out[3] === "DeepSeek" &&
+            out[4] === "Mathematical";
+          if (legacyShape) {
+            out[1] = "Sonnet";
+            out[2] = "Flash";
+            out[3] = "Llama";
+          }
+          const priorDefaultShape =
+            out[0] === "5.4" &&
+            out[1] === "Opus" &&
+            out[2] === "Pro" &&
+            out[3] === "Grok" &&
+            out[4] === "Mathematical";
+          if (priorDefaultShape) {
+            out[1] = "Sonnet";
+            out[2] = "Flash";
+            out[3] = "Llama";
+          }
+        }
+        if (mode === "five_attr") {
+          if (out.length === 3 && out[0] === "Haiku" && out[1] === "Sonnet" && out[2] === "Pro") {
+            return ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+          }
+          if (out.length >= 5 && out[4] === "Mathematical") {
+            out[4] = "Truthful";
+          }
+        }
+        return out;
       }
 
       function refreshScenarioOptions() {
@@ -493,6 +605,7 @@
         const mode = document.getElementById("mode").value;
         const negotiationMode = mode === "buyer_seller_negotiation";
         const auctionMode = mode === "open_painting_auction";
+        const fiveAttrMode = mode === "five_attr";
         const advancedPanel = document.getElementById("advancedPanel");
         const advancedBtn = document.getElementById("toggleAdvancedBtn");
         const megaBatchBtn = document.getElementById("megaBatchBtn");
@@ -501,6 +614,8 @@
         const restoreSeedsBtn = document.getElementById("restoreSeedsBtn");
         const batchSeedsLabel = document.getElementById("batchSeedsLabel");
         const conversationCard = document.querySelector(".conversation-card");
+        const turnProgressCard = document.getElementById("turnProgressCard");
+        const hideConversation = auctionMode || negotiationMode;
 
         advancedBtn.classList.toggle("hidden", negotiationMode || auctionMode);
         if (negotiationMode || auctionMode) {
@@ -508,12 +623,22 @@
           advancedBtn.textContent = "Policy Overrides";
         }
 
-        megaBatchBtn.classList.toggle("hidden", !negotiationMode);
+        const showMegaBatch = negotiationMode || fiveAttrMode;
+        megaBatchBtn.classList.toggle("hidden", !showMegaBatch);
+        megaBatchBtn.style.display = showMegaBatch ? "" : "none";
         batchBtn.classList.toggle("hidden", auctionMode);
         randomizeSeedsBtn.classList.toggle("hidden", auctionMode);
         restoreSeedsBtn.classList.toggle("hidden", auctionMode);
         batchSeedsLabel.classList.toggle("hidden", auctionMode);
-        if (conversationCard) conversationCard.classList.toggle("hidden", auctionMode);
+        if (conversationCard) {
+          conversationCard.classList.toggle("hidden", hideConversation);
+          conversationCard.style.display = hideConversation ? "none" : "";
+        }
+        if (turnProgressCard) {
+          turnProgressCard.classList.toggle("hidden", negotiationMode);
+          turnProgressCard.style.display = negotiationMode ? "none" : "";
+        }
+        renderSelectedModelsDebug();
       }
 
       const SESSION_STORAGE_KEY = "simulation_live_session_id";
@@ -641,6 +766,7 @@
         if (slot.mode) parts.push(slot.mode);
         if (slot.phase) parts.push(`phase: ${slot.phase}`);
         if (slot.done === true) parts.push("done");
+        if (slot.step_running) parts.push("running");
         if (slot.mega_batch_running) parts.push("mega-batch running");
         return parts.join(" · ") || "Saved session";
       }
@@ -702,8 +828,9 @@
         `);
         for (const slot of slots) {
           const label = (slot.slot_id || "").replace("save_slot_", "Save Slot ");
-          const badgeClass = slot.mega_batch_running ? "running" : (slot.filled ? "filled" : "empty");
-          const badgeText = slot.mega_batch_running ? "Running" : (slot.filled ? "Filled" : "Empty");
+          const isRunning = !!(slot.step_running || slot.mega_batch_running);
+          const badgeClass = isRunning ? "running" : (slot.filled ? "filled" : "empty");
+          const badgeText = isRunning ? "Running" : (slot.filled ? "Filled" : "Empty");
           const openLabel = slot.filled ? "Open Slot" : "Use Slot";
           cards.push(`
             <div class="slot-card">
@@ -761,6 +888,7 @@
             }
             const parts = ["filled"];
             if (slot.mode) parts.push(slot.mode);
+            if (slot.step_running) parts.push("running");
             if (slot.mega_batch_running) parts.push("mega-batch running");
             option.textContent = `${base} - ${parts.join(" · ")}`;
           }
@@ -775,6 +903,7 @@
           }
           const parts = [`${active.replace("save_slot_", "Save Slot ")} loaded`];
           if (slot.mode) parts.push(slot.mode);
+          if (slot.step_running) parts.push("running");
           if (slot.mega_batch_running) parts.push("mega-batch running");
           hint.textContent = parts.join(" · ");
         } catch (_error) {
@@ -810,6 +939,21 @@
 
       function showTurns(items) {
         const root = document.getElementById("turnOut");
+        const modeNow = document.getElementById("mode")?.value || currentMode || "";
+        if (modeNow === "buyer_seller_negotiation") {
+          const turnCard = document.getElementById("turnProgressCard");
+          if (turnCard) {
+            turnCard.classList.add("hidden");
+            turnCard.style.display = "none";
+          }
+          root.innerHTML = "";
+          return;
+        }
+        const turnCard = document.getElementById("turnProgressCard");
+        if (turnCard) {
+          turnCard.classList.remove("hidden");
+          turnCard.style.display = "";
+        }
         const scrollState = captureScrollState(root);
         root.innerHTML = "";
         const list = Array.isArray(items) ? items : [];
@@ -840,8 +984,9 @@
           refreshPolicyPanels();
           refreshModeChrome();
         }
-        const models = Array.isArray(data.selected_models) ? data.selected_models : [];
+        const models = normalizedSelectedModelsForMode(data.mode, Array.isArray(data.selected_models) ? data.selected_models : []);
         syncModelSelectors(data.mode, models);
+        renderSelectedModelsDebug();
       }
 
       // ── five_attr result renderer ──────────────────────────────────────────
@@ -1129,6 +1274,85 @@
             html += `<tr><td>${item.painting_id}</td><td>${item.status}</td><td>${item.winner_id || "—"}</td><td><span class="val-zero">${item.winning_bid ? `$${Number(item.winning_bid).toFixed(0)}` : "—"}</span></td></tr>`;
           }
           html += `</tbody></table>`;
+          const chartBidders = Array.from(new Set([
+            ...bidders,
+            ...completed.flatMap((item) => (Array.isArray(item.bid_history) ? item.bid_history.map((h) => h && h.bidder_id).filter(Boolean) : [])),
+          ]));
+          const seriesByBidder = {};
+          for (const bidderId of chartBidders) seriesByBidder[bidderId] = [];
+          for (const item of completed) {
+            const lastBidByBidder = {};
+            for (const bid of (Array.isArray(item.bid_history) ? item.bid_history : [])) {
+              const bidderId = bid && bid.bidder_id;
+              const bidAmount = bid && bid.bid_amount;
+              if (!bidderId) continue;
+              if (typeof bidAmount === "number" && Number.isFinite(bidAmount)) {
+                lastBidByBidder[bidderId] = bidAmount;
+              }
+            }
+            for (const bidderId of chartBidders) {
+              const value = lastBidByBidder[bidderId];
+              seriesByBidder[bidderId].push(typeof value === "number" ? value : null);
+            }
+          }
+          const allValues = Object.values(seriesByBidder).flat().filter((v) => typeof v === "number");
+          const yMax = Math.max(1, ...(allValues.length ? allValues : [1]));
+          const width = 920;
+          const height = 280;
+          const padL = 48;
+          const padR = 16;
+          const padT = 14;
+          const padB = 36;
+          const plotW = width - padL - padR;
+          const plotH = height - padT - padB;
+          const n = Math.max(1, completed.length);
+          const xAt = (idx) => padL + (n === 1 ? plotW / 2 : (idx * plotW) / (n - 1));
+          const yAt = (value) => padT + plotH - (value / yMax) * plotH;
+          const palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2", "#be185d", "#4f46e5"];
+          const yTicks = 4;
+          let svg = `<div class="section-head">Final Bid Per Painting</div><svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">`;
+          for (let i = 0; i <= yTicks; i += 1) {
+            const yValue = (yMax * i) / yTicks;
+            const y = yAt(yValue);
+            svg += `<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="#eef2ff" stroke-width="1" />`;
+            svg += `<text x="${padL - 8}" y="${y + 4}" font-size="11" text-anchor="end" fill="#6b7280">$${Math.round(yValue)}</text>`;
+          }
+          for (let i = 0; i < n; i += 1) {
+            const x = xAt(i);
+            svg += `<line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + plotH}" stroke="#f9fafb" stroke-width="1" />`;
+            svg += `<text x="${x}" y="${height - 12}" font-size="11" text-anchor="middle" fill="#6b7280">P${i + 1}</text>`;
+          }
+          chartBidders.forEach((bidderId, bidderIdx) => {
+            const color = palette[bidderIdx % palette.length];
+            const values = seriesByBidder[bidderId];
+            let path = "";
+            let started = false;
+            values.forEach((value, idx) => {
+              if (typeof value !== "number") {
+                started = false;
+                return;
+              }
+              const x = xAt(idx);
+              const y = yAt(value);
+              path += `${started ? " L" : " M"} ${x} ${y}`;
+              started = true;
+            });
+            if (path) {
+              svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />`;
+            }
+            values.forEach((value, idx) => {
+              if (typeof value !== "number") return;
+              const x = xAt(idx);
+              const y = yAt(value);
+              svg += `<circle cx="${x}" cy="${y}" r="3.2" fill="${color}" />`;
+            });
+          });
+          svg += `</svg>`;
+          const legend = chartBidders.map((bidderId, bidderIdx) => {
+            const color = palette[bidderIdx % palette.length];
+            return `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;"><span style="width:10px;height:10px;border-radius:999px;background:${color};display:inline-block;"></span>${bidderId}</span>`;
+          }).join("");
+          html += `${svg}<div style="margin-top:8px;font-size:12px;color:#475569;">${legend}</div>`;
         }
         root.innerHTML = html;
         restoreScrollState(root, scrollState);
@@ -1152,6 +1376,7 @@
         lastRenderData = data;
         applyServerConfiguration(data);
         currentMode = data.mode || "five_attr";
+        refreshModeChrome();
         showConversation(data.conversation);
         showTurns(data.step_status && data.step_status.turns);
         renderFiveAttrSetup(data);
@@ -1254,9 +1479,10 @@
       async function resetSimulation() {
         maybeAssignFreshSeed(false);
         const scenario = document.getElementById("scenario").value;
+        const mode = document.getElementById("mode").value;
         const payload = {
-          selected_models: selectedModels(),
-          mode:     document.getElementById("mode").value,
+          selected_models: normalizedSelectedModelsForMode(mode, selectedModels()),
+          mode,
           scenario: scenario || undefined,
           seed:     Number(document.getElementById("seed").value || 7),
           max_rounds: 20,
@@ -1275,12 +1501,16 @@
       document.getElementById("resetBtn").onclick = resetSimulation;
 
       document.getElementById("stepBtn").onclick = async () => {
+        const mode = document.getElementById("mode").value;
         const payload = buildStepPayload();
         const res = await apiPost("/api/step", payload);
         const data = await res.json();
         if (!res.ok) { alert(data.detail || data.error || "Step failed"); return; }
         showTurns(data.status && data.status.turns);
         showConversation(data.status && data.status.conversation);
+        if (mode === "open_painting_auction") {
+          renderAuctionResult({ mode: "open_painting_auction", ...data.status });
+        }
         if (stepPoller) clearInterval(stepPoller);
         stepPoller = setInterval(pollStepStatus, 350);
         await pollStepStatus();
@@ -1294,11 +1524,16 @@
         btn.textContent = open ? "Hide Policy Overrides" : "Policy Overrides";
       };
 
-      document.getElementById("mode").addEventListener("change", () => {
+      document.getElementById("mode").addEventListener("change", async () => {
         renderModelCheckboxes();
         refreshScenarioOptions();
         refreshPolicyPanels();
         refreshModeChrome();
+        await resetSimulation();
+      });
+
+      document.getElementById("modelBox").addEventListener("change", () => {
+        renderSelectedModelsDebug();
       });
 
       document.getElementById("saveSlot").addEventListener("change", async (event) => {
@@ -1474,31 +1709,38 @@
         card.classList.remove("hidden");
         const rows = data.results || [];
         const summary = data.summary || {};
+        const mode = data.mode || "buyer_seller_negotiation";
         const completed = Number(data.completed_matchups || 0);
         const total = Number(data.total_matchups || 0);
         progress.textContent = total ? `· ${completed}/${total} matchups` : "";
 
         const buyerRankings = summary.buyer_rankings || [];
-        const sellerRankings = summary.seller_rankings || [];
+        const sellerRankings = summary.agent_rankings || summary.seller_rankings || [];
+        const secondRoleLabel = mode === "five_attr" ? "Agent" : "Seller";
+        const secondAvgLabel = mode === "five_attr" ? "Agent Avg" : "Seller Avg";
+        const turnsLabel = mode === "five_attr" ? "Msgs" : "Turns";
+        const rankingMetricLabel = mode === "five_attr" ? "Success" : "Avg Reward";
 
         let html = `<table class="batch-table">
           <thead><tr>
-            <th>Buyer</th><th>Seller</th><th>Deal %</th><th>Buyer Avg</th><th>Seller Avg</th><th>Turns</th><th>Price</th>
+            <th>Buyer</th><th>${secondRoleLabel}</th><th>Deal %</th><th>Buyer Avg</th><th>${secondAvgLabel}</th><th>${turnsLabel}</th><th>Price</th>
           </tr></thead><tbody>`;
         for (const row of rows) {
+          const buyerName = normalizeDisplayedModelName(mode, row.buyer_model, 0);
+          const sellerName = normalizeDisplayedModelName(mode, row.seller_model, 1);
           if (row.error) {
-            html += `<tr class="error-row"><td>${row.buyer_model}</td><td>${row.seller_model}</td><td colspan="5">${row.error}</td></tr>`;
+            html += `<tr class="error-row"><td>${buyerName}</td><td>${sellerName}</td><td colspan="5">${row.error}</td></tr>`;
             continue;
           }
           const s = row.summary || {};
           html += `<tr>
-            <td>${row.buyer_model}</td>
-            <td>${row.seller_model}</td>
+            <td>${buyerName}</td>
+            <td>${sellerName}</td>
             <td><span class="val-zero">${((Number(s.booking_rate || 0)) * 100).toFixed(0)}%</span></td>
-            <td>${fmtVal(s.avg_buyer_remaining_money ?? s.avg_customer_reward)}</td>
-            <td>${fmtVal(s.avg_seller_profit_margin ?? s.avg_resort_reward)}</td>
-            <td><span class="val-zero">${Number(s.avg_num_turns ?? 0).toFixed(2)}</span></td>
-            <td><span class="val-zero">$${Number(s.avg_agreed_price ?? 0).toFixed(2)}</span></td>
+            <td>${mode === "five_attr" ? "-" : fmtVal(s.avg_buyer_remaining_money ?? s.avg_customer_reward)}</td>
+            <td>${mode === "five_attr" ? "-" : fmtVal(s.avg_seller_profit_margin ?? s.avg_agent_reward ?? s.avg_resort_reward)}</td>
+            <td><span class="val-zero">${Number(s.avg_num_turns ?? s.avg_num_messages ?? 0).toFixed(2)}</span></td>
+            <td><span class="val-zero">${mode === "five_attr" ? "-" : `$${Number(s.avg_agreed_price ?? 0).toFixed(2)}`}</span></td>
           </tr>`;
         }
         html += `</tbody></table>`;
@@ -1506,9 +1748,11 @@
         for (const row of rows) {
           if (row.error) continue;
           const episodes = Array.isArray(row.results) ? row.results : [];
+          const buyerName = normalizeDisplayedModelName(mode, row.buyer_model, 0);
+          const sellerName = normalizeDisplayedModelName(mode, row.seller_model, 1);
           const episodeBlocks = episodes.map((ep) => {
             const convo = Array.isArray(ep.conversation) ? ep.conversation : [];
-            const convoKey = `mega-${row.buyer_model}-${row.seller_model}-ep-${Number(ep.episode || 0)}`;
+            const convoKey = `mega-${buyerName}-${sellerName}-ep-${Number(ep.episode || 0)}`;
             const convoHtml = convo.length
               ? `<div class="chat" data-scroll-key="${escHtml(convoKey)}" style="max-height:180px;">${convo.map((it) => `
                   <div class="msg">
@@ -1518,17 +1762,17 @@
                   </div>
                 `).join("")}</div>`
               : `<div class="hint">No conversation captured for this episode.</div>`;
-            const priceText = ep.agreed_price ? `$${Number(ep.agreed_price).toFixed(2)}` : "-";
+            const priceText = mode === "five_attr" ? "-" : (ep.agreed_price ? `$${Number(ep.agreed_price).toFixed(2)}` : "-");
             return `
               <div class="mini-episode">
-                <div class="mini-episode-head">Episode ${Number(ep.episode || 0)} | Seed ${escHtml(ep.seed)} | Deal ${ep.booked ? "Yes" : "No"} | Price ${priceText}</div>
+                <div class="mini-episode-head">Episode ${Number(ep.episode || 0)} | Seed ${escHtml(ep.seed)} | Deal ${ep.booked ? "Yes" : "No"}${mode === "five_attr" ? ` | Messages ${Number(ep.num_messages || 0)}` : ` | Price ${priceText}`}</div>
                 ${convoHtml}
               </div>
             `;
           }).join("");
           html += `
             <details class="matchup-details">
-              <summary>${escHtml(row.buyer_model)} vs ${escHtml(row.seller_model)} conversations</summary>
+              <summary>${escHtml(buyerName)} vs ${escHtml(sellerName)} conversations</summary>
               <div class="matchup-details-body">
                 ${episodeBlocks || `<div class="hint">No episode details available yet.</div>`}
               </div>
@@ -1538,15 +1782,15 @@
 
         if (buyerRankings.length || sellerRankings.length) {
           html += `<div class="section-head">Buyer Rankings</div>`;
-          html += `<table class="batch-table"><thead><tr><th>Model</th><th>Avg Reward</th><th>Deal %</th><th>Matchups</th></tr></thead><tbody>`;
+          html += `<table class="batch-table"><thead><tr><th>Model</th><th>${rankingMetricLabel}</th><th>Deal %</th><th>Matchups</th></tr></thead><tbody>`;
           for (const row of buyerRankings) {
-            html += `<tr><td>${row.model}</td><td>${fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td></tr>`;
+            html += `<tr><td>${normalizeDisplayedModelName(mode, row.model)}</td><td>${mode === "five_attr" ? `<span class="val-zero">${(Number(row.avg_reward || 0) * 100).toFixed(0)}%</span>` : fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td></tr>`;
           }
           html += `</tbody></table>`;
-          html += `<div class="section-head">Seller Rankings</div>`;
-          html += `<table class="batch-table"><thead><tr><th>Model</th><th>Avg Reward</th><th>Deal %</th><th>Matchups</th></tr></thead><tbody>`;
+          html += `<div class="section-head">${secondRoleLabel} Rankings</div>`;
+          html += `<table class="batch-table"><thead><tr><th>Model</th><th>${rankingMetricLabel}</th><th>Deal %</th><th>Matchups</th></tr></thead><tbody>`;
           for (const row of sellerRankings) {
-            html += `<tr><td>${row.model}</td><td>${fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td></tr>`;
+            html += `<tr><td>${normalizeDisplayedModelName(mode, row.model)}</td><td>${mode === "five_attr" ? `<span class="val-zero">${(Number(row.avg_reward || 0) * 100).toFixed(0)}%</span>` : fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td></tr>`;
           }
           html += `</tbody></table>`;
         }
@@ -1554,6 +1798,7 @@
         out.innerHTML = html;
         restoreOpenDetailsState(out, detailsState);
         restoreScrollState(out, scrollState);
+        restoreKeyedScrollStates(out, ".chat[data-scroll-key]", chatStates);
       }
 
       function renderCurrentEpisodePanel(targetId, status, kind) {
@@ -1566,13 +1811,17 @@
         const turns = Array.isArray(status.current_turns) ? status.current_turns : [];
         const currentEpisode = Number(status.current_episode || 0);
         const currentSeed = status.current_seed;
-        const buyerModel = status.current_buyer_model || (Array.isArray(status.current_models) ? status.current_models[0] : null);
-        const sellerModel = status.current_seller_model || (Array.isArray(status.current_models) ? status.current_models[1] : null);
+        const mode = status.mode || currentMode || "buyer_seller_negotiation";
+        const normalizedCurrentModels = normalizeDisplayedModelList(mode, status.current_models);
+        const buyerModel = normalizeDisplayedModelName(mode, status.current_buyer_model || (Array.isArray(normalizedCurrentModels) ? normalizedCurrentModels[0] : null), 0);
+        const sellerModel = normalizeDisplayedModelName(mode, status.current_seller_model || (Array.isArray(normalizedCurrentModels) ? normalizedCurrentModels[1] : null), 1);
         const buyerBudget = status.current_buyer_budget;
         const sellerFloor = status.current_seller_floor;
         const sellerAsk = status.current_seller_ask;
         const usedModels = status.current_used_models;
         const llmError = status.current_llm_error;
+        const leftRoleLabel = mode === "five_attr" ? "Buyer" : "Buyer";
+        const rightRoleLabel = mode === "five_attr" ? "Agent" : "Seller";
         const prefix = kind === "mega"
           ? `Matchup ${Number(status.current_matchup || 0)}/${Number(status.total_matchups || 0)}`
           : `Episode ${currentEpisode}/${Number(status.total_episodes || 0)}`;
@@ -1609,17 +1858,24 @@
 
         root.innerHTML = `
           <div class="label">Current Episode</div>
-          <div class="hint" style="margin-top:6px;">${prefix}${currentSeed !== null && currentSeed !== undefined ? ` | Seed ${currentSeed}` : ""}${buyerModel ? ` | Buyer ${buyerModel}` : ""}${sellerModel ? ` | Seller ${sellerModel}` : ""}</div>
-          <div class="hint" style="margin-top:4px;">${buyerBudget !== null && buyerBudget !== undefined ? `Buyer budget $${buyerBudget}` : ""}${sellerFloor !== null && sellerFloor !== undefined ? ` | Seller floor $${sellerFloor}` : ""}${sellerAsk !== null && sellerAsk !== undefined ? ` | Seller ask $${sellerAsk}` : ""}</div>
+          <div class="hint" style="margin-top:6px;">${prefix}${currentSeed !== null && currentSeed !== undefined ? ` | Seed ${currentSeed}` : ""}${buyerModel ? ` | ${leftRoleLabel} ${buyerModel}` : ""}${sellerModel ? ` | ${rightRoleLabel} ${sellerModel}` : ""}</div>
+          <div class="hint" style="margin-top:4px;">${mode === "five_attr" ? "" : `${buyerBudget !== null && buyerBudget !== undefined ? `Buyer budget $${buyerBudget}` : ""}${sellerFloor !== null && sellerFloor !== undefined ? ` | Seller floor $${sellerFloor}` : ""}${sellerAsk !== null && sellerAsk !== undefined ? ` | Seller ask $${sellerAsk}` : ""}`}</div>
           <div class="hint" style="margin-top:4px; color:${usedModels === false ? "#991b1b" : "#6b7280"};">
             ${usedModels === true ? "Using live model calls." : usedModels === false ? `Fallback used.${llmError ? ` ${llmError}` : ""}` : "Waiting for model status..."}
           </div>
           <div style="margin-top:10px;">${turnsHtml}</div>
           <div class="chat" data-scroll-key="${escHtml(currentChatKey)}" style="margin-top:10px; max-height:220px;">${convoHtml}</div>
         `;
-        restoreScrollState(root, rootScrollState);
-        restoreScrollState(root.querySelector(".turns"), turnsScrollState);
-        restoreScrollState(root.querySelector(".chat"), chatScrollState);
+        // Defer scroll restore until after the browser has performed layout on the new
+        // innerHTML, so scrollHeight is accurate. Without this, scrollHeight is 0 or stale
+        // and Math.min(savedTop, nextMax) collapses to 0, snapping the view to the top.
+        const chatEl = root.querySelector(".chat");
+        const turnsEl = root.querySelector(".turns");
+        requestAnimationFrame(() => {
+          restoreScrollState(root, rootScrollState);
+          restoreScrollState(turnsEl, turnsScrollState);
+          restoreScrollState(chatEl, chatScrollState);
+        });
       }
 
       async function pollBatchStatus() {
@@ -1658,7 +1914,7 @@
           num_episodes: 10,
           mode,
           scenario: scenario || undefined,
-          selected_models: selectedModels(),
+          selected_models: normalizedSelectedModelsForMode(mode, selectedModels()),
           seed_list: currentBatchSeeds,
           base_seed: Number(document.getElementById("seed").value || 0),
           max_rounds: 20,
@@ -1694,20 +1950,21 @@
       document.getElementById("megaBatchBtn").onclick = async () => {
         const mode = document.getElementById("mode").value;
         const scenario = document.getElementById("scenario").value;
-        if (mode !== "buyer_seller_negotiation") {
-          alert("Mega-batch is only available for buyer_seller_negotiation.");
+        if (mode !== "buyer_seller_negotiation" && mode !== "five_attr") {
+          alert("Mega-batch is only available for buyer_seller_negotiation or five_attr.");
           return;
         }
         const payload = {
           mode,
           scenario: scenario || undefined,
-          seed_list: currentBatchSeeds,
+          selected_models: normalizedSelectedModelsForMode(mode, selectedModels()),
+          seed_list: mode === "five_attr" ? currentBatchSeeds.slice(0, 5) : currentBatchSeeds,
           max_rounds: 20,
         };
         if (!payload.scenario) delete payload.scenario;
         document.getElementById("megaBatchSpinner").classList.remove("hidden");
         document.getElementById("megaBatchCard").classList.remove("hidden");
-        document.getElementById("megaBatchOut").innerHTML = `<div class="hint" style="padding:10px 0;">Running 25 buyer/seller batches...</div>`;
+        document.getElementById("megaBatchOut").innerHTML = `<div class="hint" style="padding:10px 0;">${mode === "five_attr" ? "Running 25 buyer/agent persuasion batches..." : "Running 25 buyer/seller batches..."}</div>`;
         try {
           const res = await apiPost("/api/run_mega_batch_start", payload);
           const data = await res.json();
@@ -1841,6 +2098,7 @@
       refreshScenarioOptions();
       refreshPolicyPanels();
       refreshModeChrome();
+      renderSelectedModelsDebug();
       refreshSaveSlots()
         .then(async () => {
           showSlotMenu();

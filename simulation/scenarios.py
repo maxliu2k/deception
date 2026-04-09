@@ -20,7 +20,7 @@ from .state import (
 )
 
 
-MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical"]
+MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Truthful"]
 
 
 def _agent_template(selected_models: List[str], *, resort_1_commission: float, resort_2_commission: float) -> AgentState:
@@ -165,7 +165,7 @@ def auction_baseline(selected_models: List[str]) -> Dict:
         for i in range(5)
     ]
     return {
-        "num_paintings": 10,
+        "num_paintings": 12,
         "opening_bid": 100,
         "start_budget": 10000,
         "bidders": bidders,

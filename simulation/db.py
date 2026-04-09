@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 import aiosqlite
 
 
-DB_PATH = Path(__file__).resolve().parents[1] / "arena.sqlite"
+DB_PATH = Path(__file__).resolve().parent / "arena.sqlite"
 
 
 SCHEMA_SQL = """
