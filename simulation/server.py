@@ -172,7 +172,7 @@ def _runtime(session_id: str | None = None) -> _SessionRuntime:
         )
         if (
             (current_running or persisted_running)
-            and persisted_ts >= (runtime.persisted_updated_at or 0.0)
+            and persisted_ts > (runtime.persisted_updated_at or 0.0)
         ):
             runtime = persisted_runtime
             SESSION_RUNTIMES[sid] = runtime
@@ -1696,6 +1696,59 @@ async def _coerce_negotiation_reply(
     }
 
 
+def _parse_plain_negotiation_reply(raw_text: str) -> dict[str, Any]:
+    text = _clean_response_text(raw_text)
+    upper = text.upper()
+    if upper.startswith("ACCEPT"):
+        message = text.split("|", 1)[1].strip() if "|" in text else text
+        return {
+            "accept_current_offer": True,
+            "proposed_price": None,
+            "message_text": message or text,
+            "_raw_text": text,
+        }
+    price_match = re.match(r"^\s*PRICE\s+(\d+)(?:\s*\|\s*(.*))?\s*$", text, flags=re.IGNORECASE | re.DOTALL)
+    if price_match:
+        message = (price_match.group(2) or "").strip()
+        return {
+            "accept_current_offer": False,
+            "proposed_price": int(price_match.group(1)),
+            "message_text": message or text,
+            "_raw_text": text,
+        }
+    return {
+        "accept_current_offer": None,
+        "proposed_price": _extract_last_integer(text),
+        "message_text": text,
+        "_raw_text": text,
+    }
+
+
+async def _call_negotiation_llm_reply(
+    alias: str,
+    *,
+    role_prompt: str,
+    context_prompt: str,
+    max_tokens: int = 220,
+) -> dict[str, Any]:
+    if alias in {"Flash", "Pro"}:
+        text = await _call_llm_text_with_timeout(
+            alias,
+            (
+                f"{role_prompt} "
+                "Do not use JSON. Reply in exactly one line using one of these formats only: "
+                "`ACCEPT | short message` or `PRICE <integer> | short message`. "
+                "No code fences, no markdown, no extra commentary."
+            ),
+            context_prompt,
+            temperature=0.2,
+            max_tokens=90,
+            timeout_s=30.0,
+        )
+        return _parse_plain_negotiation_reply(text)
+    return await _call_llm_json_with_timeout(alias, f"Return STRICT JSON with proposed_price, message_text, accept_current_offer. {role_prompt}", context_prompt, max_tokens=max_tokens)
+
+
 def _parse_open_auction_reply(raw: str, *, min_next_bid: int, remaining_budget: int) -> OpenAuctionAction:
     text = str(raw or "").strip()
     if not text:
@@ -2421,19 +2474,20 @@ async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str,
                     messages_used=len(turns),
                 )
             else:
-                seller_open = await _call_llm_json_with_timeout(
+                seller_open = await _call_negotiation_llm_reply(
                     seller_model,
-                    "Return STRICT JSON with proposed_price, message_text, accept_current_offer. "
-                    "You are a seller negotiating directly with one buyer. "
-                    f"You are selling a {seller.item_name}. Your hard floor is {seller.baseline_value}; never propose or accept below it. "
-                    f"Your reward is your profit margin: agreed_price - {seller.baseline_value}. "
-                    f"{deadline_rule} "
-                    "Primary objective: maximize your reward, but remember no-deal gives 0. "
-                    "If a legal offer gives positive reward, prefer closing over risking timeout. "
-                    "Do not stall with repeated numbers when the deadline is near. "
-                    f"{opening_timer_instruction} "
-                    f"Your opening ask is {seller.asking_price}. Keep the message to 2-4 short lines.",
-                    f"Timer update: {opening_timer_instruction}\nStart the negotiation. Opening ask: {seller.asking_price}.",
+                    role_prompt=(
+                        "You are a seller negotiating directly with one buyer. "
+                        f"You are selling a {seller.item_name}. Your hard floor is {seller.baseline_value}; never propose or accept below it. "
+                        f"Your reward is your profit margin: agreed_price - {seller.baseline_value}. "
+                        f"{deadline_rule} "
+                        "Primary objective: maximize your reward, but remember no-deal gives 0. "
+                        "If a legal offer gives positive reward, prefer closing over risking timeout. "
+                        "Do not stall with repeated numbers when the deadline is near. "
+                        f"{opening_timer_instruction} "
+                        f"Your opening ask is {seller.asking_price}. Keep the message to 2-4 short lines."
+                    ),
+                    context_prompt=f"Timer update: {opening_timer_instruction}\nStart the negotiation. Opening ask: {seller.asking_price}.",
                     max_tokens=220,
                 )
                 opening_price = max(seller.baseline_value, _clamp_int(seller_open.get("proposed_price"), seller.baseline_value, 9999, seller.asking_price))
@@ -2467,20 +2521,21 @@ async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str,
                             messages_used=len(turns),
                         )
                     else:
-                        raw_bjson = await _call_llm_json_with_timeout(
+                        raw_bjson = await _call_negotiation_llm_reply(
                             buyer_model,
-                            "Return STRICT JSON with proposed_price, message_text, accept_current_offer. "
-                            "You are the buyer in a direct negotiation. "
-                            f"You are trying to buy a {buyer.item_name}. Your hard budget ceiling is {buyer.budget}; never propose or accept above it. "
-                            f"Your reward is remaining money: {buyer.budget} - agreed_price. "
-                            f"{deadline_rule} "
-                            "Primary objective: maximize your reward, but remember no-deal gives 0. "
-                            "If the current legal price gives non-negative reward and deadline risk is high, prefer closing the deal. "
-                            "Do not stall with repeated numbers when the deadline is near. "
-                            f"You have exactly {turns_left_for_side} turns left for your side after this message. "
-                            f"{timer_instruction} "
-                            f"Your target price is {buyer.target_price}. Keep the message to 2-4 short lines.",
-                            f"Timer update: {timer_instruction}\nCurrent seller ask: {standing_price}\nRecent transcript:\n{transcript}",
+                            role_prompt=(
+                                "You are the buyer in a direct negotiation. "
+                                f"You are trying to buy a {buyer.item_name}. Your hard budget ceiling is {buyer.budget}; never propose or accept above it. "
+                                f"Your reward is remaining money: {buyer.budget} - agreed_price. "
+                                f"{deadline_rule} "
+                                "Primary objective: maximize your reward, but remember no-deal gives 0. "
+                                "If the current legal price gives non-negative reward and deadline risk is high, prefer closing the deal. "
+                                "Do not stall with repeated numbers when the deadline is near. "
+                                f"You have exactly {turns_left_for_side} turns left for your side after this message. "
+                                f"{timer_instruction} "
+                                f"Your target price is {buyer.target_price}. Keep the message to 2-4 short lines."
+                            ),
+                            context_prompt=f"Timer update: {timer_instruction}\nCurrent seller ask: {standing_price}\nRecent transcript:\n{transcript}",
                             max_tokens=220,
                         )
                         bjson = await _coerce_negotiation_reply(
@@ -2520,20 +2575,21 @@ async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str,
                             messages_used=len(turns),
                         )
                     else:
-                        raw_sjson = await _call_llm_json_with_timeout(
+                        raw_sjson = await _call_negotiation_llm_reply(
                             seller_model,
-                            "Return STRICT JSON with proposed_price, message_text, accept_current_offer. "
-                            "You are the seller in a direct negotiation. "
-                            f"You are selling a {seller.item_name}. Your hard floor is {seller.baseline_value}; never propose or accept below it. "
-                            f"Your reward is your profit margin: agreed_price - {seller.baseline_value}. "
-                            f"{deadline_rule} "
-                            "Primary objective: maximize your reward, but remember no-deal gives 0. "
-                            "If a current legal offer gives positive reward and deadline risk is high, prefer closing the deal. "
-                            "Do not stall with repeated numbers when the deadline is near. "
-                            f"You have exactly {turns_left_for_side} turns left for your side after this message. "
-                            f"{timer_instruction} "
-                            "Keep the message to 2-4 short lines.",
-                            f"Timer update: {timer_instruction}\nCurrent buyer offer: {standing_price}\nRecent transcript:\n{transcript}",
+                            role_prompt=(
+                                "You are the seller in a direct negotiation. "
+                                f"You are selling a {seller.item_name}. Your hard floor is {seller.baseline_value}; never propose or accept below it. "
+                                f"Your reward is your profit margin: agreed_price - {seller.baseline_value}. "
+                                f"{deadline_rule} "
+                                "Primary objective: maximize your reward, but remember no-deal gives 0. "
+                                "If a current legal offer gives positive reward and deadline risk is high, prefer closing the deal. "
+                                "Do not stall with repeated numbers when the deadline is near. "
+                                f"You have exactly {turns_left_for_side} turns left for your side after this message. "
+                                f"{timer_instruction} "
+                                "Keep the message to 2-4 short lines."
+                            ),
+                            context_prompt=f"Timer update: {timer_instruction}\nCurrent buyer offer: {standing_price}\nRecent transcript:\n{transcript}",
                             max_tokens=220,
                         )
                         sjson = await _coerce_negotiation_reply(
@@ -3177,6 +3233,9 @@ async def _run_step_job(payload: Dict[str, Any]) -> None:
                 any_fallback = any_fallback or (not used_models)
                 if llm_error:
                     last_llm_error = llm_error
+                # Important for cross-process updates: the API server polls runtime state
+                # from persisted snapshots while this step worker is running.
+                _persist_runtime()
                 await asyncio.sleep(0)
             runtime.step_status["used_models"] = not any_fallback
             runtime.step_status["llm_error"] = last_llm_error
