@@ -698,7 +698,10 @@ def _normalized_selected_models_for_mode(mode: str, selected: list[str] | None) 
         default = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"]
         if raw == ["Haiku", "Sonnet", "Pro"]:
             return list(default)
-        if len(raw) >= 4 and raw[:4] == ["5.4", "Opus", "Pro", "Grok"]:
+        if len(raw) >= 5 and (
+            raw[:5] == ["5.4", "Opus", "Pro", "Grok", "Mathematical"]
+            or raw[:5] == ["5.4", "Opus", "Pro", "Grok", "Llama"]
+        ):
             return list(default)
         if len(raw) in {2, 3, 4}:
             while len(raw) < 5:
