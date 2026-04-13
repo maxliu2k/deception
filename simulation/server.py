@@ -4463,7 +4463,8 @@ async def api_step_status(session_id: str | None = Query(default=None)) -> JSONR
         runtime = _runtime()
         env = runtime.env
         if env is not None and str(env.config.get("mode") or "mediation") == "open_painting_auction":
-            runtime.step_status["turns"] = _auction_turns()
+            if not runtime.step_status.get("turns"):
+                runtime.step_status["turns"] = _auction_turns()
             auction_names = _auction_display_name_map(env)
             round_state = env.world.get("auction_current_round")
             bidders = env.world.get("auction_bidders") or {}
@@ -4473,6 +4474,10 @@ async def api_step_status(session_id: str | None = Query(default=None)) -> JSONR
                 round_payload["active_bidders"] = [auction_names.get(bid, bid) for bid in (round_payload.get("active_bidders") or [])]
                 round_payload["passed_bidders"] = [auction_names.get(bid, bid) for bid in (round_payload.get("passed_bidders") or [])]
                 round_payload["turn_order"] = [auction_names.get(bid, bid) for bid in (round_payload.get("turn_order") or [])]
+                round_payload["bid_history"] = [
+                    {**entry, "bidder_id": auction_names.get(entry.get("bidder_id"), entry.get("bidder_id"))}
+                    for entry in (round_payload.get("bid_history") or [])
+                ]
             runtime.step_status["auction_round"] = round_payload
             runtime.step_status["current_painting"] = round_state.painting_id if round_state else None
             runtime.step_status["current_turn_bidder"] = _auction_display_name(round_state.turn_order[round_state.turn_index], env) if round_state and round_state.active_bidders else None
@@ -4505,6 +4510,10 @@ async def api_state(session_id: str | None = Query(default=None)) -> JSONRespons
                 round_payload["active_bidders"] = [auction_names.get(bid, bid) for bid in (round_payload.get("active_bidders") or [])]
                 round_payload["passed_bidders"] = [auction_names.get(bid, bid) for bid in (round_payload.get("passed_bidders") or [])]
                 round_payload["turn_order"] = [auction_names.get(bid, bid) for bid in (round_payload.get("turn_order") or [])]
+                round_payload["bid_history"] = [
+                    {**entry, "bidder_id": auction_names.get(entry.get("bidder_id"), entry.get("bidder_id"))}
+                    for entry in (round_payload.get("bid_history") or [])
+                ]
             return JSONResponse({
                 "ok": True,
                 "phase": env.phase,
@@ -4627,6 +4636,10 @@ async def api_render(session_id: str | None = Query(default=None)) -> JSONRespon
                 round_payload["active_bidders"] = [auction_names.get(bid, bid) for bid in (round_payload.get("active_bidders") or [])]
                 round_payload["passed_bidders"] = [auction_names.get(bid, bid) for bid in (round_payload.get("passed_bidders") or [])]
                 round_payload["turn_order"] = [auction_names.get(bid, bid) for bid in (round_payload.get("turn_order") or [])]
+                round_payload["bid_history"] = [
+                    {**entry, "bidder_id": auction_names.get(entry.get("bidder_id"), entry.get("bidder_id"))}
+                    for entry in (round_payload.get("bid_history") or [])
+                ]
             return JSONResponse({
                 "ok": True,
                 "phase": env.phase,

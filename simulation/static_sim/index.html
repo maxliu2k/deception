@@ -1532,8 +1532,9 @@
         await resetSimulation();
       });
 
-      document.getElementById("modelBox").addEventListener("change", () => {
+      document.getElementById("modelBox").addEventListener("change", async () => {
         renderSelectedModelsDebug();
+        await resetSimulation();
       });
 
       document.getElementById("saveSlot").addEventListener("change", async (event) => {
@@ -1754,13 +1755,17 @@
             const convo = Array.isArray(ep.conversation) ? ep.conversation : [];
             const convoKey = `mega-${buyerName}-${sellerName}-ep-${Number(ep.episode || 0)}`;
             const convoHtml = convo.length
-              ? `<div class="chat" data-scroll-key="${escHtml(convoKey)}" style="max-height:180px;">${convo.map((it) => `
+              ? `<div class="chat" data-scroll-key="${escHtml(convoKey)}" style="max-height:180px;">${convo.map((it) => {
+                  const speaker = normalizeDisplayedModelName(mode, it.speaker || "Model");
+                  const recipient = it.recipient ? normalizeDisplayedModelName(mode, it.recipient) : "";
+                  return `
                   <div class="msg">
-                    <div class="who">${escHtml(it.speaker || "Model")}</div>
-                    <div class="meta">${[it.channel, it.recipient ? `→ ${it.recipient}` : ""].filter(Boolean).map(escHtml).join("  ")}</div>
+                    <div class="who">${escHtml(speaker)}</div>
+                    <div class="meta">${[it.channel, recipient ? `→ ${recipient}` : ""].filter(Boolean).map(escHtml).join("  ")}</div>
                     <div>${escHtml(it.text || "")}</div>
                   </div>
-                `).join("")}</div>`
+                `;
+                }).join("")}</div>`
               : `<div class="hint">No conversation captured for this episode.</div>`;
             const priceText = mode === "five_attr" ? "-" : (ep.agreed_price ? `$${Number(ep.agreed_price).toFixed(2)}` : "-");
             return `
@@ -1845,13 +1850,17 @@
           : `<div class="hint">Waiting for the current episode to emit turns...</div>`;
 
         const convoHtml = conversation.length
-          ? conversation.map((it) => `
+          ? conversation.map((it) => {
+              const speaker = normalizeDisplayedModelName(mode, it.speaker || "Model");
+              const recipient = it.recipient ? normalizeDisplayedModelName(mode, it.recipient) : "";
+              return `
               <div class="msg">
-                <div class="who">${it.speaker || "Model"}</div>
-                <div class="meta">${[it.channel, it.recipient ? `→ ${it.recipient}` : ""].filter(Boolean).join("  ")}</div>
+                <div class="who">${speaker}</div>
+                <div class="meta">${[it.channel, recipient ? `→ ${recipient}` : ""].filter(Boolean).join("  ")}</div>
                 <div>${(it.text || "").replace(/</g, "&lt;")}</div>
               </div>
-            `).join("")
+            `;
+            }).join("")
           : (usedModels === false && llmError
               ? `<div class="msg" style="border-color:#fca5a5; background:#fff1f2;"><div class="who" style="color:#991b1b;">Fallback Triggered</div><div>${String(llmError).replace(/</g, "&lt;")}</div></div>`
               : `<div class="hint">No transcript yet for the current episode.</div>`);
