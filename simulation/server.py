@@ -707,14 +707,6 @@ def _normalized_selected_models_for_mode(mode: str, selected: list[str] | None) 
             raw = list(default)
         else:
             raw = raw[:5]
-        if len(raw) > 1 and raw[1] == "Opus":
-            raw[1] = "Sonnet"
-        if len(raw) > 2 and raw[2] == "Pro":
-            raw[2] = "Flash"
-        if len(raw) > 3 and raw[3] in {"Grok", "Mathematical"}:
-            raw[3] = "Llama"
-        if len(raw) > 4 and raw[4] == "Mathematical":
-            raw[4] = "Truthful"
         return raw
     if mode == "buyer_seller_negotiation":
         if len(raw) >= 5 and raw[:5] == ["5.4", "Opus", "Pro", "Grok", "Mathematical"]:
@@ -3864,6 +3856,147 @@ def _batch_table_data(results: list[Dict[str, Any]], summary: Dict[str, Any], mo
     return result_headers, result_rows, summary_headers, summary_rows
 
 
+def _auction_export_data(env: TravelGameEnv) -> tuple[list[str], list[list[Any]], list[str], list[list[Any]], str]:
+    payload = _auction_step_payload(env)
+    completed = list(payload.get("completed_paintings") or [])
+    bidder_ids = sorted(
+        {
+            *(payload.get("all_budgets") or {}).keys(),
+            *(payload.get("painting_counts") or {}).keys(),
+            *[
+                str(entry.get("bidder_id"))
+                for item in completed
+                for entry in (item.get("bid_history") or [])
+                if entry.get("bidder_id")
+            ],
+        }
+    )
+    if not bidder_ids:
+        bidder_ids = sorted((payload.get("all_budgets") or {}).keys())
+
+    result_headers = ["painting_id", "status", "winner_id", "winning_bid"] + [f"max_bid_{bidder}" for bidder in bidder_ids]
+    result_rows: list[list[Any]] = []
+    spent_by_bidder = {bidder: 0 for bidder in bidder_ids}
+    for item in completed:
+        max_bid_by_bidder: dict[str, int] = {}
+        for entry in (item.get("bid_history") or []):
+            bidder = str(entry.get("bidder_id") or "")
+            if not bidder:
+                continue
+            bid_amount = entry.get("bid_amount")
+            if isinstance(bid_amount, (int, float)):
+                value = int(bid_amount)
+                prev = max_bid_by_bidder.get(bidder)
+                if prev is None or value > prev:
+                    max_bid_by_bidder[bidder] = value
+        row = [
+            item.get("painting_id"),
+            item.get("status"),
+            item.get("winner_id"),
+            item.get("winning_bid"),
+        ] + [max_bid_by_bidder.get(bidder) for bidder in bidder_ids]
+        result_rows.append(row)
+        winner = item.get("winner_id")
+        winning_bid = item.get("winning_bid")
+        if winner in spent_by_bidder and isinstance(winning_bid, (int, float)):
+            spent_by_bidder[str(winner)] += int(winning_bid)
+
+    total_paintings = len(completed)
+    sold = [item for item in completed if item.get("status") == "sold" and isinstance(item.get("winning_bid"), (int, float))]
+    sold_count = len(sold)
+    unsold_count = total_paintings - sold_count
+    avg_winning_bid = round(sum(float(item.get("winning_bid") or 0.0) for item in sold) / sold_count, 3) if sold_count else 0.0
+    summary_headers = [
+        "bidder",
+        "paintings_won",
+        "remaining_budget",
+        "total_spent",
+        "budget_utilization_rate",
+        "total_paintings",
+        "sold_count",
+        "unsold_count",
+        "average_winning_bid",
+    ]
+    summary_rows: list[list[Any]] = []
+    all_budgets = dict(payload.get("all_budgets") or {})
+    painting_counts = dict(payload.get("painting_counts") or {})
+    for bidder in bidder_ids:
+        won = int(painting_counts.get(bidder, 0) or 0)
+        remaining = int(all_budgets.get(bidder, 0) or 0)
+        spent = int(spent_by_bidder.get(bidder, 0) or 0)
+        start_budget = spent + remaining
+        utilization = round(spent / start_budget, 3) if start_budget > 0 else 0.0
+        summary_rows.append(
+            [
+                bidder,
+                won,
+                remaining,
+                spent,
+                utilization,
+                total_paintings,
+                sold_count,
+                unsold_count,
+                avg_winning_bid,
+            ]
+        )
+
+    lines: list[str] = []
+    lines.append("Auction Bid Log Export")
+    lines.append(f"Total paintings processed: {total_paintings}")
+    lines.append(f"Sold: {sold_count} | Unsold: {unsold_count}")
+    lines.append(f"Average winning bid: {avg_winning_bid}")
+    lines.append("")
+    for item in completed:
+        painting_id = item.get("painting_id")
+        status = item.get("status")
+        winner_id = item.get("winner_id")
+        winning_bid = item.get("winning_bid")
+        lines.append(f"{painting_id} | status={status} | winner={winner_id or '-'} | winning_bid={winning_bid if winning_bid is not None else '-'}")
+        for entry in (item.get("bid_history") or []):
+            turn_number = entry.get("turn_number")
+            bidder_id = entry.get("bidder_id")
+            action_type = entry.get("action_type")
+            bid_amount = entry.get("bid_amount")
+            bid_before = entry.get("bid_before")
+            leader_after = entry.get("leader_after")
+            invalid_reason = entry.get("invalid_reason")
+            if action_type == "raise":
+                lines.append(
+                    f"  turn {turn_number}: {bidder_id} RAISE to {bid_amount} (before={bid_before}, leader_after={leader_after})"
+                )
+            else:
+                invalid_suffix = f" invalid={invalid_reason}" if invalid_reason else ""
+                lines.append(
+                    f"  turn {turn_number}: {bidder_id} PASS (before={bid_before}, leader_after={leader_after}){invalid_suffix}"
+                )
+        lines.append("")
+
+    round_payload = payload.get("auction_round") or {}
+    if round_payload:
+        lines.append("Current Open Round")
+        lines.append(
+            f"{round_payload.get('painting_id')} | current_bid={round_payload.get('current_bid')} | "
+            f"leader={round_payload.get('current_leader') or '-'} | turn={payload.get('current_turn_bidder') or '-'}"
+        )
+        for entry in (round_payload.get("bid_history") or []):
+            turn_number = entry.get("turn_number")
+            bidder_id = entry.get("bidder_id")
+            action_type = entry.get("action_type")
+            bid_amount = entry.get("bid_amount")
+            bid_before = entry.get("bid_before")
+            leader_after = entry.get("leader_after")
+            if action_type == "raise":
+                lines.append(
+                    f"  turn {turn_number}: {bidder_id} RAISE to {bid_amount} (before={bid_before}, leader_after={leader_after})"
+                )
+            else:
+                lines.append(
+                    f"  turn {turn_number}: {bidder_id} PASS (before={bid_before}, leader_after={leader_after})"
+                )
+    log_text = "\n".join(lines).rstrip() + "\n"
+    return result_headers, result_rows, summary_headers, summary_rows, log_text
+
+
 def _mega_batch_table_data(status: Dict[str, Any]) -> tuple[list[str], list[list[Any]], list[str], list[list[Any]], list[str], list[list[Any]]]:
     results = list(status.get("results") or [])
     summary = status.get("summary") or {}
@@ -4310,6 +4443,69 @@ async def api_export_mega_batch_xlsx(session_id: str | None = Query(default=None
             content=payload,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": 'attachment; filename="negotiation_mega_batch_tables.xlsx"'},
+        )
+    finally:
+        SESSION_ID_CTX.reset(token)
+
+
+@app.get("/api/export_auction_csv")
+async def api_export_auction_csv(session_id: str | None = Query(default=None)) -> Response:
+    token = _bind_session(_request_session_id(session_id=session_id))
+    try:
+        env = _require_env()
+        if str(env.config.get("mode") or "") != "open_painting_auction":
+            raise HTTPException(status_code=400, detail="Auction export is only available in open_painting_auction mode.")
+        result_headers, result_rows, summary_headers, summary_rows, _ = _auction_export_data(env)
+        content = "\n\n".join(
+            [
+                _csv_section_text("Auction Max Bid Per Painting", result_headers, result_rows),
+                _csv_section_text("Auction Summary", summary_headers, summary_rows),
+            ]
+        )
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="auction_tables.csv"'},
+        )
+    finally:
+        SESSION_ID_CTX.reset(token)
+
+
+@app.get("/api/export_auction_xlsx")
+async def api_export_auction_xlsx(session_id: str | None = Query(default=None)) -> Response:
+    token = _bind_session(_request_session_id(session_id=session_id))
+    try:
+        env = _require_env()
+        if str(env.config.get("mode") or "") != "open_painting_auction":
+            raise HTTPException(status_code=400, detail="Auction export is only available in open_painting_auction mode.")
+        result_headers, result_rows, summary_headers, summary_rows, _ = _auction_export_data(env)
+        payload = _build_xlsx_bytes(
+            [
+                ("MaxBidByPainting", [result_headers, *result_rows]),
+                ("Summary", [summary_headers, *summary_rows]),
+            ]
+        )
+        return Response(
+            content=payload,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="auction_tables.xlsx"'},
+        )
+    finally:
+        SESSION_ID_CTX.reset(token)
+
+
+@app.get("/api/export_auction_log")
+async def api_export_auction_log(session_id: str | None = Query(default=None)) -> Response:
+    token = _bind_session(_request_session_id(session_id=session_id))
+    try:
+        env = _require_env()
+        if str(env.config.get("mode") or "") != "open_painting_auction":
+            raise HTTPException(status_code=400, detail="Auction export is only available in open_painting_auction mode.")
+        _, _, _, _, log_text = _auction_export_data(env)
+        return Response(
+            content=log_text,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="auction_bid_log.txt"'},
         )
     finally:
         SESSION_ID_CTX.reset(token)

@@ -307,7 +307,14 @@
           <div id="negotiationResult"></div>
         </div>
         <div id="auctionCard" class="card hidden">
-          <div class="label">Auction State</div>
+          <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div class="label">Auction State</div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <button id="exportAuctionCsvBtn" class="alt" type="button">Export CSV</button>
+              <button id="exportAuctionXlsxBtn" class="alt" type="button">Export XLSX</button>
+              <button id="exportAuctionLogBtn" class="alt" type="button">Export Bid Log</button>
+            </div>
+          </div>
           <div id="auctionResult"></div>
         </div>
         <!-- batch results -->
@@ -447,12 +454,7 @@
             while (padded.length < 5) padded.push(defaults[padded.length]);
             return padded;
           }
-          const normalized = cleaned.slice(0, 5);
-          if (normalized[1] === "Opus") normalized[1] = "Sonnet";
-          if (normalized[2] === "Pro") normalized[2] = "Flash";
-          if (normalized[3] === "Grok" || normalized[3] === "Mathematical") normalized[3] = "Llama";
-          if (normalized[4] === "Mathematical") normalized[4] = "Truthful";
-          return normalized;
+          return cleaned.slice(0, 5);
         }
         return out;
       }
@@ -462,9 +464,7 @@
         if (!raw) return raw;
         if (mode === "five_attr") {
           if (raw === "Haiku") return "5.4";
-          if (raw === "Opus") return "Sonnet";
-          if (raw === "Pro") return "Flash";
-          if (raw === "Grok" || raw === "Mathematical") return index === 4 ? "Truthful" : "Llama";
+          if (raw === "Mathematical" && index === 4) return "Truthful";
         } else if (mode === "buyer_seller_negotiation" || mode === "open_painting_auction") {
           if (raw === "Opus") return "Sonnet";
           if (raw === "Pro") return "Flash";
@@ -2093,6 +2093,57 @@
         const a = document.createElement("a");
         a.href = url;
         a.download = "negotiation_mega_batch_tables.xlsx";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      document.getElementById("exportAuctionCsvBtn").onclick = async () => {
+        const res = await fetch(withSession("/api/export_auction_csv"));
+        const data = res.ok ? await res.blob() : await res.json();
+        if (!res.ok) {
+          alert(data.detail || "Export failed");
+          return;
+        }
+        const url = URL.createObjectURL(data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "auction_tables.csv";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      document.getElementById("exportAuctionXlsxBtn").onclick = async () => {
+        const res = await fetch(withSession("/api/export_auction_xlsx"));
+        const data = res.ok ? await res.blob() : await res.json();
+        if (!res.ok) {
+          alert(data.detail || "Export failed");
+          return;
+        }
+        const url = URL.createObjectURL(data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "auction_tables.xlsx";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      document.getElementById("exportAuctionLogBtn").onclick = async () => {
+        const res = await fetch(withSession("/api/export_auction_log"));
+        const data = res.ok ? await res.blob() : await res.json();
+        if (!res.ok) {
+          alert(data.detail || "Export failed");
+          return;
+        }
+        const url = URL.createObjectURL(data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "auction_bid_log.txt";
         document.body.appendChild(a);
         a.click();
         a.remove();
