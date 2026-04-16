@@ -127,6 +127,9 @@
       <div class="menu-intro">
         Pick where to work. `Transient` is a scratch session, while the four save slots persist until you delete them. Filled slots survive reloads and can keep background work running.
       </div>
+      <div style="margin-top:10px; display:flex; gap:8px; max-width: 360px;">
+        <button id="stopAllStepWorkersBtn" class="alt" type="button" style="width:100%;">Destroy All Step Workers</button>
+      </div>
       <div id="slotMenuGrid" class="menu-grid"></div>
     </div>
     <div class="wrap hidden" id="appWrap">
@@ -398,8 +401,24 @@
       let batchPoller = null;
       let megaBatchPoller = null;
       let currentBatchSeeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+      const FIVE_ATTR_MODE_ALIASES = new Set([
+        "five_attr",
+        "five_attr_—_boolean_partial_info",
+        "five_attr_â€”_boolean_partial_info",
+        "five_attr_Ã¢â‚¬â€_boolean_partial_info",
+        "five_attr_boolean_partial_info",
+      ]);
+
+      function canonicalMode(mode) {
+        const raw = String(mode || "").trim();
+        const normalized = raw.toLowerCase();
+        if (normalized === "five_attr" || normalized.startsWith("five_attr")) return "five_attr";
+        if (FIVE_ATTR_MODE_ALIASES.has(raw)) return "five_attr";
+        return raw || "buyer_seller_negotiation";
+      }
 
       function roleLabelsForMode(mode) {
+        mode = canonicalMode(mode);
         if (mode === "open_painting_auction") {
           return [
             ["bidder1", "Bidder 1", "5.4"],
@@ -439,6 +458,7 @@
       }
 
       function normalizedSelectedModelsForMode(mode, models) {
+        mode = canonicalMode(mode);
         const out = migrateLegacyDefaultModels(mode, Array.isArray(models) ? models : []);
         if (mode === "five_attr") {
           const defaults = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
@@ -467,16 +487,10 @@
       }
 
       function normalizeDisplayedModelName(mode, name, index = null) {
+        mode = canonicalMode(mode);
         const raw = String(name || "").trim();
         if (!raw) return raw;
-        if (mode === "five_attr") {
-          if (raw === "Haiku") return "5.4";
-          if (raw === "Mathematical" && index === 4) return "Truthful";
-        } else if (mode === "buyer_seller_negotiation" || mode === "open_painting_auction") {
-          if (raw === "Opus") return "Sonnet";
-          if (raw === "Pro") return "Flash";
-          if (raw === "Grok") return "Llama";
-        }
+        if (mode === "five_attr" && raw === "Mathematical" && index === 4) return "Truthful";
         return raw;
       }
 
@@ -493,7 +507,7 @@
       }
 
       function renderSelectedModelsDebug() {
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const debugEl = document.getElementById("selectedModelsDebug");
         if (!debugEl) return;
         if (mode !== "five_attr") {
@@ -524,7 +538,7 @@
       function renderModelCheckboxes() {
         const box = document.getElementById("modelBox");
         box.innerHTML = "";
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const roles = roleLabelsForMode(mode);
         for (const [roleId, label, def] of roles) {
           const row = document.createElement("div");
@@ -592,7 +606,7 @@
       }
 
       function refreshScenarioOptions() {
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const sel = document.getElementById("scenario");
         const options = SCENARIOS_BY_MODE[mode] || [];
         sel.innerHTML = options.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
@@ -601,7 +615,7 @@
       }
 
       function refreshPolicyPanels() {
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         for (const m of ["five_attr", "open_painting_auction", "buyer_seller_negotiation", "simple_resort_deception", "mediation", "repeated_mediation"]) {
           document.getElementById(`policies-${m}`).classList.toggle("hidden", m !== mode);
         }
@@ -609,7 +623,7 @@
       }
 
       function refreshModeChrome() {
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const negotiationMode = mode === "buyer_seller_negotiation";
         const auctionMode = mode === "open_painting_auction";
         const fiveAttrMode = mode === "five_attr";
@@ -983,16 +997,17 @@
 
       function applyServerConfiguration(data) {
         if (!data || !data.mode) return;
+        const serverMode = canonicalMode(data.mode);
         const modeEl = document.getElementById("mode");
-        if (modeEl.value !== data.mode) {
-          modeEl.value = data.mode;
+        if (canonicalMode(modeEl.value) !== serverMode) {
+          modeEl.value = serverMode;
           renderModelCheckboxes();
           refreshScenarioOptions();
           refreshPolicyPanels();
           refreshModeChrome();
         }
-        const models = normalizedSelectedModelsForMode(data.mode, Array.isArray(data.selected_models) ? data.selected_models : []);
-        syncModelSelectors(data.mode, models);
+        const models = normalizedSelectedModelsForMode(serverMode, Array.isArray(data.selected_models) ? data.selected_models : []);
+        syncModelSelectors(serverMode, models);
         renderSelectedModelsDebug();
       }
 
@@ -1382,7 +1397,7 @@
         }
         lastRenderData = data;
         applyServerConfiguration(data);
-        currentMode = data.mode || "five_attr";
+        currentMode = canonicalMode(data.mode || "five_attr");
         refreshModeChrome();
         showConversation(data.conversation);
         showTurns(data.step_status && data.step_status.turns);
@@ -1442,7 +1457,7 @@
         const status = data.status || {};
         showTurns(status.turns);
         showConversation(status.conversation);
-        if (document.getElementById("mode").value === "open_painting_auction") {
+        if (canonicalMode(document.getElementById("mode").value) === "open_painting_auction") {
           renderAuctionResult({ mode: "open_painting_auction", ...status });
         }
         if (status.done || status.error) {
@@ -1454,7 +1469,7 @@
       }
 
       function buildStepPayload() {
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const advanced = !document.getElementById("advancedPanel").classList.contains("hidden");
         if (!advanced) return { use_models: true };
         if (mode === "five_attr") return {
@@ -1486,7 +1501,7 @@
       async function resetSimulation() {
         maybeAssignFreshSeed(false);
         const scenario = document.getElementById("scenario").value;
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const payload = {
           selected_models: normalizedSelectedModelsForMode(mode, selectedModels()),
           mode,
@@ -1508,7 +1523,7 @@
       document.getElementById("resetBtn").onclick = resetSimulation;
 
       document.getElementById("stepBtn").onclick = async () => {
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const payload = buildStepPayload();
         const res = await apiPost("/api/step", payload);
         const data = await res.json();
@@ -1588,6 +1603,19 @@
         showSlotMenu();
       };
 
+      document.getElementById("stopAllStepWorkersBtn").onclick = async () => {
+        const proceed = window.confirm("Destroy all active step workers across all sessions and save slots?");
+        if (!proceed) return;
+        const res = await apiPost("/api/stop_all_step_workers", {});
+        const data = await res.json();
+        if (!res.ok) {
+          alert(data.detail || "Failed to stop step workers.");
+          return;
+        }
+        await refreshSaveSlots();
+        alert(`Stopped ${Number(data.terminated_count || 0)} step worker(s).`);
+      };
+
       document.getElementById("seed").addEventListener("input", () => {
         const current = String(document.getElementById("seed").value || "").trim();
         seedManuallyEdited = !(lastAutoSeed !== null && current === String(lastAutoSeed));
@@ -1613,7 +1641,7 @@
 
         const rows = data.results || [];
         const s    = data.summary || {};
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
 
         if (mode === "buyer_seller_negotiation") {
           let html = `<table class="batch-table">
@@ -1717,7 +1745,7 @@
         card.classList.remove("hidden");
         const rows = data.results || [];
         const summary = data.summary || {};
-        const mode = data.mode || "buyer_seller_negotiation";
+        const mode = canonicalMode(data.mode || "buyer_seller_negotiation");
         const completed = Number(data.completed_matchups || 0);
         const total = Number(data.total_matchups || 0);
         progress.textContent = total ? `· ${completed}/${total} matchups` : "";
@@ -1823,7 +1851,7 @@
         const turns = Array.isArray(status.current_turns) ? status.current_turns : [];
         const currentEpisode = Number(status.current_episode || 0);
         const currentSeed = status.current_seed;
-        const mode = status.mode || currentMode || "buyer_seller_negotiation";
+        const mode = canonicalMode(status.mode || currentMode || "buyer_seller_negotiation");
         const normalizedCurrentModels = normalizeDisplayedModelList(mode, status.current_models);
         const buyerModel = normalizeDisplayedModelName(mode, status.current_buyer_model || (Array.isArray(normalizedCurrentModels) ? normalizedCurrentModels[0] : null), 0);
         const sellerModel = normalizeDisplayedModelName(mode, status.current_seller_model || (Array.isArray(normalizedCurrentModels) ? normalizedCurrentModels[1] : null), 1);
@@ -1921,7 +1949,7 @@
       }
 
       document.getElementById("batchBtn").onclick = async () => {
-        const mode    = document.getElementById("mode").value;
+        const mode    = canonicalMode(document.getElementById("mode").value);
         const scenario = document.getElementById("scenario").value;
         const advanced = !document.getElementById("advancedPanel").classList.contains("hidden");
         const policies = advanced ? buildStepPayload() : { use_models: true };
@@ -1964,7 +1992,7 @@
       };
 
       document.getElementById("megaBatchBtn").onclick = async () => {
-        const mode = document.getElementById("mode").value;
+        const mode = canonicalMode(document.getElementById("mode").value);
         const scenario = document.getElementById("scenario").value;
         if (mode !== "buyer_seller_negotiation" && mode !== "five_attr") {
           alert("Mega-batch is only available for buyer_seller_negotiation or five_attr.");

@@ -133,11 +133,26 @@ class _SessionRuntime:
 SESSION_ID_CTX: ContextVar[str] = ContextVar("simulation_session_id", default="default")
 SESSION_RUNTIMES: dict[str, _SessionRuntime] = {}
 SAVE_SLOT_IDS = tuple(f"save_slot_{idx}" for idx in range(1, 5))
+FIVE_ATTR_MODE_ALIASES = {
+    "five_attr",
+    "five_attr_—_boolean_partial_info",
+    "five_attr_â€”_boolean_partial_info",
+    "five_attr_boolean_partial_info",
+}
 
 
 def _normalize_session_id(value: str | None) -> str:
     text = re.sub(r"[^a-zA-Z0-9_-]+", "", str(value or "").strip())
     return text[:64] or "default"
+
+
+def _canonical_mode(value: str | None) -> str:
+    raw = str(value or "").strip()
+    normalized = raw.lower()
+    # Accept any five_attr-prefixed mode key to survive dash/encoding variants.
+    if normalized == "five_attr" or normalized.startswith("five_attr") or raw in FIVE_ATTR_MODE_ALIASES:
+        return "five_attr"
+    return raw or "buyer_seller_negotiation"
 
 
 def _is_save_slot_session(session_id: str | None) -> bool:
@@ -181,6 +196,12 @@ def _runtime(session_id: str | None = None) -> _SessionRuntime:
         if runtime is None:
             runtime = _SessionRuntime()
         SESSION_RUNTIMES[sid] = runtime
+    cleaned = _conversation_without_system_messages(list(runtime.conversation_log))
+    if cleaned != list(runtime.conversation_log):
+        runtime.conversation_log = cleaned
+    runtime.step_status["conversation"] = _conversation_without_system_messages(
+        list(runtime.step_status.get("conversation") or runtime.conversation_log)
+    )
     return runtime
 
 
@@ -226,6 +247,28 @@ def _read_text_file(path: Path) -> str | None:
         return None
 
 
+def _conversation_without_system_messages(entries: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        speaker = str(entry.get("speaker") or "").strip().lower()
+        if speaker == "system":
+            continue
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        cleaned.append(
+            {
+                "channel": entry.get("channel") or "",
+                "speaker": entry.get("speaker") or "",
+                "recipient": entry.get("recipient") or "",
+                "text": text,
+            }
+        )
+    return cleaned
+
+
 def _runtime_to_snapshot(runtime: _SessionRuntime) -> dict[str, Any]:
     return {
         "env": runtime.env,
@@ -246,8 +289,11 @@ def _snapshot_to_runtime(snapshot: dict[str, Any]) -> _SessionRuntime:
     runtime.env = snapshot.get("env")
     runtime.last_reset = snapshot.get("last_reset")
     runtime.last_result = snapshot.get("last_result")
-    runtime.conversation_log = list(snapshot.get("conversation_log") or [])
+    runtime.conversation_log = _conversation_without_system_messages(list(snapshot.get("conversation_log") or []))
     runtime.step_status = dict(snapshot.get("step_status") or {})
+    runtime.step_status["conversation"] = _conversation_without_system_messages(
+        list(runtime.step_status.get("conversation") or runtime.conversation_log)
+    )
     runtime.last_batch_export_text = snapshot.get("last_batch_export_text")
     runtime.last_mega_batch_export_text = snapshot.get("last_mega_batch_export_text")
     runtime.batch_status = dict(snapshot.get("batch_status") or runtime.batch_status)
@@ -324,7 +370,7 @@ def _save_slot_info(session_id: str) -> dict[str, Any]:
     updated_at = None
     if runtime and runtime.env is not None:
         try:
-            mode = str(runtime.env.config.get("mode") or "")
+            mode = _canonical_mode(runtime.env.config.get("mode") or "")
         except Exception:
             mode = None
         snapshot = _read_json_file(_session_runtime_meta_path(sid), None)
@@ -349,6 +395,19 @@ def _save_slot_info(session_id: str) -> dict[str, Any]:
         "mega_batch_running": bool(mega_status and mega_status.get("running")),
         "mega_batch_done": bool(mega_status and mega_status.get("done")),
     }
+
+
+def _all_persisted_session_ids() -> list[str]:
+    ids: set[str] = set()
+    if SESSION_RUNTIME_DIR.exists():
+        for path in SESSION_RUNTIME_DIR.iterdir():
+            if path.is_dir():
+                ids.add(_normalize_session_id(path.name))
+    if SAVE_SLOT_RUNTIME_DIR.exists():
+        for path in SAVE_SLOT_RUNTIME_DIR.iterdir():
+            if path.is_dir():
+                ids.add(_normalize_session_id(path.name))
+    return sorted(ids)
 
 
 def _pid_is_running(pid: int | None) -> bool:
@@ -515,7 +574,7 @@ def _launch_mega_batch_worker(session_id: str, payload: Dict[str, Any]) -> dict[
     if export_path.exists():
         export_path.unlink()
     _write_json_atomic(_mega_batch_payload_path(sid), payload)
-    mode = str(payload.get("mode") or "buyer_seller_negotiation")
+    mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
     models = _mega_batch_models(payload, mode)
     total_matchups = len(models) * len(models)
     initial_status = _initial_mega_batch_status(total_matchups=total_matchups, pid=None)
@@ -684,6 +743,7 @@ def _five_attr_timer_instruction(*, max_messages: int, messages_used: int) -> st
 
 
 def _mega_batch_models(payload: Dict[str, Any], mode: str) -> list[str]:
+    mode = _canonical_mode(mode)
     if mode == "five_attr":
         selected = [str(item or "").strip() for item in (payload.get("selected_models") or []) if str(item or "").strip()]
         if len(selected) >= 5:
@@ -693,6 +753,7 @@ def _mega_batch_models(payload: Dict[str, Any], mode: str) -> list[str]:
 
 
 def _normalized_selected_models_for_mode(mode: str, selected: list[str] | None) -> list[str]:
+    mode = _canonical_mode(mode)
     raw = [str(item or "").strip() for item in (selected or []) if str(item or "").strip()]
     if mode == "five_attr":
         default = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"]
@@ -727,7 +788,7 @@ def _normalized_selected_models_for_mode(mode: str, selected: list[str] | None) 
 def _migrate_env_selected_models(env: TravelGameEnv | None) -> bool:
     if env is None:
         return False
-    mode = str(env.config.get("mode") or "mediation")
+    mode = _canonical_mode(env.config.get("mode") or "mediation")
     normalized = _normalized_selected_models_for_mode(mode, list(env.config.get("selected_models") or []))
     if not normalized:
         return False
@@ -885,6 +946,11 @@ def _clamp_int(v: Any, lo: int, hi: int, default: int) -> int:
     return max(lo, min(hi, x))
 
 
+def _append_llm_trace(*, alias: str, provider: str, model: str, call_type: str) -> None:
+    text = f"LLM {call_type} call -> alias={alias} provider={provider} model={model}"
+    print(f"[simulation] {text}", flush=True)
+
+
 def _gemini_post_json(api_key: str, model: str, body: dict, timeout_s: float = 45.0) -> dict:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='')}:generateContent?key={urllib.parse.quote(api_key, safe='')}"
     data = json.dumps(body).encode("utf-8")
@@ -903,6 +969,7 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
     provider = "openrouter" if use_openrouter else "direct"
     if alias in OPENROUTER_ONLY_MODEL_ALIASES and not _use_openrouter_for_llms():
         raise RuntimeError(f"{alias} is configured as an OpenRouter-only model. Set OPENROUTER_API_KEY or add keys/openkey.txt.")
+    _append_llm_trace(alias=alias, provider=provider, model=model, call_type="json")
     logger.info("simulation LLM call alias=%s provider=%s model=%s max_tokens=%s", alias, provider, model, max_tokens)
     if use_openrouter:
         client = AsyncOpenAI(
@@ -1012,6 +1079,7 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
     provider = "openrouter" if use_openrouter else "direct"
     if alias in OPENROUTER_ONLY_MODEL_ALIASES and not _use_openrouter_for_llms():
         raise RuntimeError(f"{alias} is configured as an OpenRouter-only model. Set OPENROUTER_API_KEY or add keys/openkey.txt.")
+    _append_llm_trace(alias=alias, provider=provider, model=model, call_type="text")
     logger.info("simulation LLM text call alias=%s provider=%s model=%s max_tokens=%s", alias, provider, model, max_tokens)
     if use_openrouter:
         client = AsyncOpenAI(
@@ -1290,7 +1358,7 @@ def _refresh_auction_status(env: TravelGameEnv | None = None, runtime: _SessionR
 
 def _make_turns(selected: list[str], env: TravelGameEnv | None = None) -> list[Dict[str, Any]]:
     env = env or _runtime().env
-    mode = str(env.config.get("mode") or "mediation") if env else "mediation"
+    mode = _canonical_mode(env.config.get("mode") or "mediation") if env else "mediation"
     customer_alias, agent_alias, resort_alias = _display_aliases(selected, mode)
     if mode == "buyer_seller_negotiation":
         return [
@@ -1350,7 +1418,7 @@ def _reset_step_status(runtime: _SessionRuntime | None = None) -> None:
         "llm_error": None,
         "pid": None,
         "turns": _make_turns(selected, env),
-        "conversation": list(runtime.conversation_log),
+        "conversation": _conversation_without_system_messages(list(runtime.conversation_log)),
     }
     _refresh_auction_status(env, runtime)
 
@@ -1372,9 +1440,13 @@ def _mark_done(turn_id: str) -> None:
 
 def _append_conversation(channel: str, sender: str, recipient: str, text: str) -> None:
     runtime = _runtime()
-    entry = {"channel": channel, "speaker": sender, "recipient": recipient, "text": str(text or "").strip()}
+    sender_text = str(sender or "").strip()
+    body_text = str(text or "").strip()
+    if not body_text or sender_text.lower() == "system":
+        return
+    entry = {"channel": channel, "speaker": sender_text, "recipient": str(recipient or "").strip(), "text": body_text}
     runtime.conversation_log.append(entry)
-    runtime.step_status["conversation"] = list(runtime.conversation_log)
+    runtime.step_status["conversation"] = _conversation_without_system_messages(list(runtime.conversation_log))
     _persist_runtime()
 
 
@@ -1385,7 +1457,7 @@ def _append_fallback_notice(channel: str, err: Any) -> None:
     else:
         raw = str(err or "").strip()
         msg = raw if raw else "Unknown fallback reason."
-    _append_conversation(channel, "System", "", f"LLM fallback triggered: {msg}")
+    print(f"[simulation] LLM fallback triggered on channel={channel}: {msg}", flush=True)
 
 
 def _negotiation_offer_history(turns: list[NegotiationTurnAction], speaker: str) -> list[int]:
@@ -1815,7 +1887,7 @@ def _require_env() -> TravelGameEnv:
 
 
 def _build_actions(env: TravelGameEnv, payload: Dict[str, Any]) -> Dict[str, Any]:
-    mode = str(env.config.get("mode") or "mediation")
+    mode = _canonical_mode(env.config.get("mode") or "mediation")
     if mode == "open_painting_auction":
         return _build_actions_open_auction(env, payload)
     if mode == "buyer_seller_negotiation":
@@ -2066,7 +2138,16 @@ def _build_actions_five_attr(env: TravelGameEnv, payload: Dict[str, Any]) -> Dic
     agent_state = env.world["five_attr_agent"]
     agent_policy_name = str(payload.get("agent_policy") or "correct_known")
     customer_policy_name = str(payload.get("customer_policy") or "skeptical")
-    selected = list(agent_state.selected_models)
+    selected = _normalized_selected_models_for_mode(
+        "five_attr",
+        list(agent_state.selected_models)
+        or list(env.world.get("selected_models") or [])
+        or list(env.config.get("selected_models") or []),
+    )
+    if selected and list(agent_state.selected_models) != selected:
+        agent_state.selected_models = list(selected)
+        env.world["selected_models"] = list(selected)
+        env.config["selected_models"] = list(selected)
     customer_alias = selected[0] if len(selected) > 0 else "5.4"
     agent_alias = selected[1] if len(selected) > 1 else customer_alias
 
@@ -2139,7 +2220,7 @@ def _five_attr_agent_clarification_text(agent_state, agent_report: FiveAttrAgent
 
 
 async def _build_actions_live(env: TravelGameEnv, payload: Dict[str, Any]) -> Dict[str, Any]:
-    mode = str(env.config.get("mode") or "mediation")
+    mode = _canonical_mode(env.config.get("mode") or "mediation")
     if mode == "open_painting_auction":
         return await _build_actions_live_open_auction(env, payload)
     if mode == "buyer_seller_negotiation":
@@ -2996,7 +3077,16 @@ async def _build_actions_live_five_attr(env: TravelGameEnv, payload: Dict[str, A
     agent_state = env.world["five_attr_agent"]
     agent_policy_name = str(payload.get("agent_policy") or "correct_known")
     customer_policy_name = str(payload.get("customer_policy") or "skeptical")
-    selected = list(agent_state.selected_models)
+    selected = _normalized_selected_models_for_mode(
+        "five_attr",
+        list(agent_state.selected_models)
+        or list(env.world.get("selected_models") or [])
+        or list(env.config.get("selected_models") or []),
+    )
+    if selected and list(agent_state.selected_models) != selected:
+        agent_state.selected_models = list(selected)
+        env.world["selected_models"] = list(selected)
+        env.config["selected_models"] = list(selected)
     customer_alias = selected[0] if len(selected) > 0 else "5.4"
     agent_alias = selected[1] if len(selected) > 1 else customer_alias
     customer_runtime_alias = _runtime_llm_alias(customer_alias)
@@ -3331,7 +3421,7 @@ async def _execute_batch(payload: Dict[str, Any], *, progress_cb=None, episode_s
     batch_runtime = _runtime()
     worker_token = _bind_session(_worker_session_id("batch"))
     num_episodes = max(1, min(50, int(payload.get("num_episodes") or 10)))
-    mode = str(payload.get("mode") or "buyer_seller_negotiation")
+    mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
     scenario = payload.get("scenario") or None
     default_models = (
         (["5.4", "Sonnet", "Flash", "Llama", "Truthful"] if mode == "five_attr" else ["5.4", "Sonnet", "Flash", "Llama", "Mathematical"])
@@ -3339,14 +3429,18 @@ async def _execute_batch(payload: Dict[str, Any], *, progress_cb=None, episode_s
         else ["Haiku", "Sonnet", "Pro"]
     )
     selected_models = list(payload.get("selected_models") or default_models)
-    if mode == "buyer_seller_negotiation" and len(selected_models) == 2:
-        selected_models = [selected_models[0], selected_models[1], selected_models[1]]
+    selected_models = _normalized_selected_models_for_mode(mode, selected_models)
+    if mode == "buyer_seller_negotiation":
+        if len(selected_models) == 2:
+            selected_models = [selected_models[0], selected_models[1], selected_models[1]]
+        elif len(selected_models) not in {3, 5}:
+            selected_models = ["5.4", "Sonnet", "Flash", "Llama", "Mathematical"]
     elif mode == "five_attr" and len(selected_models) in {2, 3, 4}:
         while len(selected_models) < 5:
             selected_models.append(selected_models[-1] if selected_models else "5.4")
     elif mode == "five_attr" and len(selected_models) != 5:
         selected_models = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"]
-    elif len(selected_models) != 3:
+    elif mode not in {"open_painting_auction", "buyer_seller_negotiation", "five_attr"} and len(selected_models) != 3:
         selected_models = ["Haiku", "Sonnet", "Pro"]
     base_seed = int(payload.get("base_seed") or 0)
     seed_list_payload = payload.get("seed_list")
@@ -3376,6 +3470,10 @@ async def _execute_batch(payload: Dict[str, Any], *, progress_cb=None, episode_s
             try:
                 seed = batch_seeds[i]
                 env = TravelGameEnv(config={"selected_models": selected_models, "mode": mode})
+                print(
+                    f"[simulation] batch episode start mode={mode} seed={seed} selected_models={selected_models}",
+                    flush=True,
+                )
                 env.reset(seed=seed, scenario=scenario)
                 if episode_start_cb is not None:
                     episode_start_cb(i + 1, seed, selected_models, mode, env)
@@ -3420,7 +3518,8 @@ async def _execute_batch(payload: Dict[str, Any], *, progress_cb=None, episode_s
                             "text": entry.get("text") or "",
                         }
                         for entry in episode_conversation
-                        if entry.get("channel") == "negotiation"
+                        if str(entry.get("channel") or "") == "negotiation"
+                        and str(entry.get("speaker") or "").strip().lower() != "system"
                     ]
                     item.update(
                         {
@@ -3529,7 +3628,7 @@ async def _run_batch_job(payload: Dict[str, Any]) -> None:
     runtime = _runtime()
     worker_pid = runtime.batch_status.get("pid")
     total = max(1, min(50, int(payload.get("num_episodes") or 10)))
-    mode = str(payload.get("mode") or "buyer_seller_negotiation")
+    mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
     runtime.batch_status = {
         "running": True,
         "done": False,
@@ -4003,7 +4102,7 @@ def _auction_export_data(env: TravelGameEnv) -> tuple[list[str], list[list[Any]]
 def _mega_batch_table_data(status: Dict[str, Any]) -> tuple[list[str], list[list[Any]], list[str], list[list[Any]], list[str], list[list[Any]]]:
     results = list(status.get("results") or [])
     summary = status.get("summary") or {}
-    mode = str(status.get("mode") or "buyer_seller_negotiation")
+    mode = _canonical_mode(status.get("mode") or "buyer_seller_negotiation")
     matchup_headers = [
         "matchup_index",
         "buyer_model" if mode == "five_attr" else "buyer_model",
@@ -4226,7 +4325,7 @@ async def api_run_batch_start(payload: Dict[str, Any]) -> JSONResponse:
         if runtime.batch_status.get("running"):
             raise HTTPException(status_code=400, detail="Batch already in progress.")
         total = max(1, min(50, int(payload.get("num_episodes") or 10)))
-        mode = str(payload.get("mode") or "buyer_seller_negotiation")
+        mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
         runtime.batch_status = {
             "running": True,
             "done": False,
@@ -4284,7 +4383,7 @@ async def api_run_mega_batch_start(payload: Dict[str, Any]) -> JSONResponse:
     token = _bind_session(_request_session_id(payload))
     try:
         runtime = _runtime()
-        mode = str(payload.get("mode") or "buyer_seller_negotiation")
+        mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
         selected_models = [str(item or "").strip() for item in (payload.get("selected_models") or []) if str(item or "").strip()]
         if mode == "five_attr" and len(selected_models) != 5:
             raise HTTPException(status_code=400, detail="five_attr mega-batch requires exactly 5 selected models.")
@@ -4342,7 +4441,7 @@ async def api_export_batch_csv(session_id: str | None = Query(default=None)) -> 
         runtime = _runtime()
         results = list(runtime.batch_status.get("results") or [])
         summary = dict(runtime.batch_status.get("summary") or {})
-        mode = str(runtime.batch_status.get("mode") or "buyer_seller_negotiation")
+        mode = _canonical_mode(runtime.batch_status.get("mode") or "buyer_seller_negotiation")
         if not results and not summary:
             raise HTTPException(status_code=400, detail="No batch table export is available yet.")
         result_headers, result_rows, summary_headers, summary_rows = _batch_table_data(results, summary, mode)
@@ -4368,7 +4467,7 @@ async def api_export_batch_xlsx(session_id: str | None = Query(default=None)) ->
         runtime = _runtime()
         results = list(runtime.batch_status.get("results") or [])
         summary = dict(runtime.batch_status.get("summary") or {})
-        mode = str(runtime.batch_status.get("mode") or "buyer_seller_negotiation")
+        mode = _canonical_mode(runtime.batch_status.get("mode") or "buyer_seller_negotiation")
         if not results and not summary:
             raise HTTPException(status_code=400, detail="No batch table export is available yet.")
         result_headers, result_rows, summary_headers, summary_rows = _batch_table_data(results, summary, mode)
@@ -4524,6 +4623,37 @@ async def api_save_slots() -> JSONResponse:
     )
 
 
+@app.post("/api/stop_all_step_workers")
+async def api_stop_all_step_workers() -> JSONResponse:
+    terminated: list[dict[str, Any]] = []
+    checked_sessions: set[str] = set()
+    for sid in _all_persisted_session_ids():
+        checked_sessions.add(sid)
+        runtime = SESSION_RUNTIMES.get(sid) or _load_persisted_runtime(sid)
+        if runtime is None:
+            continue
+        step_status = dict(runtime.step_status or {})
+        pid = step_status.get("pid")
+        if not pid:
+            continue
+        was_running = bool(step_status.get("running")) or _pid_is_running(pid)
+        if not was_running:
+            continue
+        if _stop_pid_and_wait(pid, timeout_s=1.5):
+            terminated.append({"session_id": sid, "pid": pid})
+        runtime.step_status = _mark_status_stopped(runtime.step_status, "Step worker stopped by global stop-all request.")
+        SESSION_RUNTIMES[sid] = runtime
+        _persist_runtime(sid)
+    return JSONResponse(
+        {
+            "ok": True,
+            "checked_sessions": len(checked_sessions),
+            "terminated_count": len(terminated),
+            "terminated": terminated,
+        }
+    )
+
+
 @app.post("/api/save_slot_delete")
 async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
     slot_id = _normalize_session_id(payload.get("slot_id"))
@@ -4580,7 +4710,7 @@ async def api_reset(payload: Dict[str, Any]) -> JSONResponse:
         selected_models = payload.get("selected_models") or []
         scenario = payload.get("scenario")
         seed = payload.get("seed")
-        mode = str(payload.get("mode") or "buyer_seller_negotiation")
+        mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
         valid_lengths = {5} if mode == "open_painting_auction" else ({3, 5} if mode == "buyer_seller_negotiation" else ({3, 4, 5} if mode == "five_attr" else {3}))
         if len(selected_models) not in valid_lengths:
             detail = (
@@ -4697,7 +4827,7 @@ async def api_state(session_id: str | None = Query(default=None)) -> JSONRespons
         if runtime.env is None:
             return JSONResponse(_empty_slot_response())
         env = _require_env()
-        mode = str(env.config.get("mode", "mediation"))
+        mode = _canonical_mode(env.config.get("mode", "mediation"))
         if mode == "open_painting_auction":
             runtime.step_status["turns"] = _auction_turns()
             round_state = env.world.get("auction_current_round")
@@ -4823,7 +4953,7 @@ async def api_render(session_id: str | None = Query(default=None)) -> JSONRespon
         if runtime.env is None:
             return JSONResponse(_empty_slot_response())
         env = _require_env()
-        mode = str(env.config.get("mode") or "mediation")
+        mode = _canonical_mode(env.config.get("mode") or "mediation")
         if mode == "open_painting_auction":
             runtime.step_status["turns"] = _auction_turns()
             round_state = env.world.get("auction_current_round")

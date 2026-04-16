@@ -106,6 +106,22 @@ DEFAULT_CONFIG = {
     "enable_thresholds": True,
 }
 
+FIVE_ATTR_MODE_ALIASES = {
+    "five_attr",
+    "five_attr_—_boolean_partial_info",
+    "five_attr_â€”_boolean_partial_info",
+    "five_attr_boolean_partial_info",
+}
+
+
+def _canonical_mode(value: str | None) -> str:
+    raw = str(value or "").strip()
+    normalized = raw.lower()
+    # Accept any five_attr-prefixed mode key to survive dash/encoding variants.
+    if normalized == "five_attr" or normalized.startswith("five_attr") or raw in FIVE_ATTR_MODE_ALIASES:
+        return "five_attr"
+    return raw or "mediation"
+
 
 class TravelGameEnv:
     """One-round mediation game with private Customer<->Agent and Agent<->Resort channels."""
@@ -124,7 +140,7 @@ class TravelGameEnv:
         self.result: Optional[EpisodeResult] = None
 
     def _validate_selected_models(self, selected: List[str]) -> None:
-        mode = str(self.config.get("mode") or "mediation")
+        mode = _canonical_mode(self.config.get("mode") or "mediation")
         if mode == "open_painting_auction":
             valid_lengths = {5}
         elif mode == "buyer_seller_negotiation":
@@ -435,7 +451,7 @@ class TravelGameEnv:
         self.world["customer_decision"] = None
 
     def _mode(self) -> str:
-        return str(self.config.get("mode") or "mediation")
+        return _canonical_mode(self.config.get("mode") or "mediation")
 
     def _init_repeated_state(self, resort_ids: List[str], supplied: Optional[RepeatedGameState] = None) -> RepeatedGameState:
         if supplied is not None:
@@ -543,6 +559,7 @@ class TravelGameEnv:
             if not memory.trust_history:
                 memory.trust_history = [customer.trust]
             self.world = {
+                "selected_models": list(agent.selected_models),
                 "five_attr_resort": resort,
                 "five_attr_customer": customer,
                 "five_attr_agent": agent,

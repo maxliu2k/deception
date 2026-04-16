@@ -13,6 +13,7 @@ from .server import (
     DEFAULT_BATCH_SEEDS,
     FIXED_MAX_ROUNDS,
     MEGA_BATCH_MODELS,
+    _canonical_mode,
     _mega_batch_models,
     _bind_session,
     _execute_batch,
@@ -35,7 +36,7 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
     token = _bind_session(session_id)
     status_path = _mega_batch_status_path(session_id)
     export_path = _mega_batch_export_path(session_id)
-    mode = str(payload.get("mode") or "buyer_seller_negotiation")
+    mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
     scenario = payload.get("scenario") or None
     seed_list = payload.get("seed_list") or list(DEFAULT_BATCH_SEEDS)
     if mode == "five_attr":
@@ -90,6 +91,10 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                     "max_rounds": max_rounds,
                     "use_models": use_models,
                 }
+                print(
+                    f"[simulation] mega-batch matchup {matchup_index}/{total_matchups} mode={mode} buyer={buyer_model} seller={seller_model} selected_models={selected_models}",
+                    flush=True,
+                )
                 status["current_matchup"] = matchup_index
                 status["current_episode"] = 0
                 status["current_seed"] = None
