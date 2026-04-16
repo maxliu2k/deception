@@ -213,6 +213,26 @@ class OpenAuctionEpisodeResult:
 
 
 @dataclass
+class DynamicAuctionOpponentProfile:
+    remaining_budget: int = 0
+    highest_bid_seen: int = 0
+
+
+@dataclass
+class DynamicAuctionPolicyState:
+    target_wins: int = 6
+    initial_budget: int = 0
+    max_average_cost: float = 0.0
+    sweep_open_bid: int = 800
+    shock_probe_bid: int = 1500
+    stop_loss_multiplier: float = 1.20
+    meta_state: str = "unknown"  # unknown | hoarder | spender
+    probe_bid_placed: bool = False
+    probe_counter_fight_seen: bool = False
+    wins_when_locked: int = 0
+
+
+@dataclass
 class PublicObservation:
     role: str
     phase: str

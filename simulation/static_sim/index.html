@@ -351,7 +351,7 @@
     </div>
 
     <script>
-      const MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Truthful"];
+      const MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Dynamic", "Truthful"];
       const DEFAULT_PICK = ["5.4", "5.4", "5.4"];
       const SCENARIOS_BY_MODE = {
         five_attr: [
@@ -570,30 +570,6 @@
       function migrateLegacyDefaultModels(mode, models) {
         if (!Array.isArray(models)) return models;
         const out = [...models];
-        if ((mode === "open_painting_auction" || mode === "buyer_seller_negotiation" || mode === "five_attr") && out.length >= 5) {
-          const legacyShape =
-            out[0] === "5.4" &&
-            out[1] === "Opus" &&
-            out[2] === "Flash" &&
-            out[3] === "DeepSeek" &&
-            out[4] === "Mathematical";
-          if (legacyShape) {
-            out[1] = "Sonnet";
-            out[2] = "Flash";
-            out[3] = "Llama";
-          }
-          const priorDefaultShape =
-            out[0] === "5.4" &&
-            out[1] === "Opus" &&
-            out[2] === "Pro" &&
-            out[3] === "Grok" &&
-            out[4] === "Mathematical";
-          if (priorDefaultShape) {
-            out[1] = "Sonnet";
-            out[2] = "Flash";
-            out[3] = "Llama";
-          }
-        }
         if (mode === "five_attr") {
           if (out.length === 3 && out[0] === "Haiku" && out[1] === "Sonnet" && out[2] === "Pro") {
             return ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
@@ -1314,7 +1290,8 @@
             }
             for (const bidderId of chartBidders) {
               const value = lastBidByBidder[bidderId];
-              seriesByBidder[bidderId].push(typeof value === "number" ? value : null);
+              // Plot complete passes explicitly at y=0 instead of dropping the point.
+              seriesByBidder[bidderId].push(typeof value === "number" ? value : 0);
             }
           }
           const allValues = Object.values(seriesByBidder).flat().filter((v) => typeof v === "number");

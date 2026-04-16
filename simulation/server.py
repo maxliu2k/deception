@@ -49,6 +49,7 @@ from .policies import (
     open_auction_policy_balanced,
     open_auction_policy_catchup,
     open_auction_policy_conservative,
+    open_auction_policy_dynamic,
     open_auction_policy_endgame,
     negotiation_policy_buyer_constrained_expected_utility,
     customer_policy_skeptical_memory,
@@ -92,6 +93,7 @@ from .state import (
     FiveAttrCustomerDecision,
     FiveAttrResortDeclaration,
     NegotiationTurnAction,
+    DynamicAuctionPolicyState,
     OpenAuctionAction,
     ResortToAgentAction,
     ResortOfferAction,
@@ -673,7 +675,9 @@ OPENROUTER_ONLY_MODEL_ALIASES = {"Grok", "Kimi", "DeepSeek", "Llama", "GLM"}
 
 
 def _runtime_llm_alias(alias: str) -> str:
-    return "5.4" if alias == "Truthful" else alias
+    if alias in {"Truthful", "Dynamic"}:
+        return "5.4"
+    return alias
 
 
 def _negotiation_message_cap(env: TravelGameEnv | None = None) -> int:
@@ -773,14 +777,10 @@ def _normalized_selected_models_for_mode(mode: str, selected: list[str] | None) 
             raw = raw[:5]
         return raw
     if mode == "buyer_seller_negotiation":
-        if len(raw) >= 5 and raw[:5] == ["5.4", "Opus", "Pro", "Grok", "Mathematical"]:
-            return ["5.4", "Sonnet", "Flash", "Llama", "Mathematical"]
         if len(raw) == 2:
             raw.append(raw[1])
         return raw[:5] if len(raw) >= 5 else raw
     if mode == "open_painting_auction":
-        if len(raw) >= 5 and raw[:5] == ["5.4", "Opus", "Pro", "Grok", "Mathematical"]:
-            return ["5.4", "Sonnet", "Flash", "Llama", "Mathematical"]
         return raw[:5] if len(raw) >= 5 else raw
     return raw
 
@@ -861,6 +861,75 @@ def _get_openrouter_key() -> str:
 
 def _use_openrouter_for_llms() -> bool:
     return bool(_get_openrouter_key())
+
+
+def _safe_key_fingerprint(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "missing"
+    prefix = text[:8]
+    return f"present(len={len(text)},prefix={prefix}...)"
+
+
+def _exception_response_excerpt(exc: Exception, limit: int = 400) -> str:
+    text = str(exc or "").strip()
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = getattr(response, "text", None)
+            if not body and hasattr(response, "json"):
+                payload = response.json()
+                body = json.dumps(payload, ensure_ascii=False)
+            if body:
+                text = f"{text} | response={str(body)[:limit]}"
+        except Exception:
+            pass
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return text
+
+
+def _format_llm_error_detail(
+    *,
+    alias: str,
+    provider: str,
+    model: str,
+    call_type: str,
+    exc: Exception,
+) -> str:
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None) if response is not None else None
+    detail_parts = [
+        f"LLM {call_type} call failed",
+        f"alias={alias}",
+        f"provider={provider}",
+        f"model={model}",
+        f"exc_type={exc.__class__.__name__}",
+    ]
+    if status_code is not None:
+        detail_parts.append(f"status={status_code}")
+    if provider == "openrouter":
+        env_key = os.environ.get("OPENROUTER_API_KEY", "")
+        file_path = KEYS_DIR / "openkey.txt"
+        file_key = _load_key_file("openkey.txt")
+        detail_parts.append(f"openrouter_env_key={_safe_key_fingerprint(env_key)}")
+        detail_parts.append(f"openrouter_file_key={_safe_key_fingerprint(file_key)}")
+        detail_parts.append(f"openrouter_file_exists={file_path.exists()}")
+        if file_path.exists():
+            try:
+                detail_parts.append(f"openrouter_file_size={file_path.stat().st_size}")
+            except Exception:
+                pass
+    elif alias in {"4o", "5.4", "Truthful", "Dynamic"}:
+        detail_parts.append(f"openai_env_key={_safe_key_fingerprint(os.environ.get('OPENAI_API_KEY', ''))}")
+    elif alias in {"Haiku", "Sonnet", "Opus"}:
+        detail_parts.append(f"anthropic_env_key={_safe_key_fingerprint(os.environ.get('ANTHROPIC_API_KEY', ''))}")
+    elif alias in {"Flash", "Pro"}:
+        detail_parts.append(f"gemini_env_key={_safe_key_fingerprint(os.environ.get('GEMINI_API_KEY', ''))}")
+    detail_parts.append(f"detail={_exception_response_excerpt(exc)}")
+    return " | ".join(detail_parts)
 
 
 def _to_dict(value: Any) -> Any:
@@ -967,109 +1036,114 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
     use_openrouter = _use_openrouter_for_llms()
     model = OPENROUTER_MODEL_ID_BY_ALIAS[alias] if use_openrouter else MODEL_ID_BY_ALIAS[alias]
     provider = "openrouter" if use_openrouter else "direct"
-    if alias in OPENROUTER_ONLY_MODEL_ALIASES and not _use_openrouter_for_llms():
-        raise RuntimeError(f"{alias} is configured as an OpenRouter-only model. Set OPENROUTER_API_KEY or add keys/openkey.txt.")
-    _append_llm_trace(alias=alias, provider=provider, model=model, call_type="json")
-    logger.info("simulation LLM call alias=%s provider=%s model=%s max_tokens=%s", alias, provider, model, max_tokens)
-    if use_openrouter:
-        client = AsyncOpenAI(
-            api_key=_get_openrouter_key(),
-            base_url=OPENROUTER_BASE_URL,
-            default_headers={
-                "HTTP-Referer": OPENROUTER_REFERER,
-                "X-Title": OPENROUTER_TITLE,
-            },
-        )
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        }
-        reasoning = _openrouter_reasoning_payload(alias)
-        if reasoning is not None:
-            request_kwargs["reasoning"] = reasoning
-        try:
-            resp = await client.chat.completions.create(**request_kwargs)
-        except TypeError:
-            request_kwargs.pop("reasoning", None)
-            resp = await client.chat.completions.create(**request_kwargs)
-        text = _normalize_message_content(resp.choices[0].message.content)
-        parsed = _extract_json_object(text)
-        parsed["_raw_text"] = text
-        if not parsed:
-            logger.warning("simulation OpenRouter JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
-        return parsed
-    if alias in {"4o", "5.4"}:
-        key = _get_openai_key()
-        if not key:
-            raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; OpenAI direct keys still work as fallback.")
-        client = AsyncOpenAI(api_key=key)
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            "temperature": temperature,
-            "max_completion_tokens": max_tokens,
-        }
-        if alias == "5.4":
-            request_kwargs["reasoning_effort"] = "high"
-        try:
-            resp = await client.chat.completions.create(**request_kwargs)
-        except TypeError:
-            request_kwargs.pop("reasoning_effort", None)
-            resp = await client.chat.completions.create(**request_kwargs)
-        text = _normalize_message_content(resp.choices[0].message.content)
-        parsed = _extract_json_object(text)
-        parsed["_raw_text"] = text
-        if not parsed:
-            logger.warning("simulation direct OpenAI JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
-        return parsed
-    if alias in {"Haiku", "Sonnet", "Opus"}:
-        key = _get_anthropic_key()
-        if not key:
-            raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Anthropic direct keys still work as fallback.")
-        if AsyncAnthropic is None:
-            raise RuntimeError("anthropic package unavailable.")
-        client = AsyncAnthropic(api_key=key, timeout=30.0)
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-        if alias == "Opus":
-            request_kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, max_tokens * 2)}
-        try:
-            resp = await client.messages.create(**request_kwargs)
-        except TypeError:
-            request_kwargs.pop("thinking", None)
-            resp = await client.messages.create(**request_kwargs)
-        text = "".join(block.text for block in resp.content if getattr(block, "type", "") == "text")
-        parsed = _extract_json_object(text)
-        parsed["_raw_text"] = text
-        if not parsed:
-            logger.warning("simulation Anthropic JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
-        return parsed
-    if alias in {"Flash", "Pro"}:
-        key = _get_gemini_key()
-        if not key:
-            raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Gemini direct keys still work as fallback.")
-        body = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-            "generationConfig": _gemini_generation_config(alias, temperature, max_tokens),
-        }
-        obj = await asyncio.to_thread(_gemini_post_json, key, model, body, 45.0)
-        cands = obj.get("candidates") or []
-        parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
-        text = "".join((p.get("text") or "") for p in parts)
-        parsed = _extract_json_object(text)
-        parsed["_raw_text"] = text
-        if not parsed:
-            logger.warning("simulation Gemini JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
-        return parsed
-    return {}
+    try:
+        if alias in OPENROUTER_ONLY_MODEL_ALIASES and not _use_openrouter_for_llms():
+            raise RuntimeError(f"{alias} is configured as an OpenRouter-only model. Set OPENROUTER_API_KEY or add keys/openkey.txt.")
+        _append_llm_trace(alias=alias, provider=provider, model=model, call_type="json")
+        logger.info("simulation LLM call alias=%s provider=%s model=%s max_tokens=%s", alias, provider, model, max_tokens)
+        if use_openrouter:
+            client = AsyncOpenAI(
+                api_key=_get_openrouter_key(),
+                base_url=OPENROUTER_BASE_URL,
+                default_headers={
+                    "HTTP-Referer": OPENROUTER_REFERER,
+                    "X-Title": OPENROUTER_TITLE,
+                },
+            )
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            }
+            reasoning = _openrouter_reasoning_payload(alias)
+            if reasoning is not None:
+                request_kwargs["reasoning"] = reasoning
+            try:
+                resp = await client.chat.completions.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("reasoning", None)
+                resp = await client.chat.completions.create(**request_kwargs)
+            text = _normalize_message_content(resp.choices[0].message.content)
+            parsed = _extract_json_object(text)
+            parsed["_raw_text"] = text
+            if not parsed:
+                logger.warning("simulation OpenRouter JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
+            return parsed
+        if alias in {"4o", "5.4"}:
+            key = _get_openai_key()
+            if not key:
+                raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; OpenAI direct keys still work as fallback.")
+            client = AsyncOpenAI(api_key=key)
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                "temperature": temperature,
+                "max_completion_tokens": max_tokens,
+            }
+            if alias == "5.4":
+                request_kwargs["reasoning_effort"] = "high"
+            try:
+                resp = await client.chat.completions.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("reasoning_effort", None)
+                resp = await client.chat.completions.create(**request_kwargs)
+            text = _normalize_message_content(resp.choices[0].message.content)
+            parsed = _extract_json_object(text)
+            parsed["_raw_text"] = text
+            if not parsed:
+                logger.warning("simulation direct OpenAI JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
+            return parsed
+        if alias in {"Haiku", "Sonnet", "Opus"}:
+            key = _get_anthropic_key()
+            if not key:
+                raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Anthropic direct keys still work as fallback.")
+            if AsyncAnthropic is None:
+                raise RuntimeError("anthropic package unavailable.")
+            client = AsyncAnthropic(api_key=key, timeout=30.0)
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+            if alias == "Opus":
+                request_kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, max_tokens * 2)}
+            try:
+                resp = await client.messages.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("thinking", None)
+                resp = await client.messages.create(**request_kwargs)
+            text = "".join(block.text for block in resp.content if getattr(block, "type", "") == "text")
+            parsed = _extract_json_object(text)
+            parsed["_raw_text"] = text
+            if not parsed:
+                logger.warning("simulation Anthropic JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
+            return parsed
+        if alias in {"Flash", "Pro"}:
+            key = _get_gemini_key()
+            if not key:
+                raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Gemini direct keys still work as fallback.")
+            body = {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                "generationConfig": _gemini_generation_config(alias, temperature, max_tokens),
+            }
+            obj = await asyncio.to_thread(_gemini_post_json, key, model, body, 45.0)
+            cands = obj.get("candidates") or []
+            parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+            text = "".join((p.get("text") or "") for p in parts)
+            parsed = _extract_json_object(text)
+            parsed["_raw_text"] = text
+            if not parsed:
+                logger.warning("simulation Gemini JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
+            return parsed
+        return {}
+    except Exception as exc:
+        detail = _format_llm_error_detail(alias=alias, provider=provider, model=model, call_type="json", exc=exc)
+        logger.exception("simulation json llm call failed: %s", detail)
+        raise RuntimeError(detail) from exc
 
 
 async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, temperature: float = 0.2, max_tokens: int = 120) -> str:
@@ -1077,89 +1151,94 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
     use_openrouter = _use_openrouter_for_llms()
     model = OPENROUTER_MODEL_ID_BY_ALIAS[alias] if use_openrouter else MODEL_ID_BY_ALIAS[alias]
     provider = "openrouter" if use_openrouter else "direct"
-    if alias in OPENROUTER_ONLY_MODEL_ALIASES and not _use_openrouter_for_llms():
-        raise RuntimeError(f"{alias} is configured as an OpenRouter-only model. Set OPENROUTER_API_KEY or add keys/openkey.txt.")
-    _append_llm_trace(alias=alias, provider=provider, model=model, call_type="text")
-    logger.info("simulation LLM text call alias=%s provider=%s model=%s max_tokens=%s", alias, provider, model, max_tokens)
-    if use_openrouter:
-        client = AsyncOpenAI(
-            api_key=_get_openrouter_key(),
-            base_url=OPENROUTER_BASE_URL,
-            default_headers={
-                "HTTP-Referer": OPENROUTER_REFERER,
-                "X-Title": OPENROUTER_TITLE,
-            },
-        )
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        }
-        reasoning = _openrouter_reasoning_payload(alias)
-        if reasoning is not None:
-            request_kwargs["reasoning"] = reasoning
-        try:
-            resp = await client.chat.completions.create(**request_kwargs)
-        except TypeError:
-            request_kwargs.pop("reasoning", None)
-            resp = await client.chat.completions.create(**request_kwargs)
-        return _normalize_message_content(resp.choices[0].message.content).strip()
-    if alias in {"4o", "5.4"}:
-        key = _get_openai_key()
-        if not key:
-            raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; OpenAI direct keys still work as fallback.")
-        client = AsyncOpenAI(api_key=key)
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            "temperature": temperature,
-            "max_completion_tokens": max_tokens,
-        }
-        if alias == "5.4":
-            request_kwargs["reasoning_effort"] = "high"
-        try:
-            resp = await client.chat.completions.create(**request_kwargs)
-        except TypeError:
-            request_kwargs.pop("reasoning_effort", None)
-            resp = await client.chat.completions.create(**request_kwargs)
-        return _normalize_message_content(resp.choices[0].message.content).strip()
-    if alias in {"Haiku", "Sonnet", "Opus"}:
-        key = _get_anthropic_key()
-        if not key:
-            raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Anthropic direct keys still work as fallback.")
-        if AsyncAnthropic is None:
-            raise RuntimeError("anthropic package unavailable.")
-        client = AsyncAnthropic(api_key=key, timeout=30.0)
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-        if alias == "Opus":
-            request_kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, max_tokens * 2)}
-        try:
-            resp = await client.messages.create(**request_kwargs)
-        except TypeError:
-            request_kwargs.pop("thinking", None)
-            resp = await client.messages.create(**request_kwargs)
-        return "".join(block.text for block in resp.content if getattr(block, "type", "") == "text").strip()
-    if alias in {"Flash", "Pro"}:
-        key = _get_gemini_key()
-        if not key:
-            raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Gemini direct keys still work as fallback.")
-        body = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-            "generationConfig": _gemini_generation_config(alias, temperature, max_tokens),
-        }
-        obj = await asyncio.to_thread(_gemini_post_json, key, model, body, 45.0)
-        cands = obj.get("candidates") or []
-        parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
-        return "".join((p.get("text") or "") for p in parts).strip()
-    return ""
+    try:
+        if alias in OPENROUTER_ONLY_MODEL_ALIASES and not _use_openrouter_for_llms():
+            raise RuntimeError(f"{alias} is configured as an OpenRouter-only model. Set OPENROUTER_API_KEY or add keys/openkey.txt.")
+        _append_llm_trace(alias=alias, provider=provider, model=model, call_type="text")
+        logger.info("simulation LLM text call alias=%s provider=%s model=%s max_tokens=%s", alias, provider, model, max_tokens)
+        if use_openrouter:
+            client = AsyncOpenAI(
+                api_key=_get_openrouter_key(),
+                base_url=OPENROUTER_BASE_URL,
+                default_headers={
+                    "HTTP-Referer": OPENROUTER_REFERER,
+                    "X-Title": OPENROUTER_TITLE,
+                },
+            )
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            }
+            reasoning = _openrouter_reasoning_payload(alias)
+            if reasoning is not None:
+                request_kwargs["reasoning"] = reasoning
+            try:
+                resp = await client.chat.completions.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("reasoning", None)
+                resp = await client.chat.completions.create(**request_kwargs)
+            return _normalize_message_content(resp.choices[0].message.content).strip()
+        if alias in {"4o", "5.4"}:
+            key = _get_openai_key()
+            if not key:
+                raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; OpenAI direct keys still work as fallback.")
+            client = AsyncOpenAI(api_key=key)
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                "temperature": temperature,
+                "max_completion_tokens": max_tokens,
+            }
+            if alias == "5.4":
+                request_kwargs["reasoning_effort"] = "high"
+            try:
+                resp = await client.chat.completions.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("reasoning_effort", None)
+                resp = await client.chat.completions.create(**request_kwargs)
+            return _normalize_message_content(resp.choices[0].message.content).strip()
+        if alias in {"Haiku", "Sonnet", "Opus"}:
+            key = _get_anthropic_key()
+            if not key:
+                raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Anthropic direct keys still work as fallback.")
+            if AsyncAnthropic is None:
+                raise RuntimeError("anthropic package unavailable.")
+            client = AsyncAnthropic(api_key=key, timeout=30.0)
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+            if alias == "Opus":
+                request_kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, max_tokens * 2)}
+            try:
+                resp = await client.messages.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("thinking", None)
+                resp = await client.messages.create(**request_kwargs)
+            return "".join(block.text for block in resp.content if getattr(block, "type", "") == "text").strip()
+        if alias in {"Flash", "Pro"}:
+            key = _get_gemini_key()
+            if not key:
+                raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Gemini direct keys still work as fallback.")
+            body = {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                "generationConfig": _gemini_generation_config(alias, temperature, max_tokens),
+            }
+            obj = await asyncio.to_thread(_gemini_post_json, key, model, body, 45.0)
+            cands = obj.get("candidates") or []
+            parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+            return "".join((p.get("text") or "") for p in parts).strip()
+        return ""
+    except Exception as exc:
+        detail = _format_llm_error_detail(alias=alias, provider=provider, model=model, call_type="text", exc=exc)
+        logger.exception("simulation text llm call failed: %s", detail)
+        raise RuntimeError(detail) from exc
 
 
 async def _call_llm_json_with_timeout(alias: str, system_prompt: str, user_prompt: str, *, temperature: float = 0.2, max_tokens: int = 700, timeout_s: float = 45.0) -> dict:
@@ -1346,6 +1425,59 @@ def _auction_budget_log(env: TravelGameEnv) -> dict[str, list[dict[str, int | st
                 }
             )
     return logs
+
+
+def _auction_dynamic_state_by_bidder(env: TravelGameEnv) -> dict[str, DynamicAuctionPolicyState]:
+    states_raw = env.world.get("auction_dynamic_state_by_bidder")
+    bidder_states = env.world.get("auction_bidders") or {}
+    total_paintings = int(env.config.get("num_paintings") or 12)
+    target_wins = min(6, max(1, total_paintings // 2))
+
+    if not isinstance(states_raw, dict):
+        states_raw = {}
+    resolved: dict[str, DynamicAuctionPolicyState] = {}
+    changed = False
+    for bidder_id, bidder in bidder_states.items():
+        candidate = states_raw.get(bidder_id)
+        if isinstance(candidate, DynamicAuctionPolicyState):
+            resolved_state = candidate
+        elif isinstance(candidate, dict):
+            resolved_state = DynamicAuctionPolicyState(
+                target_wins=int(candidate.get("target_wins") or target_wins),
+                initial_budget=int(candidate.get("initial_budget") or int(getattr(bidder, "remaining_budget", 0))),
+                max_average_cost=float(
+                    candidate.get("max_average_cost")
+                    or (float(getattr(bidder, "remaining_budget", 0)) / max(1, int(candidate.get("target_wins") or target_wins)))
+                ),
+                sweep_open_bid=int(candidate.get("sweep_open_bid") or 800),
+                shock_probe_bid=int(candidate.get("shock_probe_bid") or 1500),
+                stop_loss_multiplier=float(candidate.get("stop_loss_multiplier") or 1.20),
+                meta_state=str(candidate.get("meta_state") or "unknown"),
+                probe_bid_placed=bool(candidate.get("probe_bid_placed", False)),
+                probe_counter_fight_seen=bool(candidate.get("probe_counter_fight_seen", False)),
+                wins_when_locked=int(candidate.get("wins_when_locked") or 0),
+            )
+            changed = True
+        else:
+            initial_budget = int(getattr(bidder, "remaining_budget", 0))
+            resolved_state = DynamicAuctionPolicyState(
+                target_wins=target_wins,
+                initial_budget=initial_budget,
+                max_average_cost=float(initial_budget) / max(1, target_wins),
+                sweep_open_bid=800,
+                shock_probe_bid=1500,
+                stop_loss_multiplier=1.20,
+                meta_state="unknown",
+                probe_bid_placed=False,
+                probe_counter_fight_seen=False,
+                wins_when_locked=int(getattr(bidder, "paintings_won", 0)),
+            )
+            changed = True
+        resolved[bidder_id] = resolved_state
+
+    if changed or states_raw is not resolved:
+        env.world["auction_dynamic_state_by_bidder"] = resolved
+    return resolved
 
 
 def _refresh_auction_status(env: TravelGameEnv | None = None, runtime: _SessionRuntime | None = None) -> None:
@@ -1931,20 +2063,36 @@ def _build_actions_open_auction(env: TravelGameEnv, payload: Dict[str, Any]) -> 
         raise RuntimeError("No active auction round.")
     bidder_id = round_state.turn_order[round_state.turn_index]
     bidder = env.world["auction_bidders"][bidder_id]
+    bidder_alias = env.world.get("auction_bidder_model_by_id", {}).get(bidder_id, "5.4")
     paintings_remaining = max(1, int(env.config.get("num_paintings") or 12) - len(env.world.get("auction_results") or []))
+    total_paintings = int(env.config.get("num_paintings") or 12)
+    painting_number = int(env.world.get("auction_painting_index") or 0) + 1
     min_next_bid = env._get_min_opening_bid() if round_state.current_leader is None else int(round_state.current_bid) + int(env._get_min_raise(round_state.current_bid))
     counts = {bid: state.paintings_won for bid, state in env.world["auction_bidders"].items()}
-    policy_name = str(payload.get("auction_policy") or "balanced")
-    if policy_name == "aggressive":
-        action = open_auction_policy_aggressive(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
-    elif policy_name == "conservative":
-        action = open_auction_policy_conservative(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
-    elif policy_name == "catchup":
-        action = open_auction_policy_catchup(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid, painting_counts=counts)
-    elif policy_name == "endgame":
-        action = open_auction_policy_endgame(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
+    if bidder_alias == "Dynamic":
+        dynamic_state = _auction_dynamic_state_by_bidder(env).get(bidder_id)
+        action = open_auction_policy_dynamic(
+            bidder,
+            round_state,
+            min_next_bid=min_next_bid,
+            painting_number=painting_number,
+            total_paintings=total_paintings,
+            all_bidders=env.world.get("auction_bidders") or {},
+            completed_paintings=[_to_dict(item) for item in (env.world.get("auction_results") or [])],
+            dynamic_state=dynamic_state or DynamicAuctionPolicyState(),
+        )
     else:
-        action = open_auction_policy_balanced(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
+        policy_name = str(payload.get("auction_policy") or "balanced")
+        if policy_name == "aggressive":
+            action = open_auction_policy_aggressive(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
+        elif policy_name == "conservative":
+            action = open_auction_policy_conservative(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
+        elif policy_name == "catchup":
+            action = open_auction_policy_catchup(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid, painting_counts=counts)
+        elif policy_name == "endgame":
+            action = open_auction_policy_endgame(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
+        else:
+            action = open_auction_policy_balanced(bidder, round_state, paintings_remaining=paintings_remaining, min_next_bid=min_next_bid)
     _refresh_auction_turns()
     _set_active(_auction_bidder_turn_id(bidder_id))
     bidder_name = _auction_display_name(bidder_id, env) or bidder_id
@@ -2427,6 +2575,23 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
     try:
         _refresh_auction_turns()
         _set_active(_auction_bidder_turn_id(bidder_id))
+        if bidder_alias == "Dynamic":
+            dynamic_state = _auction_dynamic_state_by_bidder(env).get(bidder_id)
+            action = open_auction_policy_dynamic(
+                bidder,
+                round_state,
+                min_next_bid=min_next_bid,
+                painting_number=painting_number,
+                total_paintings=total_paintings,
+                all_bidders=env.world.get("auction_bidders") or {},
+                completed_paintings=[_to_dict(item) for item in (env.world.get("auction_results") or [])],
+                dynamic_state=dynamic_state or DynamicAuctionPolicyState(),
+            )
+            bidder_name = _auction_display_name(bidder_id, env) or bidder_id
+            display_text = f"{bidder_name} passes." if action.action_type == "pass" else f"{bidder_name} raises to ${action.bid_amount}."
+            _append_conversation("auction", bidder_name, "", display_text)
+            _mark_done(_auction_bidder_turn_id(bidder_id))
+            return {"auction_action": action, "used_models": True, "llm_error": None}
         if bidder_alias == "Mathematical":
             counts = {bid: state.paintings_won for bid, state in env.world["auction_bidders"].items()}
             if paintings_remaining <= 2:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict
+from typing import Any, Dict
 
 from .metrics import budget_bucket
 from .reward import RewardHyperparameters, compute_fit, compute_resort_response
@@ -19,6 +19,8 @@ from .state import (
     NegotiationBuyerOfferDecision,
     NegotiationOfferEvaluation,
     NegotiationPosteriorEstimate,
+    DynamicAuctionOpponentProfile,
+    DynamicAuctionPolicyState,
     FiveAttrAgentReport,
     FiveAttrAgentState,
     FiveAttrCustomerDecision,
@@ -676,3 +678,113 @@ def open_auction_policy_endgame(
     pace = _auction_pace_budget(bidder.remaining_budget, paintings_remaining)
     multiplier = 1.75 if paintings_remaining <= 3 else 1.15
     return _auction_raise_or_pass(bidder, min_next_bid=min_next_bid, max_willing_bid=int(pace * multiplier), label="Endgame")
+
+
+def _dynamic_open_or_raise(*, min_next_bid: int, target_bid: int) -> int:
+    return max(int(min_next_bid), int(target_bid))
+
+
+def open_auction_policy_dynamic(
+    bidder: OpenAuctionBidderState,
+    round_state: OpenAuctionRoundState,
+    *,
+    min_next_bid: int,
+    painting_number: int,
+    total_paintings: int,
+    all_bidders: Dict[str, OpenAuctionBidderState],
+    completed_paintings: list[dict[str, Any]],
+    dynamic_state: DynamicAuctionPolicyState,
+) -> OpenAuctionAction:
+    # Unified Sweeping Algorithm (USA)
+    target_wins = 6
+    first_half_end = 6
+    endgame_start = 7
+    if dynamic_state.initial_budget <= 0:
+        dynamic_state.initial_budget = int(bidder.remaining_budget)
+    dynamic_state.target_wins = target_wins
+    dynamic_state.max_average_cost = float(dynamic_state.initial_budget) / max(1, target_wins)
+    dynamic_state.sweep_open_bid = 800
+    dynamic_state.shock_probe_bid = 1500
+
+    current_wins = int(bidder.paintings_won)
+
+    # Opponent profiles (remaining budget + highest seen bid)
+    opponent_profiles: dict[str, DynamicAuctionOpponentProfile] = {}
+    for bidder_id, state in all_bidders.items():
+        if bidder_id == bidder.bidder_id:
+            continue
+        opponent_profiles[bidder_id] = DynamicAuctionOpponentProfile(
+            remaining_budget=int(state.remaining_budget),
+            highest_bid_seen=0,
+        )
+    for entry in list(round_state.bid_history or []):
+        bidder_id = str(entry.get("bidder_id") or "")
+        bid_amount = int(entry.get("bid_amount") or 0)
+        if bidder_id in opponent_profiles:
+            opponent_profiles[bidder_id].highest_bid_seen = max(opponent_profiles[bidder_id].highest_bid_seen, bid_amount)
+            if dynamic_state.probe_bid_placed and painting_number == 1 and bid_amount > dynamic_state.shock_probe_bid:
+                dynamic_state.probe_counter_fight_seen = True
+                dynamic_state.meta_state = "spender"
+    for painting in completed_paintings:
+        for entry in list((painting.get("bid_history") or [])):
+            bidder_id = str(entry.get("bidder_id") or "")
+            bid_amount = int(entry.get("bid_amount") or 0)
+            if bidder_id in opponent_profiles:
+                opponent_profiles[bidder_id].highest_bid_seen = max(opponent_profiles[bidder_id].highest_bid_seen, bid_amount)
+
+    # Phase 3: Endgame Pivot (paintings 7..12) - ignore meta_state.
+    if painting_number >= endgame_start:
+        needed_wins = max(0, target_wins - current_wins)
+        if needed_wins == 0:
+            return OpenAuctionAction(action_type="pass", message_text="Dynamic endgame: sleep state, passing.")
+        if painting_number >= int(total_paintings):
+            if bidder.remaining_budget >= min_next_bid:
+                return OpenAuctionAction(
+                    action_type="raise",
+                    bid_amount=int(bidder.remaining_budget),
+                    message_text=f"Dynamic endgame final: all-in ${int(bidder.remaining_budget)}.",
+                )
+            return OpenAuctionAction(action_type="pass", message_text="Dynamic endgame final: cannot bid legally, passing.")
+        purchasing_power = float(bidder.remaining_budget) / max(1, needed_wins)
+        if min_next_bid <= bidder.remaining_budget and float(min_next_bid) <= purchasing_power:
+            return OpenAuctionAction(action_type="raise", bid_amount=int(min_next_bid), message_text=f"Dynamic endgame sweep: bidding ${int(min_next_bid)}.")
+        return OpenAuctionAction(action_type="pass", message_text="Dynamic endgame sweep: pass (price above purchasing power).")
+
+    # Phase 1: Probe (painting 1)
+    if painting_number == 1 and dynamic_state.meta_state == "unknown":
+        # Wait for an opening bid before probe jump.
+        if round_state.current_leader is None:
+            return OpenAuctionAction(action_type="pass", message_text="Dynamic probe: waiting for opening bid.")
+        probe_bid = _dynamic_open_or_raise(min_next_bid=min_next_bid, target_bid=dynamic_state.shock_probe_bid)
+        if probe_bid <= bidder.remaining_budget:
+            dynamic_state.probe_bid_placed = True
+            return OpenAuctionAction(action_type="raise", bid_amount=int(probe_bid), message_text=f"Dynamic probe: bidding ${int(probe_bid)}.")
+        return OpenAuctionAction(action_type="pass", message_text="Dynamic probe: cannot place shock bid, passing.")
+
+    # If we survived painting 1 without observed counter-raise after probe, classify as HOARDER.
+    if dynamic_state.meta_state == "unknown" and painting_number >= 2:
+        dynamic_state.meta_state = "spender" if dynamic_state.probe_counter_fight_seen else "hoarder"
+        dynamic_state.wins_when_locked = current_wins
+
+    # Phase 2: Mid-game (paintings 2..6), meta-state controlled.
+    if painting_number <= first_half_end:
+        if dynamic_state.meta_state == "hoarder":
+            # Active acquisition with stop-loss at 1000.
+            stop_loss = 1000
+            target_bid = _dynamic_open_or_raise(min_next_bid=min_next_bid, target_bid=dynamic_state.sweep_open_bid)
+            if target_bid > bidder.remaining_budget or target_bid > stop_loss:
+                return OpenAuctionAction(action_type="pass", message_text="Dynamic hoarder: stop-loss pass.")
+            return OpenAuctionAction(action_type="raise", bid_amount=int(target_bid), message_text=f"Dynamic hoarder: bidding ${int(target_bid)}.")
+
+        # SPENDER path: capital drain with min increments + sniper fold.
+        opponent_budgets = [profile.remaining_budget for profile in opponent_profiles.values()]
+        highest_opponent_budget = max(opponent_budgets) if opponent_budgets else 0
+        sniper_cap = max(0, int(highest_opponent_budget) - 50)
+        if min_next_bid <= bidder.remaining_budget and min_next_bid <= sniper_cap:
+            return OpenAuctionAction(action_type="raise", bid_amount=int(min_next_bid), message_text=f"Dynamic spender drain: bidding ${int(min_next_bid)}.")
+        return OpenAuctionAction(action_type="pass", message_text="Dynamic spender drain: sniper fold pass.")
+
+    # Safety fallback (should rarely hit due to explicit phases).
+    if min_next_bid <= bidder.remaining_budget:
+        return OpenAuctionAction(action_type="raise", bid_amount=int(min_next_bid), message_text=f"Dynamic fallback: bidding ${int(min_next_bid)}.")
+    return OpenAuctionAction(action_type="pass", message_text="Dynamic fallback: pass.")
