@@ -287,10 +287,6 @@ def five_attr_customer_reward(pref: List[float], truth: List[bool], reported: Li
     return true_quality * params.five_attr_quality_multiplier - price / params.five_attr_price_divisor - disappointment * DECEPTION_HARM
 
 
-def five_attr_resort_reward(price: int, margin: float, booked: bool, resort_caught_lies: int) -> float:
-    return price * margin * (1 if booked else 0) - CAUGHT_LIE_PENALTY * resort_caught_lies
-
-
 def five_attr_agent_reward(
     price: int,
     commission_rate: float,

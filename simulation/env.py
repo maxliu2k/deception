@@ -27,7 +27,6 @@ from .reward import (
     five_attr_caught_lie_penalty,
     five_attr_agent_reward,
     five_attr_customer_reward,
-    five_attr_resort_reward,
     five_attr_trust_multiplier,
     round_reputation_bonus,
     open_auction_reward,
@@ -67,7 +66,6 @@ from .state import (
     FiveAttrCustomerDecision,
     FiveAttrMemoryState,
     FiveAttrRoundState,
-    FiveAttrResortDeclaration,
     FiveAttrResortState,
     NegotiationBuyerState,
     NegotiationSellerState,
@@ -94,7 +92,7 @@ DEFAULT_CONFIG = {
     "negotiation_message_limit": 8,
     "five_attr_message_limit": 10,
     "max_attribute_lie": 2,
-    "selected_models": ["5.4", "5.4", "5.4"],
+    "selected_models": ["GPT-5.4", "GPT-5.4", "GPT-5.4"],
     "mode": "mediation",
     "num_bidders": 5,
     "num_paintings": 12,
@@ -262,16 +260,13 @@ class TravelGameEnv:
     def _get_min_opening_bid(self) -> int:
         return int(self.config.get("opening_bid") or 100)
 
-    def _auction_painting_ids(self) -> List[str]:
-        return [f"painting_{i + 1}" for i in range(int(self.config.get("num_paintings") or 12))]
-
     def _auction_bidder_ids(self) -> List[str]:
         return [f"bidder_{i + 1}" for i in range(int(self.config.get("num_bidders") or 5))]
 
     def _resolve_bidder_models(self) -> Dict[str, str]:
         selected = list(self.config.get("selected_models") or [])
         if not selected:
-            selected = ["5.4"]
+            selected = ["GPT-5.4"]
         bidder_ids = self._auction_bidder_ids()
         return {bidder_id: selected[idx % len(selected)] for idx, bidder_id in enumerate(bidder_ids)}
 

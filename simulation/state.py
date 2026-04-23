@@ -385,10 +385,3 @@ class FiveAttrMemoryState:
     verification_count: int = 0
 
 
-@dataclass
-class FiveAttrEpisodeResult:
-    booked: bool
-    rewards: Dict[str, float]
-    derived: Dict
-    deception_metrics: Dict
-    message_log: List[Dict]

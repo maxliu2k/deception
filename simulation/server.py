@@ -35,6 +35,7 @@ except Exception:
     AsyncAnthropic = None
 
 from .env import MODEL_POOL, TravelGameEnv
+from .metrics import budget_bucket
 from .policies import (
     agent_policy_blacklist_unreliable_resorts,
     agent_policy_commission_max,
@@ -58,13 +59,11 @@ from .policies import (
     customer_policy_truthful,
     customer_policy_verify_if_suspicious,
     customer_repeated_decision,
+    five_attr_agent_commission_max,
     five_attr_agent_correct_known,
     five_attr_agent_relay,
     five_attr_customer_naive,
     five_attr_customer_skeptical,
-    five_attr_resort_lie_unverified,
-    five_attr_resort_strategic,
-    five_attr_resort_truthful,
     resort_policy_desperate_hard_sell,
     resort_policy_rebuild_after_caught,
     resort_policy_reputation_building,
@@ -106,6 +105,7 @@ RUNTIME_DIR = APP_DIR / ".runtime"
 SESSION_RUNTIME_DIR = RUNTIME_DIR / "sessions"
 MEGA_BATCH_RUNTIME_DIR = RUNTIME_DIR / "mega_batch"
 SAVE_SLOT_RUNTIME_DIR = RUNTIME_DIR / "save_slots"
+SAVE_SLOT_CATALOG_PATH = RUNTIME_DIR / "save_slots.json"
 KEYS_DIR = APP_DIR.parents[0] / "keys"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_REFERER = os.environ.get("OPENROUTER_HTTP_REFERER", "http://localhost")
@@ -114,6 +114,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Travel Mediation Simulation")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _terminal_trace(message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    print(f"[simulation] {text}", flush=True)
 
 @dataclass
 class _SessionRuntime:
@@ -132,9 +139,92 @@ class _SessionRuntime:
     persisted_updated_at: float | None = None
 
 
+@dataclass
+class _Slot:
+    slot_id: str
+    runtime: _SessionRuntime | None = None
+
+    @property
+    def runtime_dir(self) -> Path:
+        return SAVE_SLOT_RUNTIME_DIR / self.slot_id
+
+    @property
+    def runtime_path(self) -> Path:
+        return self.runtime_dir / "runtime.pkl"
+
+    @property
+    def runtime_meta_path(self) -> Path:
+        return self.runtime_dir / "runtime_meta.json"
+
+    @property
+    def mega_batch_dir(self) -> Path:
+        return MEGA_BATCH_RUNTIME_DIR / self.slot_id
+
+    def _merge_with_persisted(self, runtime: _SessionRuntime | None, persisted: _SessionRuntime | None) -> _SessionRuntime | None:
+        if runtime is not None and persisted is not None:
+            persisted_ts = persisted.persisted_updated_at or 0.0
+            current_running = bool(runtime.step_status.get("running") or runtime.batch_status.get("running") or runtime.mega_batch_status.get("running"))
+            persisted_running = bool(
+                persisted.step_status.get("running")
+                or persisted.batch_status.get("running")
+                or persisted.mega_batch_status.get("running")
+            )
+            if (current_running or persisted_running) and persisted_ts > (runtime.persisted_updated_at or 0.0):
+                runtime = persisted
+        elif runtime is None:
+            runtime = persisted
+        return runtime
+
+    def get_runtime(self, *, create_if_missing: bool = True) -> _SessionRuntime | None:
+        runtime = self.runtime
+        persisted = _load_persisted_runtime(self.slot_id)
+        runtime = self._merge_with_persisted(runtime, persisted)
+        if runtime is None and create_if_missing:
+            runtime = _SessionRuntime()
+        if runtime is not None:
+            self.runtime = runtime
+        return runtime
+
+    def persist_runtime(self) -> None:
+        runtime = self.get_runtime(create_if_missing=False)
+        if runtime is None:
+            return
+        path = self.runtime_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = _runtime_to_snapshot(runtime)
+        temp_path = path.with_suffix(f".pkl.{os.getpid()}.tmp")
+        temp_path.write_bytes(pickle.dumps(snapshot))
+        try:
+            temp_path.replace(path)
+        except (PermissionError, FileNotFoundError):
+            path.write_bytes(temp_path.read_bytes())
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        runtime.persisted_updated_at = float(snapshot.get("updated_at") or 0.0) or None
+        meta = {
+            "updated_at": float(snapshot.get("updated_at") or time.time()),
+            "mode": str((runtime.env.config.get("mode") if runtime.env else "") or ""),
+            "phase": getattr(runtime.env, "phase", None) if runtime.env else None,
+            "done": getattr(runtime.env, "done", None) if runtime.env else None,
+        }
+        _write_json_atomic(self.runtime_meta_path, meta)
+
+    def clear(self) -> None:
+        self.runtime = None
+        shutil.rmtree(self.runtime_dir, ignore_errors=True)
+        shutil.rmtree(self.mega_batch_dir, ignore_errors=True)
+        if SESSION_RUNTIME_DIR.exists():
+            for path in SESSION_RUNTIME_DIR.iterdir():
+                if path.is_dir() and path.name.startswith(f"{self.slot_id}__"):
+                    shutil.rmtree(path, ignore_errors=True)
+
+
 SESSION_ID_CTX: ContextVar[str] = ContextVar("simulation_session_id", default="default")
 SESSION_RUNTIMES: dict[str, _SessionRuntime] = {}
-SAVE_SLOT_IDS = tuple(f"save_slot_{idx}" for idx in range(1, 5))
+SLOT_OBJECTS: dict[str, _Slot] = {}
+_SAVE_SLOT_CATALOG_CACHE: dict[str, Any] | None = None
 FIVE_ATTR_MODE_ALIASES = {
     "five_attr",
     "five_attr_—_boolean_partial_info",
@@ -148,6 +238,12 @@ def _normalize_session_id(value: str | None) -> str:
     return text[:64] or "default"
 
 
+def _filename_slug(value: str | None, *, fallback: str = "session") -> str:
+    raw = str(value or "").strip()
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw).strip("._-")
+    return (slug[:80] or fallback)
+
+
 def _canonical_mode(value: str | None) -> str:
     raw = str(value or "").strip()
     normalized = raw.lower()
@@ -158,7 +254,129 @@ def _canonical_mode(value: str | None) -> str:
 
 
 def _is_save_slot_session(session_id: str | None) -> bool:
-    return _normalize_session_id(session_id) in SAVE_SLOT_IDS
+    return _normalize_session_id(session_id) in _all_save_slot_ids()
+
+
+def _load_slot_catalog() -> dict[str, Any]:
+    global _SAVE_SLOT_CATALOG_CACHE
+    if _SAVE_SLOT_CATALOG_CACHE is not None:
+        return _SAVE_SLOT_CATALOG_CACHE
+    payload = _read_json_file(SAVE_SLOT_CATALOG_PATH, None)
+    if not isinstance(payload, dict):
+        payload = {}
+    slots_raw = payload.get("slots")
+    if not isinstance(slots_raw, list):
+        slots_raw = []
+    slots: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    max_idx = 0
+    for item in slots_raw:
+        if not isinstance(item, dict):
+            continue
+        sid = _normalize_session_id(item.get("slot_id"))
+        if not sid.startswith("save_slot_") or sid in used_ids:
+            continue
+        suffix = sid.removeprefix("save_slot_")
+        try:
+            max_idx = max(max_idx, int(suffix))
+        except Exception:
+            pass
+        name = str(item.get("name") or "").strip() or sid.replace("save_slot_", "Save Slot ")
+        slots.append(
+            {
+                "slot_id": sid,
+                "name": name[:64],
+                "created_at": float(item.get("created_at") or time.time()),
+            }
+        )
+        used_ids.add(sid)
+    next_index = payload.get("next_index")
+    try:
+        next_index_int = max(int(next_index), max_idx + 1)
+    except Exception:
+        next_index_int = max_idx + 1
+    normalized = {"slots": slots, "next_index": next_index_int}
+    _SAVE_SLOT_CATALOG_CACHE = normalized
+    return normalized
+
+
+def _save_slot_catalog(catalog: dict[str, Any]) -> None:
+    global _SAVE_SLOT_CATALOG_CACHE
+    payload = {
+        "slots": list(catalog.get("slots") or []),
+        "next_index": int(catalog.get("next_index") or 1),
+    }
+    _SAVE_SLOT_CATALOG_CACHE = payload
+    _write_json_atomic(SAVE_SLOT_CATALOG_PATH, payload)
+
+
+def _slot_list() -> list[dict[str, Any]]:
+    catalog = _load_slot_catalog()
+    return list(catalog.get("slots") or [])
+
+
+def _all_save_slot_ids() -> set[str]:
+    return {str(item.get("slot_id")) for item in _slot_list() if str(item.get("slot_id"))}
+
+
+def _find_slot_entry(slot_id: str | None) -> dict[str, Any] | None:
+    sid = _normalize_session_id(slot_id)
+    for item in _slot_list():
+        if item.get("slot_id") == sid:
+            return item
+    return None
+
+
+def _create_save_slot(name: str | None = None) -> dict[str, Any]:
+    catalog = _load_slot_catalog()
+    slots = list(catalog.get("slots") or [])
+    next_index = int(catalog.get("next_index") or 1)
+    sid = f"save_slot_{next_index}"
+    slot_name = str(name or "").strip() or f"Save Slot {next_index}"
+    entry = {"slot_id": sid, "name": slot_name[:64], "created_at": time.time()}
+    slots.append(entry)
+    catalog["slots"] = slots
+    catalog["next_index"] = next_index + 1
+    _save_slot_catalog(catalog)
+    return entry
+
+
+def _rename_save_slot(slot_id: str | None, name: str | None) -> dict[str, Any]:
+    sid = _normalize_session_id(slot_id)
+    next_name = str(name or "").strip()
+    if not next_name:
+        raise HTTPException(status_code=400, detail="Slot name is required.")
+    catalog = _load_slot_catalog()
+    slots = list(catalog.get("slots") or [])
+    for idx, item in enumerate(slots):
+        if item.get("slot_id") == sid:
+            updated = dict(item)
+            updated["name"] = next_name[:64]
+            slots[idx] = updated
+            catalog["slots"] = slots
+            _save_slot_catalog(catalog)
+            return updated
+    raise HTTPException(status_code=400, detail="Unknown save slot.")
+
+
+def _remove_slot_from_catalog(slot_id: str | None) -> None:
+    sid = _normalize_session_id(slot_id)
+    catalog = _load_slot_catalog()
+    slots = [item for item in list(catalog.get("slots") or []) if item.get("slot_id") != sid]
+    catalog["slots"] = slots
+    _save_slot_catalog(catalog)
+    SLOT_OBJECTS.pop(sid, None)
+
+
+def _get_slot(slot_id: str | None) -> _Slot:
+    sid = _normalize_session_id(slot_id)
+    if sid not in _all_save_slot_ids():
+        raise KeyError(f"Not a save slot id: {sid}")
+    slot = SLOT_OBJECTS.get(sid)
+    if slot is None:
+        slot = _Slot(slot_id=sid)
+        SLOT_OBJECTS[sid] = slot
+    return slot
 
 
 def _session_runtime_dir(session_id: str | None = None) -> Path:
@@ -177,34 +395,47 @@ def _session_runtime_meta_path(session_id: str | None = None) -> Path:
 
 def _runtime(session_id: str | None = None) -> _SessionRuntime:
     sid = _normalize_session_id(session_id or SESSION_ID_CTX.get())
-    runtime = SESSION_RUNTIMES.get(sid)
-    persisted_runtime = _load_persisted_runtime(sid)
-    if runtime is not None and persisted_runtime is not None:
-        persisted_ts = persisted_runtime.persisted_updated_at or 0.0
-        current_running = bool(runtime.step_status.get("running") or runtime.batch_status.get("running") or runtime.mega_batch_status.get("running"))
-        persisted_running = bool(
-            persisted_runtime.step_status.get("running")
-            or persisted_runtime.batch_status.get("running")
-            or persisted_runtime.mega_batch_status.get("running")
-        )
-        if (
-            (current_running or persisted_running)
-            and persisted_ts > (runtime.persisted_updated_at or 0.0)
-        ):
-            runtime = persisted_runtime
-            SESSION_RUNTIMES[sid] = runtime
-    if runtime is None:
-        runtime = persisted_runtime
+    if sid in _all_save_slot_ids():
+        slot_runtime = _get_slot(sid).get_runtime(create_if_missing=True)
+        runtime = slot_runtime or _SessionRuntime()
+    else:
+        runtime = SESSION_RUNTIMES.get(sid)
+        persisted_runtime = _load_persisted_runtime(sid)
+        if runtime is not None and persisted_runtime is not None:
+            persisted_ts = persisted_runtime.persisted_updated_at or 0.0
+            current_running = bool(runtime.step_status.get("running") or runtime.batch_status.get("running") or runtime.mega_batch_status.get("running"))
+            persisted_running = bool(
+                persisted_runtime.step_status.get("running")
+                or persisted_runtime.batch_status.get("running")
+                or persisted_runtime.mega_batch_status.get("running")
+            )
+            if (
+                (current_running or persisted_running)
+                and persisted_ts > (runtime.persisted_updated_at or 0.0)
+            ):
+                runtime = persisted_runtime
+                SESSION_RUNTIMES[sid] = runtime
         if runtime is None:
-            runtime = _SessionRuntime()
-        SESSION_RUNTIMES[sid] = runtime
+            runtime = persisted_runtime
+            if runtime is None:
+                runtime = _SessionRuntime()
+            SESSION_RUNTIMES[sid] = runtime
     cleaned = _conversation_without_system_messages(list(runtime.conversation_log))
     if cleaned != list(runtime.conversation_log):
         runtime.conversation_log = cleaned
     runtime.step_status["conversation"] = _conversation_without_system_messages(
         list(runtime.step_status.get("conversation") or runtime.conversation_log)
     )
+    if sid in _all_save_slot_ids():
+        _get_slot(sid).runtime = runtime
     return runtime
+
+
+def _runtime_for_session_or_none(session_id: str | None) -> _SessionRuntime | None:
+    sid = _normalize_session_id(session_id)
+    if sid in _all_save_slot_ids():
+        return _get_slot(sid).get_runtime(create_if_missing=False)
+    return SESSION_RUNTIMES.get(sid) or _load_persisted_runtime(sid)
 
 
 def _bind_session(session_id: str | None) -> Token[str]:
@@ -322,6 +553,9 @@ def _load_persisted_runtime(session_id: str) -> _SessionRuntime | None:
 
 def _persist_runtime(session_id: str | None = None) -> None:
     sid = _normalize_session_id(session_id or SESSION_ID_CTX.get())
+    if sid in _all_save_slot_ids():
+        _get_slot(sid).persist_runtime()
+        return
     runtime = SESSION_RUNTIMES.get(sid)
     if runtime is None:
         return
@@ -355,17 +589,12 @@ def _delete_save_slot(session_id: str | None) -> None:
     for key in list(SESSION_RUNTIMES.keys()):
         if key == sid or key.startswith(f"{sid}__"):
             SESSION_RUNTIMES.pop(key, None)
-    shutil.rmtree(_session_runtime_dir(sid), ignore_errors=True)
-    shutil.rmtree(_mega_batch_job_dir(sid), ignore_errors=True)
-    if SESSION_RUNTIME_DIR.exists():
-        for path in SESSION_RUNTIME_DIR.iterdir():
-            if path.is_dir() and path.name.startswith(f"{sid}__"):
-                shutil.rmtree(path, ignore_errors=True)
+    _get_slot(sid).clear()
 
 
-def _save_slot_info(session_id: str) -> dict[str, Any]:
+def _save_slot_info(session_id: str, slot_name: str | None = None) -> dict[str, Any]:
     sid = _normalize_session_id(session_id)
-    runtime = SESSION_RUNTIMES.get(sid) or _load_persisted_runtime(sid)
+    runtime = _get_slot(sid).get_runtime(create_if_missing=False)
     mega_status = _load_mega_batch_status_from_disk(sid)
     filled = runtime is not None and runtime.env is not None
     mode = None
@@ -388,6 +617,7 @@ def _save_slot_info(session_id: str) -> dict[str, Any]:
         step_running = False
     return {
         "slot_id": sid,
+        "name": slot_name or sid.replace("save_slot_", "Save Slot "),
         "filled": bool(filled or (mega_status and (mega_status.get("results") or mega_status.get("running")))),
         "mode": mode,
         "updated_at": updated_at,
@@ -474,6 +704,10 @@ def _mark_status_stopped(status: dict[str, Any], message: str) -> dict[str, Any]
         payload["running"] = False
         payload["done"] = True
         payload["error"] = payload.get("error") or message
+        payload["stop_reason"] = payload.get("stop_reason") or message
+        payload["stopped_at"] = payload.get("stopped_at") or time.time()
+        logger.warning("worker marked stopped pid=%s reason=%s", pid, message)
+        _terminal_trace(f"worker marked stopped pid={pid} reason={message}")
     return payload
 
 
@@ -481,30 +715,49 @@ def _step_payload_path(session_id: str | None = None) -> Path:
     return _session_runtime_dir(session_id) / "step_payload.json"
 
 
+def _step_worker_log_path(session_id: str | None = None) -> Path:
+    return _session_runtime_dir(session_id) / "step_worker.log"
+
+
 def _batch_payload_path(session_id: str | None = None) -> Path:
     return _session_runtime_dir(session_id) / "batch_payload.json"
 
 
 def _launch_session_worker(*, session_id: str, module_name: str, payload_path: Path) -> int:
+    sid = _normalize_session_id(session_id)
+    session_dir = _session_runtime_dir(sid)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    log_path = _step_worker_log_path(sid)
+    start_line = (
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] launching {module_name} "
+        f"session={sid} payload={payload_path}\n"
+    )
+    with log_path.open("a", encoding="utf-8") as pre_log:
+        pre_log.write(start_line)
+    logger.info("launching worker module=%s session=%s payload=%s", module_name, sid, payload_path)
+    _terminal_trace(f"launching worker module={module_name} session={sid} payload={payload_path}")
     command = [
         sys.executable,
         "-m",
         module_name,
         "--session-id",
-        _normalize_session_id(session_id),
+        sid,
         "--payload-path",
         str(payload_path),
     ]
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    proc = subprocess.Popen(
-        command,
-        cwd=str(APP_DIR.parents[0]),
-        creationflags=creationflags,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    with log_path.open("a", encoding="utf-8") as step_log:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(APP_DIR.parents[0]),
+            creationflags=creationflags,
+            stdout=step_log,
+            stderr=step_log,
+        )
+    logger.info("worker launched module=%s session=%s pid=%s", module_name, sid, proc.pid)
+    _terminal_trace(f"worker launched module={module_name} session={sid} pid={proc.pid}")
     return int(proc.pid)
 
 
@@ -588,8 +841,6 @@ def _launch_mega_batch_worker(session_id: str, payload: Dict[str, Any]) -> dict[
         "simulation.mega_batch_worker",
         "--session-id",
         sid,
-        "--job-dir",
-        str(job_dir),
         "--payload-path",
         str(_mega_batch_payload_path(sid)),
     ]
@@ -614,7 +865,7 @@ def _request_session_id(payload: Dict[str, Any] | None = None, session_id: str |
         return _normalize_session_id(session_id)
     if isinstance(payload, dict):
         save_slot = _normalize_session_id(payload.get("save_slot"))
-        if save_slot in SAVE_SLOT_IDS:
+        if save_slot in _all_save_slot_ids():
             return save_slot
         return _normalize_session_id(payload.get("session_id"))
     return "default"
@@ -639,10 +890,12 @@ DEFAULT_BATCH_SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 FIXED_MAX_ROUNDS = 20
 NEGOTIATION_DEAL_MESSAGE_LIMIT = 8
 FIVE_ATTR_MESSAGE_LIMIT = 10
-MEGA_BATCH_MODELS = ["5.4", "Sonnet", "Flash", "Llama", "Mathematical"]
+MEGA_BATCH_MODELS = ["GPT-5.4", "Sonnet", "Flash", "Llama", "Mathematical"]
 
 MODEL_ID_BY_ALIAS = {
+    "GPT-4o": "gpt-4o",
     "4o": "gpt-4o",
+    "GPT-5.4": "gpt-5.4",
     "5.4": "gpt-5.4",
     "Flash": "gemini-3-flash-preview",
     "Pro": "gemini-3.1-pro-preview",
@@ -657,7 +910,9 @@ MODEL_ID_BY_ALIAS = {
     "Truthful": "gpt-5.4",
 }
 OPENROUTER_MODEL_ID_BY_ALIAS = {
+    "GPT-4o": "openai/gpt-4o",
     "4o": "openai/gpt-4o",
+    "GPT-5.4": "openai/gpt-5.4",
     "5.4": "openai/gpt-5.4",
     "Flash": "google/gemini-3-flash-preview",
     "Pro": "google/gemini-3.1-pro-preview",
@@ -671,13 +926,23 @@ OPENROUTER_MODEL_ID_BY_ALIAS = {
     "GLM": "z-ai/glm-5",
     "Truthful": "openai/gpt-5.4",
 }
-OPENROUTER_ONLY_MODEL_ALIASES = {"Grok", "Kimi", "DeepSeek", "Llama", "GLM"}
+OPENROUTER_ONLY_MODEL_ALIASES = {"Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Pro"}
+
+
+def _normalize_model_alias_literal(alias: str) -> str:
+    text = str(alias or "").strip()
+    if text == "4o":
+        return "GPT-4o"
+    if text == "5.4":
+        return "GPT-5.4"
+    return text
 
 
 def _runtime_llm_alias(alias: str) -> str:
-    if alias in {"Truthful", "Dynamic"}:
-        return "5.4"
-    return alias
+    normalized = _normalize_model_alias_literal(alias)
+    if normalized in {"Truthful", "Dynamic"}:
+        return "GPT-5.4"
+    return normalized
 
 
 def _negotiation_message_cap(env: TravelGameEnv | None = None) -> int:
@@ -749,23 +1014,23 @@ def _five_attr_timer_instruction(*, max_messages: int, messages_used: int) -> st
 def _mega_batch_models(payload: Dict[str, Any], mode: str) -> list[str]:
     mode = _canonical_mode(mode)
     if mode == "five_attr":
-        selected = [str(item or "").strip() for item in (payload.get("selected_models") or []) if str(item or "").strip()]
+        selected = [_normalize_model_alias_literal(str(item or "").strip()) for item in (payload.get("selected_models") or []) if str(item or "").strip()]
         if len(selected) >= 5:
             return selected[:5]
-        return ["5.4", "Sonnet", "Flash", "Llama", "Truthful"]
+        return ["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"]
     return list(MEGA_BATCH_MODELS)
 
 
 def _normalized_selected_models_for_mode(mode: str, selected: list[str] | None) -> list[str]:
     mode = _canonical_mode(mode)
-    raw = [str(item or "").strip() for item in (selected or []) if str(item or "").strip()]
+    raw = [_normalize_model_alias_literal(str(item or "").strip()) for item in (selected or []) if str(item or "").strip()]
     if mode == "five_attr":
-        default = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"]
+        default = ["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"]
         if raw == ["Haiku", "Sonnet", "Pro"]:
             return list(default)
         if len(raw) >= 5 and (
-            raw[:5] == ["5.4", "Opus", "Pro", "Grok", "Mathematical"]
-            or raw[:5] == ["5.4", "Opus", "Pro", "Grok", "Llama"]
+            raw[:5] == ["GPT-5.4", "Opus", "Pro", "Grok", "Mathematical"]
+            or raw[:5] == ["GPT-5.4", "Opus", "Pro", "Grok", "Llama"]
         ):
             return list(default)
         if len(raw) in {2, 3, 4}:
@@ -777,10 +1042,20 @@ def _normalized_selected_models_for_mode(mode: str, selected: list[str] | None) 
             raw = raw[:5]
         return raw
     if mode == "buyer_seller_negotiation":
+        if len(raw) >= 5 and tuple(raw[:5]) in {
+            ("GPT-5.4", "Opus", "Flash", "DeepSeek", "Mathematical"),
+            ("GPT-5.4", "Sonnet", "Flash", "DeepSeek", "Mathematical"),
+        }:
+            raw[3] = "Llama"
         if len(raw) == 2:
             raw.append(raw[1])
         return raw[:5] if len(raw) >= 5 else raw
     if mode == "open_painting_auction":
+        if len(raw) >= 5 and tuple(raw[:5]) in {
+            ("GPT-5.4", "Opus", "Flash", "DeepSeek", "Mathematical"),
+            ("GPT-5.4", "Sonnet", "Flash", "DeepSeek", "Mathematical"),
+        }:
+            raw[3] = "Llama"
         return raw[:5] if len(raw) >= 5 else raw
     return raw
 
@@ -922,7 +1197,7 @@ def _format_llm_error_detail(
                 detail_parts.append(f"openrouter_file_size={file_path.stat().st_size}")
             except Exception:
                 pass
-    elif alias in {"4o", "5.4", "Truthful", "Dynamic"}:
+    elif alias in {"GPT-4o", "4o", "GPT-5.4", "5.4", "Truthful", "Dynamic"}:
         detail_parts.append(f"openai_env_key={_safe_key_fingerprint(os.environ.get('OPENAI_API_KEY', ''))}")
     elif alias in {"Haiku", "Sonnet", "Opus"}:
         detail_parts.append(f"anthropic_env_key={_safe_key_fingerprint(os.environ.get('ANTHROPIC_API_KEY', ''))}")
@@ -952,8 +1227,18 @@ def _extract_json_object(raw: str) -> dict:
     match = re.search(r"\{[\s\S]*\}", text)
     if not match:
         return {}
+    candidate = match.group(0)
     try:
-        obj = json.loads(match.group(0))
+        obj = json.loads(candidate)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    # Fix common malformed JSON from weaker models: trailing commas, single quotes
+    fixed = candidate
+    fixed = re.sub(r",\s*([}\]])", r"\1", fixed)  # trailing commas
+    fixed = fixed.replace("'", '"')  # single quotes -> double quotes
+    try:
+        obj = json.loads(fixed)
         return obj if isinstance(obj, dict) else {}
     except Exception:
         return {}
@@ -984,9 +1269,9 @@ def _gemini_generation_config(alias: str, temperature: float, max_tokens: int) -
 
 
 def _openrouter_reasoning_payload(alias: str) -> dict[str, Any] | None:
-    if alias == "5.4":
+    if alias in {"GPT-5.4", "5.4", "Grok"}:
         return {"effort": "high"}
-    if alias == "DeepSeek":
+    if alias in {"DeepSeek", "Pro"}:
         return {"enabled": True}
     return None
 
@@ -1020,12 +1305,16 @@ def _append_llm_trace(*, alias: str, provider: str, model: str, call_type: str) 
     print(f"[simulation] {text}", flush=True)
 
 
-def _gemini_post_json(api_key: str, model: str, body: dict, timeout_s: float = 45.0) -> dict:
+def _gemini_post_json(api_key: str, model: str, body: dict, timeout_s: float | None = None) -> dict:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='')}:generateContent?key={urllib.parse.quote(api_key, safe='')}"
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url=url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=max(10.0, timeout_s)) as resp_obj:
+        if timeout_s is None:
+            resp_ctx = urllib.request.urlopen(req)
+        else:
+            resp_ctx = urllib.request.urlopen(req, timeout=max(10.0, float(timeout_s)))
+        with resp_ctx as resp_obj:
             return json.loads(resp_obj.read().decode("utf-8", errors="ignore"))
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Gemini API HTTP {exc.code}: {exc.read().decode('utf-8', errors='ignore')}") from exc
@@ -1055,6 +1344,7 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                "response_format": {"type": "json_object"},
             }
             reasoning = _openrouter_reasoning_payload(alias)
             if reasoning is not None:
@@ -1063,6 +1353,7 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
                 resp = await client.chat.completions.create(**request_kwargs)
             except TypeError:
                 request_kwargs.pop("reasoning", None)
+                request_kwargs.pop("response_format", None)
                 resp = await client.chat.completions.create(**request_kwargs)
             text = _normalize_message_content(resp.choices[0].message.content)
             parsed = _extract_json_object(text)
@@ -1070,7 +1361,7 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
             if not parsed:
                 logger.warning("simulation OpenRouter JSON parse produced empty object alias=%s model=%s raw=%r", alias, model, text[:500])
             return parsed
-        if alias in {"4o", "5.4"}:
+        if alias in {"GPT-4o", "4o", "GPT-5.4", "5.4"}:
             key = _get_openai_key()
             if not key:
                 raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; OpenAI direct keys still work as fallback.")
@@ -1080,13 +1371,15 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
                 "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
                 "temperature": temperature,
                 "max_completion_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
             }
-            if alias == "5.4":
+            if alias in {"GPT-5.4", "5.4"}:
                 request_kwargs["reasoning_effort"] = "high"
             try:
                 resp = await client.chat.completions.create(**request_kwargs)
             except TypeError:
                 request_kwargs.pop("reasoning_effort", None)
+                request_kwargs.pop("response_format", None)
                 resp = await client.chat.completions.create(**request_kwargs)
             text = _normalize_message_content(resp.choices[0].message.content)
             parsed = _extract_json_object(text)
@@ -1100,7 +1393,7 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
                 raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Anthropic direct keys still work as fallback.")
             if AsyncAnthropic is None:
                 raise RuntimeError("anthropic package unavailable.")
-            client = AsyncAnthropic(api_key=key, timeout=30.0)
+            client = AsyncAnthropic(api_key=key)
             request_kwargs: dict[str, Any] = {
                 "model": model,
                 "max_tokens": max_tokens,
@@ -1130,7 +1423,7 @@ async def _call_llm_json(alias: str, system_prompt: str, user_prompt: str, tempe
                 "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
                 "generationConfig": _gemini_generation_config(alias, temperature, max_tokens),
             }
-            obj = await asyncio.to_thread(_gemini_post_json, key, model, body, 45.0)
+            obj = await asyncio.to_thread(_gemini_post_json, key, model, body, None)
             cands = obj.get("candidates") or []
             parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
             text = "".join((p.get("text") or "") for p in parts)
@@ -1180,7 +1473,7 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
                 request_kwargs.pop("reasoning", None)
                 resp = await client.chat.completions.create(**request_kwargs)
             return _normalize_message_content(resp.choices[0].message.content).strip()
-        if alias in {"4o", "5.4"}:
+        if alias in {"GPT-4o", "4o", "GPT-5.4", "5.4"}:
             key = _get_openai_key()
             if not key:
                 raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; OpenAI direct keys still work as fallback.")
@@ -1191,7 +1484,7 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
                 "temperature": temperature,
                 "max_completion_tokens": max_tokens,
             }
-            if alias == "5.4":
+            if alias in {"GPT-5.4", "5.4"}:
                 request_kwargs["reasoning_effort"] = "high"
             try:
                 resp = await client.chat.completions.create(**request_kwargs)
@@ -1205,7 +1498,7 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
                 raise RuntimeError("No LLM key found. Prefer OPENROUTER_API_KEY or keys/openkey.txt; Anthropic direct keys still work as fallback.")
             if AsyncAnthropic is None:
                 raise RuntimeError("anthropic package unavailable.")
-            client = AsyncAnthropic(api_key=key, timeout=30.0)
+            client = AsyncAnthropic(api_key=key)
             request_kwargs: dict[str, Any] = {
                 "model": model,
                 "max_tokens": max_tokens,
@@ -1230,7 +1523,7 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
                 "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
                 "generationConfig": _gemini_generation_config(alias, temperature, max_tokens),
             }
-            obj = await asyncio.to_thread(_gemini_post_json, key, model, body, 45.0)
+            obj = await asyncio.to_thread(_gemini_post_json, key, model, body, None)
             cands = obj.get("candidates") or []
             parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
             return "".join((p.get("text") or "") for p in parts).strip()
@@ -1242,11 +1535,13 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
 
 
 async def _call_llm_json_with_timeout(alias: str, system_prompt: str, user_prompt: str, *, temperature: float = 0.2, max_tokens: int = 700, timeout_s: float = 45.0) -> dict:
-    return await asyncio.wait_for(_call_llm_json(alias, system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens), timeout=timeout_s)
+    del timeout_s
+    return await _call_llm_json(alias, system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens)
 
 
 async def _call_llm_text_with_timeout(alias: str, system_prompt: str, user_prompt: str, *, temperature: float = 0.0, max_tokens: int = 120, timeout_s: float = 45.0) -> str:
-    return await asyncio.wait_for(_call_llm_text(alias, system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens), timeout=timeout_s)
+    del timeout_s
+    return await _call_llm_text(alias, system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens)
 
 
 def _display_aliases(selected: list[str], mode: str) -> tuple[str, str, str]:
@@ -1770,7 +2065,7 @@ async def _compose_mathematical_negotiation_message(
         "Write only the line the negotiator should say."
     )
     try:
-        text = await _call_llm_text_with_timeout("5.4", system_prompt, user_prompt, max_tokens=60, timeout_s=20.0)
+        text = await _call_llm_text_with_timeout("GPT-5.4", system_prompt, user_prompt, max_tokens=60, timeout_s=20.0)
         text = str(text or "").strip()
         if text:
             return text
@@ -1794,7 +2089,7 @@ async def _repair_grok_negotiation_reply(
         return {}
     try:
         repaired = await _call_llm_text_with_timeout(
-            "5.4",
+            "GPT-5.4",
             (
                 "Convert the malformed negotiation reply into strict JSON only. "
                 "Return exactly one JSON object with keys accept_current_offer, proposed_price, message_text. "
@@ -1822,7 +2117,7 @@ async def _repair_grok_auction_reply(raw_text: str, *, min_next_bid: int, remain
         return cleaned
     try:
         repaired = await _call_llm_text_with_timeout(
-            "5.4",
+            "GPT-5.4",
             (
                 "Convert the malformed auction reply into exactly one token of output. "
                 "Return only PASS or one integer bid amount. No punctuation, no explanation."
@@ -1856,7 +2151,7 @@ async def _coerce_negotiation_reply(
     proposed = reply.get("proposed_price")
     message_text = _clean_response_text(reply.get("message_text") or "")
 
-    if alias == "Grok" and not isinstance(accept, bool) and proposed in {None, ""}:
+    if alias in {"Grok", "Kimi", "GLM"} and not isinstance(accept, bool) and proposed in {None, ""}:
         repaired = await _repair_grok_negotiation_reply(
             raw_text=raw_text,
             role=role,
@@ -2000,7 +2295,7 @@ def _init_default_env() -> None:
         return
     if _is_save_slot_session(SESSION_ID_CTX.get()):
         return
-    runtime.env = TravelGameEnv(config={"selected_models": ["5.4", "5.4", "5.4"], "mode": "buyer_seller_negotiation"})
+    runtime.env = TravelGameEnv(config={"selected_models": ["GPT-5.4", "GPT-5.4", "GPT-5.4"], "mode": "buyer_seller_negotiation"})
     runtime.last_reset = runtime.env.reset(seed=7, scenario="mid_market_guitar")
     runtime.last_result = None
     runtime.conversation_log = []
@@ -2063,7 +2358,7 @@ def _build_actions_open_auction(env: TravelGameEnv, payload: Dict[str, Any]) -> 
         raise RuntimeError("No active auction round.")
     bidder_id = round_state.turn_order[round_state.turn_index]
     bidder = env.world["auction_bidders"][bidder_id]
-    bidder_alias = env.world.get("auction_bidder_model_by_id", {}).get(bidder_id, "5.4")
+    bidder_alias = env.world.get("auction_bidder_model_by_id", {}).get(bidder_id, "GPT-5.4")
     paintings_remaining = max(1, int(env.config.get("num_paintings") or 12) - len(env.world.get("auction_results") or []))
     total_paintings = int(env.config.get("num_paintings") or 12)
     painting_number = int(env.world.get("auction_painting_index") or 0) + 1
@@ -2296,7 +2591,7 @@ def _build_actions_five_attr(env: TravelGameEnv, payload: Dict[str, Any]) -> Dic
         agent_state.selected_models = list(selected)
         env.world["selected_models"] = list(selected)
         env.config["selected_models"] = list(selected)
-    customer_alias = selected[0] if len(selected) > 0 else "5.4"
+    customer_alias = selected[0] if len(selected) > 0 else "GPT-5.4"
     agent_alias = selected[1] if len(selected) > 1 else customer_alias
 
     # Two-player mode: the agent directly emits the claim vector.
@@ -2342,20 +2637,6 @@ def _build_actions_five_attr(env: TravelGameEnv, payload: Dict[str, Any]) -> Dic
         "agent_report": agent_report,
         "customer_decision": customer_decision,
     }
-
-
-def _five_attr_customer_followup_text(customer, agent_report: FiveAttrAgentReport) -> str:
-    known_attr = ATTR_NAMES[customer.known_index]
-    known_matches = agent_report.reported_attrs[customer.known_index] == customer.known_value
-    if not known_matches:
-        return (
-            f"You just said {known_attr} is {agent_report.reported_attrs[customer.known_index]}, but I know that is wrong.\n"
-            "Are you sure this is your own confirmed information, or is that just what the resort told you?"
-        )
-    return (
-        "Which of these claims can you actually confirm yourself?\n"
-        "I want you to separate what you know from what the resort is merely claiming."
-    )
 
 
 def _five_attr_agent_clarification_text(agent_state, agent_report: FiveAttrAgentReport) -> str:
@@ -2539,7 +2820,7 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
         return actions
     bidder_id = round_state.turn_order[round_state.turn_index]
     bidder = env.world["auction_bidders"][bidder_id]
-    bidder_alias = env.world.get("auction_bidder_model_by_id", {}).get(bidder_id, "5.4")
+    bidder_alias = env.world.get("auction_bidder_model_by_id", {}).get(bidder_id, "GPT-5.4")
     paintings_remaining = max(1, int(env.config.get("num_paintings") or 12) - len(env.world.get("auction_results") or []))
     min_next_bid = env._get_min_opening_bid() if round_state.current_leader is None else int(round_state.current_bid) + int(env._get_min_raise(round_state.current_bid))
     scoreboard = {
@@ -2625,12 +2906,19 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
             bidder_alias,
             "You are one bidder among five in a sequential open ascending painting auction. "
             "Your only objective is to maximize the number of paintings you win. "
-            "You can see the full public scoreboard: everyone's current bids for this painting, remaining budgets, budget history across prior paintings, and paintings won. "
-            "Pay especially close attention to YOUR OWN remaining budget, because you can never bid above it and it determines what you can still win later. "
-            "Do not mechanically min-raise by default; choose PASS or a bid amount strategically based on the full state. "
+            "Rules: bidders take turns in turn order. On your turn you either raise the current bid "
+            "(must be an integer >= minimum_legal_bid and <= your_remaining_budget) or pass. "
+            "Passing is permanent for this painting — you cannot re-enter once you pass. "
+            "The last bidder who has not passed wins the painting. "
+            "If you are already the current_leader, passing locks in your win unless someone outbids you later — "
+            "prefer PASS unless you have a specific reason to deter remaining active bidders. "
+            "You can see the full public scoreboard: everyone's bids this painting, remaining budgets, "
+            "budget history across prior paintings, and paintings won. "
+            "Pay especially close attention to YOUR OWN remaining budget — you can never bid above it "
+            "and it determines what you can still win later. "
+            "Do not mechanically min-raise by default; choose PASS or a bid amount strategically. "
             "Reply with exactly one thing and nothing else: either PASS or a single integer bid amount. "
             "No JSON. No explanation. No punctuation. No extra words. "
-            "If you bid, it must be legal and within budget. "
             + ("This is the LAST painting, so there is no future budget value after this round. " if is_last_painting else ""),
             "\n".join(
                 [
@@ -2638,7 +2926,7 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
                     f"total_paintings={total_paintings}",
                     f"is_last_painting={str(is_last_painting).lower()}",
                     f"painting_id={round_state.painting_id}",
-                    f"current_bid={round_state.current_bid}",
+                    f"current_bid={'none_yet' if round_state.current_leader is None else round_state.current_bid}",
                     f"current_leader={round_state.current_leader}",
                     f"your_bidder_id={bidder_id}",
                     f"your_remaining_budget={bidder.remaining_budget}",
@@ -2647,7 +2935,6 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
                     f"passed_bidders={','.join(round_state.passed_bidders or [])}",
                     f"paintings_remaining={paintings_remaining}",
                     f"public_bid_table={json.dumps(public_bid_table)}",
-                    f"all_budgets={json.dumps({k: v['remaining_budget'] for k, v in scoreboard.items()})}",
                     f"budget_log_by_bidder={json.dumps(budget_log)}",
                     f"all_painting_counts={json.dumps({k: v['paintings_won'] for k, v in scoreboard.items()})}",
                     f"bid_history={json.dumps(history)}",
@@ -2680,8 +2967,8 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
 
 async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str, Any]) -> Dict[str, Any]:
     selected = list(env.world.get("selected_models") or [])
-    buyer_model = selected[0] if selected else "5.4"
-    seller_model = selected[1] if len(selected) > 1 else "5.4"
+    buyer_model = selected[0] if selected else "GPT-5.4"
+    seller_model = selected[1] if len(selected) > 1 else "GPT-5.4"
     buyer_alias, seller_alias, _ = _display_aliases(selected, "buyer_seller_negotiation")
     buyer = env.world["buyer_true"]
     seller = env.world["seller_true"]
@@ -3252,7 +3539,7 @@ async def _build_actions_live_five_attr(env: TravelGameEnv, payload: Dict[str, A
         agent_state.selected_models = list(selected)
         env.world["selected_models"] = list(selected)
         env.config["selected_models"] = list(selected)
-    customer_alias = selected[0] if len(selected) > 0 else "5.4"
+    customer_alias = selected[0] if len(selected) > 0 else "GPT-5.4"
     agent_alias = selected[1] if len(selected) > 1 else customer_alias
     customer_runtime_alias = _runtime_llm_alias(customer_alias)
     agent_runtime_alias = _runtime_llm_alias(agent_alias)
@@ -3465,16 +3752,35 @@ async def _run_step_job(payload: Dict[str, Any]) -> None:
     runtime = _runtime()
     env = _require_env()
     worker_pid = runtime.step_status.get("pid")
+    mode = str(env.config.get("mode") or "mediation")
+    logger.info("step job start session=%s pid=%s mode=%s", SESSION_ID_CTX.get(), worker_pid or os.getpid(), mode)
+    _terminal_trace(f"step job start session={SESSION_ID_CTX.get()} pid={worker_pid or os.getpid()} mode={mode}")
     _reset_step_status(runtime)
     runtime.step_status["pid"] = worker_pid or os.getpid()
     runtime.step_status["running"] = True
     try:
-        if str(env.config.get("mode") or "mediation") == "open_painting_auction":
+        if mode == "open_painting_auction":
             any_fallback = False
             last_llm_error = None
             while not env.done:
                 actions = await _build_actions_live(env, payload)
                 result = env.step(actions)
+                round_state = env.world.get("auction_current_round")
+                painting_idx = int(env.world.get("auction_painting_index") or 0) + 1
+                leader = getattr(round_state, "current_leader", None) if round_state else None
+                bid = getattr(round_state, "current_bid", None) if round_state else None
+                logger.info(
+                    "auction step tick session=%s painting=%s leader=%s bid=%s done=%s",
+                    SESSION_ID_CTX.get(),
+                    painting_idx,
+                    leader,
+                    bid,
+                    bool(env.done),
+                )
+                _terminal_trace(
+                    f"auction tick session={SESSION_ID_CTX.get()} painting={painting_idx} "
+                    f"leader={leader} bid={bid} done={bool(env.done)}"
+                )
                 _refresh_auction_turns(runtime)
                 _refresh_auction_status(env, runtime)
                 runtime.last_result = _to_dict(result)
@@ -3489,19 +3795,52 @@ async def _run_step_job(payload: Dict[str, Any]) -> None:
                 await asyncio.sleep(0)
             runtime.step_status["used_models"] = not any_fallback
             runtime.step_status["llm_error"] = last_llm_error
+            try:
+                export_dir = _persist_completed_auction_exports(env, session_id=SESSION_ID_CTX.get())
+                if export_dir is not None:
+                    runtime.step_status["auction_export_dir"] = str(export_dir)
+            except Exception as export_exc:
+                runtime.step_status["auction_export_error"] = str(export_exc)
+                logger.exception("automatic auction export failed: %s", export_exc)
         else:
             actions = await _build_actions_live(env, payload)
             result = env.step(actions)
             runtime.last_result = _to_dict(result)
             runtime.step_status["used_models"] = bool(actions.get("used_models"))
             runtime.step_status["llm_error"] = actions.get("llm_error")
+            logger.info(
+                "step tick session=%s mode=%s used_models=%s llm_error=%s done=%s",
+                SESSION_ID_CTX.get(),
+                mode,
+                runtime.step_status["used_models"],
+                runtime.step_status["llm_error"],
+                bool(env.done),
+            )
+            _terminal_trace(
+                f"step tick session={SESSION_ID_CTX.get()} mode={mode} "
+                f"used_models={runtime.step_status['used_models']} done={bool(env.done)} "
+                f"llm_error={runtime.step_status['llm_error']}"
+            )
     except Exception as exc:
         runtime.step_status["error"] = str(exc)
+        logger.exception("step job crashed session=%s mode=%s: %s", SESSION_ID_CTX.get(), mode, exc)
+        _terminal_trace(f"step job crashed session={SESSION_ID_CTX.get()} mode={mode} error={exc}")
     finally:
         runtime.step_status["done"] = True
         runtime.step_status["running"] = False
         runtime.step_task = None
         _persist_runtime()
+        logger.info(
+            "step job end session=%s mode=%s done=%s error=%s",
+            SESSION_ID_CTX.get(),
+            mode,
+            runtime.step_status.get("done"),
+            runtime.step_status.get("error"),
+        )
+        _terminal_trace(
+            f"step job end session={SESSION_ID_CTX.get()} mode={mode} "
+            f"done={runtime.step_status.get('done')} error={runtime.step_status.get('error')}"
+        )
 
 
 @app.get("/")
@@ -3589,7 +3928,7 @@ async def _execute_batch(payload: Dict[str, Any], *, progress_cb=None, episode_s
     mode = _canonical_mode(payload.get("mode") or "buyer_seller_negotiation")
     scenario = payload.get("scenario") or None
     default_models = (
-        (["5.4", "Sonnet", "Flash", "Llama", "Truthful"] if mode == "five_attr" else ["5.4", "Sonnet", "Flash", "Llama", "Mathematical"])
+        (["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"] if mode == "five_attr" else ["GPT-5.4", "Sonnet", "Flash", "Llama", "Mathematical"])
         if mode in {"open_painting_auction", "five_attr", "buyer_seller_negotiation"}
         else ["Haiku", "Sonnet", "Pro"]
     )
@@ -3599,12 +3938,12 @@ async def _execute_batch(payload: Dict[str, Any], *, progress_cb=None, episode_s
         if len(selected_models) == 2:
             selected_models = [selected_models[0], selected_models[1], selected_models[1]]
         elif len(selected_models) not in {3, 5}:
-            selected_models = ["5.4", "Sonnet", "Flash", "Llama", "Mathematical"]
+            selected_models = ["GPT-5.4", "Sonnet", "Flash", "Llama", "Mathematical"]
     elif mode == "five_attr" and len(selected_models) in {2, 3, 4}:
         while len(selected_models) < 5:
-            selected_models.append(selected_models[-1] if selected_models else "5.4")
+            selected_models.append(selected_models[-1] if selected_models else "GPT-5.4")
     elif mode == "five_attr" and len(selected_models) != 5:
-        selected_models = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"]
+        selected_models = ["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"]
     elif mode not in {"open_painting_auction", "buyer_seller_negotiation", "five_attr"} and len(selected_models) != 3:
         selected_models = ["Haiku", "Sonnet", "Pro"]
     base_seed = int(payload.get("base_seed") or 0)
@@ -4264,6 +4603,49 @@ def _auction_export_data(env: TravelGameEnv) -> tuple[list[str], list[list[Any]]
     return result_headers, result_rows, summary_headers, summary_rows, log_text
 
 
+def _auction_export_dir(session_id: str | None = None) -> Path:
+    sid = _normalize_session_id(session_id or SESSION_ID_CTX.get())
+    root = _session_runtime_dir(sid) / "auction_exports"
+    return root
+
+
+def _persist_completed_auction_exports(env: TravelGameEnv, *, session_id: str | None = None) -> Path | None:
+    if str(env.config.get("mode") or "") != "open_painting_auction":
+        return None
+    result_headers, result_rows, summary_headers, summary_rows, log_text = _auction_export_data(env)
+    sid = _normalize_session_id(session_id or SESSION_ID_CTX.get())
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    folder = _auction_export_dir(sid) / f"auction_{timestamp}"
+    folder.mkdir(parents=True, exist_ok=True)
+    csv_text = "\n\n".join(
+        [
+            _csv_section_text("Auction Max Bid Per Painting", result_headers, result_rows),
+            _csv_section_text("Auction Summary", summary_headers, summary_rows),
+        ]
+    )
+    xlsx_payload = _build_xlsx_bytes(
+        [
+            ("MaxBidByPainting", [result_headers, *result_rows]),
+            ("Summary", [summary_headers, *summary_rows]),
+        ]
+    )
+    _write_text_atomic(folder / "auction_bid_log.txt", log_text)
+    _write_text_atomic(folder / "auction_tables.csv", csv_text)
+    (folder / "auction_tables.xlsx").write_bytes(xlsx_payload)
+    _write_json_atomic(
+        folder / "metadata.json",
+        {
+            "session_id": sid,
+            "created_at": time.time(),
+            "mode": "open_painting_auction",
+            "num_paintings": int(env.config.get("num_paintings") or 12),
+            "completed_paintings": len(env.world.get("auction_results") or []),
+            "files": ["auction_bid_log.txt", "auction_tables.csv", "auction_tables.xlsx"],
+        },
+    )
+    return folder
+
+
 def _mega_batch_table_data(status: Dict[str, Any]) -> tuple[list[str], list[list[Any]], list[str], list[list[Any]], list[str], list[list[Any]]]:
     results = list(status.get("results") or [])
     summary = status.get("summary") or {}
@@ -4305,170 +4687,6 @@ def _mega_batch_table_data(status: Dict[str, Any]) -> tuple[list[str], list[list
         for row in (summary.get("agent_rankings") or summary.get("seller_rankings") or [])
     ]
     return matchup_headers, matchup_rows, ranking_headers, buyer_rows, ranking_headers, seller_rows
-
-
-async def _run_mega_batch_job(payload: Dict[str, Any]) -> None:
-    runtime = _runtime()
-    scenario = payload.get("scenario") or None
-    seed_list = payload.get("seed_list") or list(DEFAULT_BATCH_SEEDS)
-    max_rounds = FIXED_MAX_ROUNDS
-    use_models = bool(payload.get("use_models", True))
-    total_matchups = len(MEGA_BATCH_MODELS) * len(MEGA_BATCH_MODELS)
-    runtime.mega_batch_status = {
-        "running": True,
-        "done": False,
-        "error": None,
-        "results": [],
-        "summary": {},
-        "completed_matchups": 0,
-        "total_matchups": total_matchups,
-        "mode": "buyer_seller_negotiation",
-        "current_matchup": 0,
-        "current_episode": 0,
-        "current_seed": None,
-        "current_models": [],
-        "current_buyer_model": None,
-        "current_seller_model": None,
-        "current_buyer_budget": None,
-        "current_seller_floor": None,
-        "current_seller_ask": None,
-        "current_used_models": None,
-        "current_llm_error": None,
-        "current_conversation": [],
-        "current_turns": [],
-    }
-    export_sections: list[str] = []
-
-    try:
-        matchup_rows: list[Dict[str, Any]] = []
-        matchup_index = 0
-        for buyer_model in MEGA_BATCH_MODELS:
-            for seller_model in MEGA_BATCH_MODELS:
-                matchup_index += 1
-                batch_payload = {
-                    "num_episodes": len(seed_list),
-                    "mode": "buyer_seller_negotiation",
-                    "scenario": scenario,
-                    "selected_models": [buyer_model, seller_model, seller_model],
-                    "seed_list": list(seed_list),
-                    "max_rounds": max_rounds,
-                    "use_models": use_models,
-                }
-                try:
-                    runtime.mega_batch_status["current_matchup"] = matchup_index
-                    runtime.mega_batch_status["current_episode"] = 0
-                    runtime.mega_batch_status["current_seed"] = None
-                    runtime.mega_batch_status["current_models"] = [buyer_model, seller_model, seller_model]
-                    runtime.mega_batch_status["current_buyer_model"] = buyer_model
-                    runtime.mega_batch_status["current_seller_model"] = seller_model
-                    runtime.mega_batch_status["current_used_models"] = None
-                    runtime.mega_batch_status["current_llm_error"] = None
-                    runtime.mega_batch_status["current_conversation"] = []
-                    runtime.mega_batch_status["current_turns"] = []
-                    def on_episode_start(episode_num: int, seed: int, selected_models: list[str], current_mode: str, env: TravelGameEnv | None = None) -> None:
-                        runtime.mega_batch_status["current_episode"] = episode_num
-                        runtime.mega_batch_status["current_seed"] = seed
-                        runtime.mega_batch_status["current_models"] = list(selected_models)
-                        runtime.mega_batch_status["mode"] = current_mode
-                        buyer = env.world.get("buyer_true") if env else None
-                        seller = env.world.get("seller_true") if env else None
-                        runtime.mega_batch_status["current_buyer_budget"] = getattr(buyer, "budget", None)
-                        runtime.mega_batch_status["current_seller_floor"] = getattr(seller, "baseline_value", None)
-                        runtime.mega_batch_status["current_seller_ask"] = getattr(seller, "asking_price", None)
-                        runtime.mega_batch_status["current_used_models"] = None
-                        runtime.mega_batch_status["current_llm_error"] = None
-                        runtime.mega_batch_status["current_conversation"] = []
-                        runtime.mega_batch_status["current_turns"] = []
-
-                    def on_progress(completed: int, results: list[Dict[str, Any]]) -> None:
-                        if results:
-                            latest = results[-1]
-                            runtime.mega_batch_status["current_used_models"] = latest.get("used_models")
-                            runtime.mega_batch_status["current_llm_error"] = latest.get("llm_error")
-                            runtime.mega_batch_status["current_conversation"] = list(latest.get("conversation") or [])
-                            worker_runtime = _runtime(_worker_session_id("batch"))
-                            runtime.mega_batch_status["current_turns"] = list(worker_runtime.step_status.get("turns", [])) if isinstance(worker_runtime.step_status, dict) else []
-                            if runtime.mega_batch_status["current_used_models"] is False and runtime.mega_batch_status["current_llm_error"] and not runtime.mega_batch_status["current_conversation"]:
-                                runtime.mega_batch_status["current_conversation"] = [
-                                    {
-                                        "speaker": "System",
-                                        "recipient": "",
-                                        "channel": "negotiation",
-                                        "text": f"LLM fallback triggered: {runtime.mega_batch_status['current_llm_error']}",
-                                    }
-                                ]
-
-                    results, summary, export_text = await _execute_batch(batch_payload, progress_cb=on_progress, episode_start_cb=on_episode_start, store_export=False)
-                    if results:
-                        latest = results[-1]
-                        runtime.mega_batch_status["current_used_models"] = latest.get("used_models")
-                        runtime.mega_batch_status["current_llm_error"] = latest.get("llm_error")
-                        runtime.mega_batch_status["current_conversation"] = list(latest.get("conversation") or runtime.mega_batch_status.get("current_conversation") or [])
-                        worker_runtime = _runtime(_worker_session_id("batch"))
-                        runtime.mega_batch_status["current_turns"] = list(worker_runtime.step_status.get("turns", [])) if isinstance(worker_runtime.step_status, dict) else list(runtime.mega_batch_status.get("current_turns") or [])
-                        if runtime.mega_batch_status["current_used_models"] is False and runtime.mega_batch_status["current_llm_error"] and not runtime.mega_batch_status["current_conversation"]:
-                            runtime.mega_batch_status["current_conversation"] = [
-                                {
-                                    "speaker": "System",
-                                    "recipient": "",
-                                    "channel": "negotiation",
-                                    "text": f"LLM fallback triggered: {runtime.mega_batch_status['current_llm_error']}",
-                                }
-                            ]
-                    matchup_rows.append(
-                        {
-                            "matchup_index": matchup_index,
-                            "buyer_model": buyer_model,
-                            "seller_model": seller_model,
-                            "summary": summary,
-                            "results": results,
-                        }
-                    )
-                    if export_text:
-                        export_sections.append(
-                            "\n".join(
-                                [
-                                    f"Matchup {matchup_index}: Buyer={buyer_model} | Seller={seller_model}",
-                                    export_text.lstrip(),
-                                ]
-                            )
-                        )
-                except Exception as exc:
-                    matchup_rows.append(
-                        {
-                            "matchup_index": matchup_index,
-                            "buyer_model": buyer_model,
-                            "seller_model": seller_model,
-                            "summary": {},
-                            "results": [],
-                            "error": str(exc),
-                        }
-                    )
-                runtime.mega_batch_status["results"] = list(matchup_rows)
-                runtime.mega_batch_status["completed_matchups"] = matchup_index
-                runtime.mega_batch_status["summary"] = _summarize_mega_batch(matchup_rows)
-        if export_sections:
-            seed_text = ", ".join(str(seed) for seed in seed_list)
-            runtime.last_mega_batch_export_text = (
-                "\n".join(
-                    [
-                        "Mega-Batch Negotiation Export",
-                        f"Models: {', '.join(MEGA_BATCH_MODELS)}",
-                        f"Seeds: [{seed_text}]",
-                        f"Matchups completed: {len(matchup_rows)}/{total_matchups}",
-                    ]
-                )
-                + "\n\n"
-                + ("\n\n" + ("=" * 72) + "\n\n").join(export_sections)
-            )
-        else:
-            runtime.last_mega_batch_export_text = None
-    except Exception as exc:
-        runtime.mega_batch_status["error"] = str(exc)
-    finally:
-        runtime.mega_batch_status["running"] = False
-        runtime.mega_batch_status["done"] = True
-        runtime.mega_batch_task = None
 
 
 @app.post("/api/run_batch")
@@ -4769,10 +4987,19 @@ async def api_export_auction_log(session_id: str | None = Query(default=None)) -
         if str(env.config.get("mode") or "") != "open_painting_auction":
             raise HTTPException(status_code=400, detail="Auction export is only available in open_painting_auction mode.")
         _, _, _, _, log_text = _auction_export_data(env)
+        sid = _normalize_session_id(session_id or SESSION_ID_CTX.get())
+        slot_entry = _find_slot_entry(sid)
+        if slot_entry:
+            slot_slug = _filename_slug(slot_entry.get("name"), fallback=sid)
+            filename = f"auction_bid_log_{slot_slug}.txt"
+        elif sid and sid != "default":
+            filename = f"auction_bid_log_{_filename_slug(sid, fallback='session')}.txt"
+        else:
+            filename = "auction_bid_log_transient.txt"
         return Response(
             content=log_text,
             media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="auction_bid_log.txt"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     finally:
         SESSION_ID_CTX.reset(token)
@@ -4780,12 +5007,27 @@ async def api_export_auction_log(session_id: str | None = Query(default=None)) -
 
 @app.get("/api/save_slots")
 async def api_save_slots() -> JSONResponse:
+    slots = _slot_list()
     return JSONResponse(
         {
             "ok": True,
-            "slots": [_save_slot_info(slot_id) for slot_id in SAVE_SLOT_IDS],
+            "slots": [_save_slot_info(item["slot_id"], item.get("name")) for item in slots],
         }
     )
+
+
+@app.post("/api/save_slot_create")
+async def api_save_slot_create(payload: Dict[str, Any] | None = None) -> JSONResponse:
+    body = payload or {}
+    entry = _create_save_slot(body.get("name"))
+    return JSONResponse({"ok": True, "slot": entry})
+
+
+@app.post("/api/save_slot_rename")
+async def api_save_slot_rename(payload: Dict[str, Any]) -> JSONResponse:
+    slot_id = _normalize_session_id(payload.get("slot_id"))
+    updated = _rename_save_slot(slot_id, payload.get("name"))
+    return JSONResponse({"ok": True, "slot": updated})
 
 
 @app.post("/api/stop_all_step_workers")
@@ -4794,7 +5036,7 @@ async def api_stop_all_step_workers() -> JSONResponse:
     checked_sessions: set[str] = set()
     for sid in _all_persisted_session_ids():
         checked_sessions.add(sid)
-        runtime = SESSION_RUNTIMES.get(sid) or _load_persisted_runtime(sid)
+        runtime = _runtime_for_session_or_none(sid)
         if runtime is None:
             continue
         step_status = dict(runtime.step_status or {})
@@ -4807,7 +5049,10 @@ async def api_stop_all_step_workers() -> JSONResponse:
         if _stop_pid_and_wait(pid, timeout_s=1.5):
             terminated.append({"session_id": sid, "pid": pid})
         runtime.step_status = _mark_status_stopped(runtime.step_status, "Step worker stopped by global stop-all request.")
-        SESSION_RUNTIMES[sid] = runtime
+        if sid in _all_save_slot_ids():
+            _get_slot(sid).runtime = runtime
+        else:
+            SESSION_RUNTIMES[sid] = runtime
         _persist_runtime(sid)
     return JSONResponse(
         {
@@ -4822,7 +5067,7 @@ async def api_stop_all_step_workers() -> JSONResponse:
 @app.post("/api/save_slot_delete")
 async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
     slot_id = _normalize_session_id(payload.get("slot_id"))
-    if slot_id not in SAVE_SLOT_IDS:
+    if slot_id not in _all_save_slot_ids():
         raise HTTPException(status_code=400, detail="Unknown save slot.")
     status = _load_mega_batch_status_from_disk(slot_id)
     terminated: list[str] = []
@@ -4832,7 +5077,8 @@ async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
         status = _load_mega_batch_status_from_disk(slot_id)
         if status and status.get("running"):
             raise HTTPException(status_code=409, detail="Could not stop the mega-batch worker for this save slot.")
-    runtime = SESSION_RUNTIMES.get(slot_id) or _load_persisted_runtime(slot_id)
+    slot = _get_slot(slot_id)
+    runtime = slot.get_runtime(create_if_missing=False)
     if runtime and runtime.step_status.get("running"):
         if _stop_pid_and_wait(runtime.step_status.get("pid")):
             terminated.append("step")
@@ -4846,19 +5092,20 @@ async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
         if runtime.batch_status.get("running"):
             raise HTTPException(status_code=409, detail="Could not stop the batch worker for this save slot.")
     _delete_save_slot(slot_id)
+    _remove_slot_from_catalog(slot_id)
     return JSONResponse({"ok": True, "slot_id": slot_id, "deleted": True, "terminated": terminated})
 
 
 @app.post("/api/save_slot_force_clear")
 async def api_save_slot_force_clear(payload: Dict[str, Any]) -> JSONResponse:
     slot_id = _normalize_session_id(payload.get("slot_id"))
-    if slot_id not in SAVE_SLOT_IDS:
+    if slot_id not in _all_save_slot_ids():
         raise HTTPException(status_code=400, detail="Unknown save slot.")
     terminated: list[str] = []
     status = _load_mega_batch_status_from_disk(slot_id)
     if status and status.get("pid") and _stop_pid_and_wait(status.get("pid"), timeout_s=1.0):
         terminated.append("mega_batch")
-    runtime = SESSION_RUNTIMES.get(slot_id) or _load_persisted_runtime(slot_id)
+    runtime = _get_slot(slot_id).get_runtime(create_if_missing=False)
     if runtime and runtime.step_status.get("pid") and _stop_pid_and_wait(runtime.step_status.get("pid"), timeout_s=1.0):
         terminated.append("step")
     if runtime and runtime.batch_status.get("pid") and _stop_pid_and_wait(runtime.batch_status.get("pid"), timeout_s=1.0):
@@ -4872,6 +5119,24 @@ async def api_reset(payload: Dict[str, Any]) -> JSONResponse:
     token = _bind_session(_request_session_id(payload))
     try:
         runtime = _runtime()
+        step_pid = runtime.step_status.get("pid")
+        if runtime.step_status.get("running") and _pid_is_running(step_pid):
+            logger.warning("reset requested while step worker running; stopping pid=%s session=%s", step_pid, SESSION_ID_CTX.get())
+            _terminal_trace(f"reset requested while worker running; attempting stop session={SESSION_ID_CTX.get()} pid={step_pid}")
+            stopped = _stop_pid_and_wait(step_pid, timeout_s=3.0)
+            runtime.step_status = _mark_status_stopped(
+                runtime.step_status,
+                "Step worker stopped because reset was requested.",
+            )
+            if not stopped or runtime.step_status.get("running"):
+                logger.error("reset blocked; could not stop active step worker pid=%s session=%s", step_pid, SESSION_ID_CTX.get())
+                _terminal_trace(f"reset blocked; failed to stop worker session={SESSION_ID_CTX.get()} pid={step_pid}")
+                raise HTTPException(
+                    status_code=409,
+                    detail="Could not stop the active step worker. Try Stop All Step Workers, then reset again.",
+                )
+            logger.info("active step worker stopped for reset pid=%s session=%s", step_pid, SESSION_ID_CTX.get())
+            _terminal_trace(f"worker stopped for reset session={SESSION_ID_CTX.get()} pid={step_pid}")
         selected_models = payload.get("selected_models") or []
         scenario = payload.get("scenario")
         seed = payload.get("seed")
@@ -4924,6 +5189,18 @@ async def api_step(payload: Dict[str, Any]) -> JSONResponse:
     try:
         runtime = _runtime()
         env = _require_env()
+        logger.info(
+            "api_step requested session=%s mode=%s env_done=%s running=%s pid=%s",
+            SESSION_ID_CTX.get(),
+            env.config.get("mode"),
+            env.done,
+            runtime.step_status.get("running"),
+            runtime.step_status.get("pid"),
+        )
+        _terminal_trace(
+            f"api_step requested session={SESSION_ID_CTX.get()} mode={env.config.get('mode')} "
+            f"running={runtime.step_status.get('running')} pid={runtime.step_status.get('pid')}"
+        )
         if env.done:
             raise HTTPException(status_code=400, detail="Episode already complete. Reset first.")
         runtime.step_status = _mark_status_stopped(runtime.step_status, "Step worker stopped unexpectedly.")
@@ -4945,6 +5222,12 @@ async def api_step(payload: Dict[str, Any]) -> JSONResponse:
             payload_path=payload_path,
         )
         _persist_runtime()
+        logger.info(
+            "api_step launched worker session=%s pid=%s",
+            SESSION_ID_CTX.get(),
+            runtime.step_status.get("pid"),
+        )
+        _terminal_trace(f"api_step launched worker session={SESSION_ID_CTX.get()} pid={runtime.step_status.get('pid')}")
         return JSONResponse({"ok": True, "started": True, "status": runtime.step_status})
     finally:
         SESSION_ID_CTX.reset(token)

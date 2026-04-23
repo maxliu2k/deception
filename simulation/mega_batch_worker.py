@@ -32,7 +32,7 @@ def _write_status(status_path: Path, status: Dict[str, Any]) -> None:
     _write_json_atomic(status_path, status)
 
 
-async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path) -> None:
+async def _run_worker(*, session_id: str, payload: Dict[str, Any]) -> None:
     token = _bind_session(session_id)
     status_path = _mega_batch_status_path(session_id)
     export_path = _mega_batch_export_path(session_id)
@@ -234,13 +234,12 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
 def main() -> None:
     parser = argparse.ArgumentParser(description="Background mega-batch worker for simulation.")
     parser.add_argument("--session-id", required=True)
-    parser.add_argument("--job-dir", required=True)
     parser.add_argument("--payload-path", required=True)
     args = parser.parse_args()
 
     payload_path = Path(args.payload_path)
     payload = _read_payload(payload_path) if payload_path.exists() else {}
-    asyncio.run(_run_worker(session_id=args.session_id, payload=payload, job_dir=Path(args.job_dir)))
+    asyncio.run(_run_worker(session_id=args.session_id, payload=payload))
 
 
 def _read_payload(path: Path) -> Dict[str, Any]:

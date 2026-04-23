@@ -6,281 +6,322 @@
     <title>Travel Mediation Simulation</title>
     <style>
       html, body { height: 100%; }
-      body { font-family: Georgia, serif; background: #f8f4ec; color: #1f2937; margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
-      header { padding: 16px 20px; border-bottom: 1px solid #e5d9c5; background: #fffaf2; min-height: 0; }
-      .header-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-      h1 { margin: 0; font-size: 24px; }
-      .wrap { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 14px; padding: 14px 20px; min-height: 0; height: 100%; overflow: hidden; box-sizing: border-box; }
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #f5f4f0; color: #1c1917; margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+      header { padding: 10px 20px; border-bottom: 1px solid #e7e5e0; background: #fff; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 0; }
+      .header-row { display: flex; align-items: center; gap: 12px; }
+      h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+      .header-sub { font-size: 12px; color: #78716c; margin-top: 1px; }
+      .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 10px; padding: 10px 14px; min-height: 0; height: 100%; overflow: hidden; box-sizing: border-box; }
       .wrap.hidden { display: none; }
-      .card { background: #fffdf9; border: 1px solid #e8dcc8; border-radius: 12px; padding: 12px; min-height: 0; box-sizing: border-box; }
-      .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; }
-      .label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #6b7280; }
+      .card { background: #fff; border: 1px solid #e7e5e0; border-radius: 9px; padding: 12px; min-height: 0; box-sizing: border-box; }
+      .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .label { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #a8a29e; }
       .row { margin-top: 10px; }
-      .models { display: grid; gap: 10px; margin-top: 6px; }
-      button { background: #9a3412; color: #fff; border: 0; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
-      button.alt { background: #475569; }
-      button:disabled { opacity: .6; cursor: not-allowed; }
-      select, input { width: 100%; border: 1px solid #d6c5a8; border-radius: 8px; padding: 8px; background: #fff; display: block; box-sizing: border-box; }
-      .field { margin-top: 6px; }
-      .chat { display: grid; gap: 8px; max-height: 42vh; overflow: auto; min-height: 0; }
+      .models { display: grid; gap: 7px; margin-top: 6px; }
+      button { background: #9a3412; color: #fff; border: 0; border-radius: 7px; padding: 7px 11px; cursor: pointer; font-size: 13px; font-family: inherit; font-weight: 500; line-height: 1.3; }
+      button.alt { background: #44403c; }
+      button.ghost { background: transparent; color: #57534e; border: 1px solid #e7e5e0; }
+      button.ghost:hover { background: #fafaf9; }
+      button.danger { background: #dc2626; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      select, input { width: 100%; border: 1px solid #e7e5e0; border-radius: 7px; padding: 6px 9px; background: #fff; display: block; box-sizing: border-box; font-size: 13px; font-family: inherit; color: #1c1917; }
+      .field { margin-top: 4px; }
+      .chat { display: grid; gap: 7px; max-height: 42vh; overflow: auto; min-height: 0; }
       .pane-card { display: flex; flex-direction: column; min-height: 0; }
       .pane-card .chat { flex: 1 1 auto; min-height: 0; max-height: none; }
-      .turns { display: grid; gap: 8px; }
-      .turn-card { border: 1px solid #e8dcc8; background: #fff; border-radius: 12px; padding: 10px 12px; transition: background .2s ease, border-color .2s ease, transform .2s ease; }
-      .turn-card.pending { opacity: .8; }
-      .turn-card.thinking { background: #dbeafe; border-color: #60a5fa; transform: translateX(4px); }
-      .turn-card.done { background: #dcfce7; border-color: #4ade80; }
-      .turn-card.skipped { background: #f3f4f6; border-color: #d1d5db; opacity: .7; }
-      .turn-card .small { color: #6b7280; font-size: 12px; }
-      .msg { border: 1px solid #e8dcc8; background: #fff; border-radius: 10px; padding: 8px 10px; }
-      .who { font-weight: 700; margin-bottom: 4px; }
-      .meta { color: #6b7280; font-size: 11px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .06em; }
-      .stack { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: auto; padding-right: 2px; }
+      .turns { display: grid; gap: 6px; }
+      .turn-card { border: 1px solid #e7e5e0; background: #fafaf9; border-radius: 8px; padding: 8px 11px; transition: background .15s, border-color .15s, transform .15s; }
+      .turn-card.pending { opacity: .65; }
+      .turn-card.thinking { background: #eff6ff; border-color: #93c5fd; transform: translateX(3px); }
+      .turn-card.done { background: #f0fdf4; border-color: #86efac; }
+      .turn-card.skipped { background: #fafaf9; border-color: #e7e5e0; opacity: .45; }
+      .turn-card .small { color: #a8a29e; font-size: 11px; }
+      .msg { border: 1px solid #e7e5e0; background: #fff; border-radius: 8px; padding: 8px 11px; }
+      .who { font-weight: 600; margin-bottom: 3px; font-size: 13px; }
+      .meta { color: #a8a29e; font-size: 11px; margin-bottom: 3px; text-transform: uppercase; letter-spacing: .06em; }
+      .stack { display: flex; flex-direction: column; gap: 9px; min-height: 0; overflow: auto; padding-right: 2px; }
       .stack > .card { flex: 0 0 auto; overflow: hidden; }
-      .conversation-card { flex: 1 1 260px; min-height: 180px; }
-      .hint { color: #6b7280; font-size: 12px; }
+      .conversation-card { flex: 1 1 240px; min-height: 160px; }
+      .hint { color: #a8a29e; font-size: 12px; }
       .hidden { display: none; }
-      /* ── Batch results table ─────────────────────────── */
+
+      /* Batch table */
       .batch-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-      .batch-table th { background: #f3ece0; padding: 5px 8px; text-align: right; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; color: #6b7280; border-bottom: 2px solid #e8dcc8; white-space: nowrap; }
+      .batch-table th { background: #fafaf9; padding: 5px 8px; text-align: right; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; color: #a8a29e; border-bottom: 1px solid #e7e5e0; white-space: nowrap; }
       .batch-table th:first-child, .batch-table th:nth-child(2) { text-align: left; }
-      .batch-table td { padding: 5px 8px; border-bottom: 1px solid #f0e8d8; text-align: right; font-family: Consolas, monospace; }
-      .batch-table td:first-child, .batch-table td:nth-child(2) { text-align: left; font-family: Georgia, serif; }
+      .batch-table td { padding: 5px 8px; border-bottom: 1px solid #f5f4f0; text-align: right; font-family: ui-monospace, 'Cascadia Code', monospace; font-size: 12px; }
+      .batch-table td:first-child, .batch-table td:nth-child(2) { text-align: left; font-family: inherit; }
       .batch-table tr:last-child td { border-bottom: none; }
-      .batch-table tr.summary-row td { background: #f3ece0; font-weight: 700; border-top: 2px solid #e8dcc8; }
-      .batch-table tr.error-row td { color: #991b1b; font-size: 11px; }
-      .matchup-details { margin-top: 10px; border: 1px solid #e8dcc8; border-radius: 10px; background: #fff; overflow: hidden; }
-      .matchup-details summary { cursor: pointer; list-style: none; padding: 10px 12px; font-weight: 700; background: #f8f3e8; }
+      .batch-table tr.summary-row td { background: #fafaf9; font-weight: 600; border-top: 1px solid #e7e5e0; }
+      .batch-table tr.error-row td { color: #dc2626; font-size: 11px; }
+      .matchup-details { margin-top: 8px; border: 1px solid #e7e5e0; border-radius: 8px; background: #fff; overflow: hidden; }
+      .matchup-details summary { cursor: pointer; list-style: none; padding: 8px 12px; font-weight: 600; font-size: 13px; background: #fafaf9; }
       .matchup-details summary::-webkit-details-marker { display: none; }
       .matchup-details-body { padding: 10px 12px; }
-      .mini-episode { border: 1px solid #eee1cb; border-radius: 10px; padding: 10px; background: #fffdf9; margin-top: 10px; }
+      .mini-episode { border: 1px solid #e7e5e0; border-radius: 8px; padding: 10px; background: #fafaf9; margin-top: 8px; }
       .mini-episode:first-child { margin-top: 0; }
-      .mini-episode-head { font-size: 12px; color: #6b7280; margin-bottom: 8px; }
-      .val-pos { color: #15803d; }
-      .val-neg { color: #991b1b; }
-      .val-zero { color: #9ca3af; }
-      .booked-y { color: #166534; font-weight: 700; }
-      .booked-n { color: #9ca3af; }
-      .batch-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #e8dcc8; border-top-color: #9a3412; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 6px; }
+      .mini-episode-head { font-size: 12px; color: #78716c; margin-bottom: 8px; }
+      .val-pos { color: #16a34a; }
+      .val-neg { color: #dc2626; }
+      .val-zero { color: #a8a29e; }
+      .booked-y { color: #15803d; font-weight: 600; }
+      .booked-n { color: #a8a29e; }
+      .batch-spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #e7e5e0; border-top-color: #9a3412; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 5px; }
       @keyframes spin { to { transform: rotate(360deg); } }
 
-      /* ── Five-attr result table ───────────────────────── */
+      /* Five-attr */
       .attr-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
-      .attr-table th { background: #f3ece0; padding: 6px 10px; text-align: left; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #6b7280; border-bottom: 2px solid #e8dcc8; }
-      .attr-table td { padding: 7px 10px; border-bottom: 1px solid #f0e8d8; vertical-align: middle; }
+      .attr-table th { background: #fafaf9; padding: 6px 10px; text-align: left; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: #a8a29e; border-bottom: 1px solid #e7e5e0; }
+      .attr-table td { padding: 7px 10px; border-bottom: 1px solid #f5f4f0; vertical-align: middle; }
       .attr-table tr:last-child td { border-bottom: none; }
-      .bool-yes { display: inline-block; background: #bbf7d0; color: #166534; border-radius: 6px; padding: 2px 8px; font-weight: 700; font-size: 12px; }
-      .bool-no  { display: inline-block; background: #fee2e2; color: #991b1b; border-radius: 6px; padding: 2px 8px; font-weight: 700; font-size: 12px; }
-      .lie-caught   { display: inline-block; background: #fef3c7; color: #92400e; border-radius: 6px; padding: 2px 7px; font-size: 11px; margin-left: 4px; font-weight: 700; }
-      .lie-hidden   { display: inline-block; background: #f3e8ff; color: #6b21a8; border-radius: 6px; padding: 2px 7px; font-size: 11px; margin-left: 4px; font-weight: 700; }
-      .badge { display: inline-block; border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 700; margin-left: 2px; }
+      .bool-yes { display: inline-block; background: #dcfce7; color: #166534; border-radius: 5px; padding: 2px 7px; font-weight: 600; font-size: 12px; }
+      .bool-no  { display: inline-block; background: #fee2e2; color: #991b1b; border-radius: 5px; padding: 2px 7px; font-weight: 600; font-size: 12px; }
+      .lie-caught   { display: inline-block; background: #fef9c3; color: #854d0e; border-radius: 5px; padding: 2px 6px; font-size: 11px; margin-left: 4px; font-weight: 600; }
+      .lie-hidden   { display: inline-block; background: #f3e8ff; color: #7e22ce; border-radius: 5px; padding: 2px 6px; font-size: 11px; margin-left: 4px; font-weight: 600; }
+      .badge { display: inline-block; border-radius: 5px; padding: 2px 6px; font-size: 11px; font-weight: 600; margin-left: 2px; }
       .badge-customer { background: #dbeafe; color: #1e40af; }
-      .badge-agent    { background: #d1fae5; color: #065f46; }
+      .badge-agent    { background: #dcfce7; color: #14532d; }
       .badge-verified { background: #f0fdf4; color: #15803d; font-size: 10px; }
-      .rewards-row { display: flex; gap: 10px; margin-top: 10px; }
-      .reward-box { flex: 1; background: #f8f3e8; border: 1px solid #e8dcc8; border-radius: 10px; padding: 10px; text-align: center; }
-      .reward-box .rval { font-size: 22px; font-weight: 700; margin-top: 4px; }
-      .rval.pos { color: #15803d; }
-      .rval.neg { color: #991b1b; }
-      .rval.zero { color: #6b7280; }
-      .booked-banner { padding: 10px 14px; border-radius: 10px; font-weight: 700; font-size: 15px; text-align: center; margin-bottom: 10px; }
-      .booked-yes { background: #dcfce7; color: #166534; border: 1px solid #4ade80; }
-      .booked-no  { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+      .rewards-row { display: flex; gap: 8px; margin-top: 10px; }
+      .reward-box { flex: 1; background: #fafaf9; border: 1px solid #e7e5e0; border-radius: 8px; padding: 10px; text-align: center; }
+      .reward-box .rval { font-size: 20px; font-weight: 700; margin-top: 4px; }
+      .rval.pos { color: #16a34a; }
+      .rval.neg { color: #dc2626; }
+      .rval.zero { color: #a8a29e; }
+      .booked-banner { padding: 9px 14px; border-radius: 8px; font-weight: 600; font-size: 14px; text-align: center; margin-bottom: 10px; }
+      .booked-yes { background: #f0fdf4; color: #166534; border: 1px solid #86efac; }
+      .booked-no  { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; }
       .knowledge-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
       .knowledge-pill { border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 600; }
-      .section-head { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #6b7280; margin-top: 12px; margin-bottom: 4px; }
-      .wrap > .card:first-child { height: 100%; overflow: auto; padding-right: 10px; }
-      .menu-screen { padding: 18px 20px 24px; overflow: auto; }
-      .menu-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 14px; }
-      .slot-card { background:#fffdf9; border:1px solid #e8dcc8; border-radius:14px; padding:16px; box-shadow: 0 8px 24px rgba(86, 62, 30, 0.06); }
-      .slot-title { font-size: 18px; font-weight: 700; margin: 0 0 6px; }
-      .slot-meta { color:#6b7280; font-size: 12px; min-height: 38px; }
-      .slot-actions { display:flex; gap:8px; margin-top: 12px; }
-      .slot-actions button { flex: 1; }
-      .slot-badge { display:inline-block; border-radius:999px; padding:4px 10px; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; margin-bottom:10px; }
-      .slot-badge.empty { background:#f3f4f6; color:#475569; }
-      .slot-badge.filled { background:#dbeafe; color:#1e3a8a; }
-      .slot-badge.running { background:#dcfce7; color:#166534; }
-      .menu-intro { max-width: 780px; color:#4b5563; line-height:1.5; }
+      .section-head { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #a8a29e; margin-top: 12px; margin-bottom: 4px; }
+      .wrap > .card:first-child { height: 100%; overflow: auto; padding-right: 8px; }
+
+      /* Slot menu */
+      .menu-screen { padding: 20px 24px 32px; overflow: auto; }
+      .menu-header { margin-bottom: 16px; }
+      .menu-header h2 { margin: 0 0 5px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+      .menu-header p { margin: 0; color: #78716c; font-size: 13px; line-height: 1.5; max-width: 600px; }
+      .menu-actions { display: flex; gap: 8px; margin-bottom: 20px; }
+      .menu-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+      @media (min-width: 900px)  { .menu-grid { grid-template-columns: repeat(3, 1fr); } }
+      @media (min-width: 1200px) { .menu-grid { grid-template-columns: repeat(4, 1fr); } }
+      @media (min-width: 1500px) { .menu-grid { grid-template-columns: repeat(5, 1fr); } }
+      @media (min-width: 1800px) { .menu-grid { grid-template-columns: repeat(5, 1fr); } }
+      .slot-card { background: #fff; border: 1px solid #e7e5e0; border-radius: 9px; padding: 14px 16px; display: flex; flex-direction: column; transition: box-shadow .15s, border-color .15s; cursor: default; }
+      .slot-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.07); border-color: #d6d3d1; }
+      .slot-title { font-size: 15px; font-weight: 600; margin: 4px 0 5px; }
+      .slot-meta { color: #78716c; font-size: 12px; flex: 1; line-height: 1.45; margin-bottom: 12px; }
+      .slot-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+      .slot-actions button { flex: 1 1 auto; min-width: 66px; font-size: 12px; padding: 5px 8px; }
+      .slot-card-new { align-items: center; justify-content: center; min-height: 100px; cursor: pointer; color: #d6d3d1; }
+      .slot-card-new:hover { color: #9a3412; border-color: #9a3412; box-shadow: 0 3px 10px rgba(0,0,0,.07); }
+      .slot-card-new span { font-size: 48px; font-weight: 300; line-height: 1; user-select: none; }
+      .slot-badge { display: inline-block; border-radius: 5px; padding: 3px 8px; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 2px; }
+      .slot-badge.empty { background: #f5f4f0; color: #78716c; }
+      .slot-badge.filled { background: #dbeafe; color: #1e40af; }
+      .slot-badge.running { background: #dcfce7; color: #166534; }
+
+      /* Left panel layout */
+      .cfg-section { padding-bottom: 10px; border-bottom: 1px solid #f5f4f0; margin-bottom: 10px; }
+      .cfg-section:last-child { border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+      .btn-row { display: flex; gap: 6px; margin-top: 7px; }
+      .btn-row button { flex: 1; }
+      .policy-box { margin-top: 8px; padding: 10px; background: #fafaf9; border-radius: 8px; border: 1px solid #e7e5e0; display: grid; gap: 6px; }
+      .policy-box .label { margin-bottom: 2px; }
+
+      /* Card headers with actions */
+      .card-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+      .card-hdr-btns { display: flex; gap: 5px; }
+      .card-hdr-btns button { font-size: 11px; padding: 3px 8px; }
 
       @media (max-width: 960px) {
         body { height: auto; min-height: 100vh; overflow: auto; display: block; }
         .wrap { grid-template-columns: 1fr; height: auto; overflow: visible; }
-        .wrap > .card:first-child,
-        .stack { height: auto; overflow: visible; padding-right: 0; }
+        .wrap > .card:first-child, .stack { height: auto; overflow: visible; padding-right: 0; }
       }
+
+      /* Confirmation modal */
+      .confirm-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 200; align-items: center; justify-content: center; }
+      .confirm-overlay.show { display: flex; }
+      .confirm-card { background: #fff; border-radius: 12px; padding: 24px 28px; min-width: 280px; max-width: 380px; box-shadow: 0 8px 32px rgba(0,0,0,.18); }
+      .confirm-card-title { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+      .confirm-card-body { font-size: 13px; color: #78716c; margin-bottom: 20px; line-height: 1.5; }
+      .confirm-card-btns { display: flex; gap: 8px; justify-content: flex-end; }
     </style>
   </head>
   <body>
-    <header>
-      <div class="header-row">
-        <div>
-          <h1>Travel Mediation Simulation</h1>
-          <div class="hint">Choose a session from the slot menu, then run or continue that simulation.</div>
-        </div>
-        <div style="display:flex; gap:8px;">
-          <button id="openSlotMenuBtn" class="alt" type="button">Save Slots</button>
+    <div id="confirmOverlay" class="confirm-overlay">
+      <div class="confirm-card">
+        <div class="confirm-card-title" id="confirmTitle">Remove Slot</div>
+        <div class="confirm-card-body" id="confirmBody"></div>
+        <div class="confirm-card-btns">
+          <button id="confirmCancelBtn" class="ghost" type="button">Cancel</button>
+          <button id="confirmOkBtn" class="danger" type="button">Remove</button>
         </div>
       </div>
+    </div>
+    <div id="inputOverlay" class="confirm-overlay">
+      <div class="confirm-card">
+        <div class="confirm-card-title" id="inputTitle"></div>
+        <input id="inputField" class="field" type="text" style="margin-bottom:16px;" />
+        <div class="confirm-card-btns">
+          <button id="inputCancelBtn" class="ghost" type="button">Cancel</button>
+          <button id="inputOkBtn" type="button">OK</button>
+        </div>
+      </div>
+    </div>
+    <header>
+      <div>
+        <h1>Travel Mediation Simulation</h1>
+        <div class="header-sub">Choose a session, configure, and run.</div>
+      </div>
+      <button id="openSlotMenuBtn" class="ghost" type="button">Sessions</button>
     </header>
     <div id="slotMenu" class="menu-screen">
-      <div class="menu-intro">
-        Pick where to work. `Transient` is a scratch session, while the four save slots persist until you delete them. Filled slots survive reloads and can keep background work running.
+      <div class="menu-header">
+        <h2>Choose a Session</h2>
+        <p>Save slots persist across reloads. Pick one to continue or start fresh work.</p>
       </div>
-      <div style="margin-top:10px; display:flex; gap:8px; max-width: 360px;">
-        <button id="stopAllStepWorkersBtn" class="alt" type="button" style="width:100%;">Destroy All Step Workers</button>
+      <div class="menu-actions">
+        <button id="stopAllStepWorkersBtn" class="ghost" type="button">Stop All Workers</button>
       </div>
       <div id="slotMenuGrid" class="menu-grid"></div>
     </div>
     <div class="wrap hidden" id="appWrap">
       <!-- LEFT: config -->
       <div class="card">
-        <div class="label">Configuration</div>
-        <div class="row">
+        <div class="cfg-section">
           <div class="label">Models by Role</div>
           <div id="modelBox" class="models"></div>
         </div>
-        <div class="row">
+        <div class="cfg-section">
           <div class="label">Mode</div>
           <select id="mode" class="field">
-            <option value="five_attr" selected>five_attr — boolean partial info</option>
-            <option value="open_painting_auction">open_painting_auction</option>
-            <option value="buyer_seller_negotiation">buyer_seller_negotiation</option>
-            <option value="simple_resort_deception">simple_resort_deception</option>
-            <option value="mediation">mediation</option>
-            <option value="repeated_mediation">repeated_mediation</option>
+            <option value="five_attr" selected>Five Attributes</option>
+            <option value="open_painting_auction">Open Painting Auction</option>
+            <option value="buyer_seller_negotiation">Buyer–Seller Negotiation</option>
+            <option value="simple_resort_deception">Simple Resort Deception</option>
+            <option value="mediation">Mediation</option>
+            <option value="repeated_mediation">Repeated Mediation</option>
           </select>
-        </div>
-        <div class="row">
-          <div class="label">Scenario</div>
+          <div class="label" style="margin-top:8px;">Scenario</div>
           <select id="scenario" class="field"></select>
-        </div>
-        <div class="row">
-          <div class="label">Seed</div>
+          <div class="label" style="margin-top:8px;">Seed</div>
           <input id="seed" class="field" type="number" value="7" />
         </div>
-        <div class="row">
-          <div class="label">Max Rounds</div>
-          <div class="hint">Fixed at 20 for all simulations.</div>
-        </div>
-        <div class="row">
+        <div class="cfg-section">
           <div class="label">Save Slot</div>
           <select id="saveSlot" class="field">
             <option value="">Transient (auto-updating)</option>
-            <option value="save_slot_1">Save Slot 1</option>
-            <option value="save_slot_2">Save Slot 2</option>
-            <option value="save_slot_3">Save Slot 3</option>
-            <option value="save_slot_4">Save Slot 4</option>
           </select>
-          <div style="display:flex; gap:8px; margin-top:8px;">
-            <button id="deleteSlotBtn" class="alt" type="button">Delete Slot</button>
-            <button id="forceClearSlotBtn" class="alt" type="button">Force Clear Slot</button>
-          </div>
-          <div class="hint" id="saveSlotHint" style="margin-top:6px;">Transient mode updates with reloads. Filled save slots persist until you delete or force-clear them.</div>
-        </div>
-        <div class="row" style="display:flex; gap:8px;">
-          <button id="resetBtn">Reset</button>
-          <button id="stepBtn" class="alt">Step Episode</button>
-        </div>
-        <div class="row" style="display:flex; gap:8px;">
-          <button id="batchBtn" class="alt" style="flex:1;">Run 10 Episodes</button>
-          <button id="megaBatchBtn" class="alt" style="flex:1;">Run Mega-Batch</button>
-        </div>
-        <div class="row" style="display:flex; gap:8px;">
-          <button id="randomizeSeedsBtn" class="alt" style="flex:1;">Randomize Batch Seeds</button>
-          <button id="restoreSeedsBtn" class="alt" style="flex:1;">Restore [0-9]</button>
-        </div>
-        <div class="row">
-          <div class="hint" id="batchSeedsLabel">Batch seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]</div>
-        </div>
-        <div class="row">
-          <div class="hint hidden" id="selectedModelsDebug"></div>
-        </div>
-        <div class="row">
-          <button id="toggleAdvancedBtn" class="alt">Policy Overrides</button>
-        </div>
-        <div id="advancedPanel" class="row hidden">
-          <!-- five_attr policies -->
-          <div id="policies-five_attr">
-            <div class="label" style="margin-bottom:4px;">five_attr Policies</div>
-            <select id="fa-resortPolicy">
-              <option value="strategic" selected>Resort: strategic (lie unverified-false only)</option>
-              <option value="truthful">Resort: always truthful</option>
-              <option value="lie_unverified">Resort: lie all unverified (claim True)</option>
-            </select>
-            <select id="fa-agentPolicy" style="margin-top:6px;">
-              <option value="correct_known" selected>Agent: correct known lies</option>
-              <option value="relay">Agent: relay (pass through)</option>
-              <option value="commission_max">Agent: commission max (claim True)</option>
-            </select>
-            <select id="fa-customerPolicy" style="margin-top:6px;">
-              <option value="skeptical" selected>Customer: skeptical (check known fact)</option>
-              <option value="naive">Customer: naive (trust report)</option>
-            </select>
-          </div>
-          <div id="policies-buyer_seller_negotiation" class="hidden">
-            <div class="label" style="margin-bottom:4px;">buyer_seller_negotiation</div>
-            <div class="hint">This mode runs a direct two-agent price negotiation without policy overrides.</div>
-          </div>
-          <div id="policies-open_painting_auction" class="hidden">
-            <div class="label" style="margin-bottom:4px;">open_painting_auction</div>
-            <div class="hint">This mode runs a five-bidder sequential auction without policy overrides in the UI.</div>
-          </div>
-          <!-- simple_resort_deception policies -->
-          <div id="policies-simple_resort_deception" class="hidden">
-            <div class="label" style="margin-bottom:4px;">simple_resort_deception Policies</div>
-            <select id="sr-resortPolicy">
-              <option value="truthful" selected>Resort: truthful</option>
-              <option value="always_claim_luxury">Resort: always claim luxury</option>
-              <option value="conditional_lie">Resort: conditional lie</option>
-            </select>
-            <select id="sr-agentPolicy" style="margin-top:6px;">
-              <option value="truthful_relay" selected>Agent: truthful relay</option>
-              <option value="always_sell">Agent: always sell</option>
-              <option value="soft_sell">Agent: soft sell</option>
-              <option value="truth_if_known">Agent: truth if known</option>
-            </select>
-            <select id="sr-customerPolicy" style="margin-top:6px;">
-              <option value="book_if_luxury_claimed" selected>Customer: book if luxury claimed</option>
-              <option value="confidence_threshold">Customer: confidence threshold</option>
-            </select>
-          </div>
-          <!-- mediation policies -->
-          <div id="policies-mediation" class="hidden">
-            <div class="label" style="margin-bottom:4px;">Mediation Policies</div>
-            <select id="med-customerPolicy">
-              <option value="truthful" selected>Customer: truthful</option>
-              <option value="budget_hiding">Customer: hide budget</option>
-            </select>
-            <select id="med-agentPolicy" style="margin-top:6px;">
-              <option value="commission_max" selected>Agent: commission max</option>
-              <option value="customer_aligned">Agent: customer aligned</option>
-            </select>
-          </div>
-          <div id="policies-repeated_mediation" class="hidden">
-            <div class="label" style="margin-bottom:4px;">Repeated Mediation Policies</div>
-            <select id="rep-resortPolicy">
-              <option value="reputation_building" selected>Resort: reputation building</option>
-              <option value="soft_bluff_when_trusted">Resort: soft bluff when trusted</option>
-              <option value="desperate_hard_sell">Resort: desperate hard sell</option>
-              <option value="rebuild_after_caught">Resort: rebuild after caught</option>
-            </select>
-            <select id="rep-agentPolicy" style="margin-top:6px;">
-              <option value="reputation_preserving" selected>Agent: reputation preserving</option>
-              <option value="exploit_then_recover">Agent: exploit then recover</option>
-              <option value="blacklist_unreliable_resorts">Agent: blacklist unreliable resorts</option>
-              <option value="soft_sell_under_low_trust">Agent: soft sell under low trust</option>
-            </select>
-            <select id="rep-customerPolicy" style="margin-top:6px;">
-              <option value="verify_if_suspicious" selected>Customer: verify if suspicious</option>
-              <option value="trusting">Customer: trusting</option>
-              <option value="skeptical_memory">Customer: skeptical memory</option>
-              <option value="exit_after_betrayal">Customer: exit after betrayal</option>
-            </select>
+          <div class="hint" id="saveSlotHint" style="margin-top:4px;"></div>
+          <div class="btn-row">
+            <button id="deleteSlotBtn" class="danger" type="button">Remove</button>
           </div>
         </div>
-        <!-- five_attr info panel (visible after reset) -->
-        <div id="faInfoCard" class="row hidden">
+        <div class="cfg-section">
+          <div class="btn-row">
+            <button id="resetBtn">Reset</button>
+            <button id="stepBtn" class="alt">Step</button>
+          </div>
+          <div class="btn-row">
+            <button id="batchBtn" class="alt">Batch · 10 Episodes</button>
+            <button id="megaBatchBtn" class="alt">Mega-Batch</button>
+          </div>
+          <div class="btn-row">
+            <button id="randomizeSeedsBtn" class="ghost">Randomize Seeds</button>
+            <button id="restoreSeedsBtn" class="ghost">Restore [0–9]</button>
+          </div>
+          <div class="hint" id="batchSeedsLabel" style="margin-top:2px;">Batch seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]</div>
+        </div>
+        <div class="cfg-section">
+          <button id="toggleAdvancedBtn" class="ghost" style="width:100%;">Policy Overrides</button>
+          <div id="advancedPanel" class="hidden" style="margin-top:8px;">
+            <div id="policies-five_attr">
+              <div class="policy-box">
+                <div class="label">Five Attributes Policies</div>
+                <select id="fa-agentPolicy">
+                  <option value="correct_known" selected>Agent: correct known lies</option>
+                  <option value="relay">Agent: relay</option>
+                  <option value="commission_max">Agent: commission max</option>
+                </select>
+                <select id="fa-customerPolicy">
+                  <option value="skeptical" selected>Customer: skeptical</option>
+                  <option value="naive">Customer: naive</option>
+                </select>
+              </div>
+            </div>
+            <div id="policies-buyer_seller_negotiation" class="hidden">
+              <div class="policy-box">
+                <div class="label">Buyer–Seller Negotiation</div>
+                <div class="hint">Direct two-agent price negotiation — no policy overrides.</div>
+              </div>
+            </div>
+            <div id="policies-open_painting_auction" class="hidden">
+              <div class="policy-box">
+                <div class="label">Open Painting Auction</div>
+                <div class="hint">Five-bidder sequential auction — no policy overrides.</div>
+              </div>
+            </div>
+            <div id="policies-simple_resort_deception" class="hidden">
+              <div class="policy-box">
+                <div class="label">Simple Resort Deception Policies</div>
+                <select id="sr-resortPolicy">
+                  <option value="truthful" selected>Resort: truthful</option>
+                  <option value="always_claim_luxury">Resort: always claim luxury</option>
+                  <option value="conditional_lie">Resort: conditional lie</option>
+                </select>
+                <select id="sr-agentPolicy">
+                  <option value="truthful_relay" selected>Agent: truthful relay</option>
+                  <option value="always_sell">Agent: always sell</option>
+                  <option value="soft_sell">Agent: soft sell</option>
+                  <option value="truth_if_known">Agent: truth if known</option>
+                </select>
+                <select id="sr-customerPolicy">
+                  <option value="book_if_luxury_claimed" selected>Customer: book if luxury claimed</option>
+                  <option value="confidence_threshold">Customer: confidence threshold</option>
+                </select>
+              </div>
+            </div>
+            <div id="policies-mediation" class="hidden">
+              <div class="policy-box">
+                <div class="label">Mediation Policies</div>
+                <select id="med-customerPolicy">
+                  <option value="truthful" selected>Customer: truthful</option>
+                  <option value="budget_hiding">Customer: hide budget</option>
+                </select>
+                <select id="med-agentPolicy">
+                  <option value="commission_max" selected>Agent: commission max</option>
+                  <option value="customer_aligned">Agent: customer aligned</option>
+                </select>
+              </div>
+            </div>
+            <div id="policies-repeated_mediation" class="hidden">
+              <div class="policy-box">
+                <div class="label">Repeated Mediation Policies</div>
+                <select id="rep-resortPolicy">
+                  <option value="reputation_building" selected>Resort: reputation building</option>
+                  <option value="soft_bluff_when_trusted">Resort: soft bluff when trusted</option>
+                  <option value="desperate_hard_sell">Resort: desperate hard sell</option>
+                  <option value="rebuild_after_caught">Resort: rebuild after caught</option>
+                </select>
+                <select id="rep-agentPolicy">
+                  <option value="reputation_preserving" selected>Agent: reputation preserving</option>
+                  <option value="exploit_then_recover">Agent: exploit then recover</option>
+                  <option value="blacklist_unreliable_resorts">Agent: blacklist unreliable resorts</option>
+                  <option value="soft_sell_under_low_trust">Agent: soft sell under low trust</option>
+                </select>
+                <select id="rep-customerPolicy">
+                  <option value="verify_if_suspicious" selected>Customer: verify if suspicious</option>
+                  <option value="trusting">Customer: trusting</option>
+                  <option value="skeptical_memory">Customer: skeptical memory</option>
+                  <option value="exit_after_betrayal">Customer: exit after betrayal</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="faInfoCard" class="cfg-section hidden">
           <div class="label">Game Setup</div>
           <div id="faInfo" style="font-size:13px; margin-top:6px;"></div>
         </div>
@@ -290,13 +331,12 @@
       <div class="stack">
         <div id="turnProgressCard" class="card">
           <div class="label">Turn Progress</div>
-          <div id="turnOut" class="turns"><div class="hint">Click Reset, then run the simulation.</div></div>
+          <div id="turnOut" class="turns"><div class="hint">Reset, then run to see turns.</div></div>
         </div>
         <div class="card pane-card conversation-card">
           <div class="label">Conversation</div>
           <div id="chatOut" class="chat"><div class="hint">No messages yet.</div></div>
         </div>
-        <!-- five_attr result (shown when mode=five_attr and done) -->
         <div id="faResultCard" class="card hidden">
           <div class="label">Five-Attr Result</div>
           <div id="faResult"></div>
@@ -310,49 +350,48 @@
           <div id="negotiationResult"></div>
         </div>
         <div id="auctionCard" class="card hidden">
-          <div style="display:flex; align-items:center; justify-content:space-between;">
+          <div class="card-hdr">
             <div class="label">Auction State</div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <button id="exportAuctionCsvBtn" class="alt" type="button">Export CSV</button>
-              <button id="exportAuctionXlsxBtn" class="alt" type="button">Export XLSX</button>
-              <button id="exportAuctionLogBtn" class="alt" type="button">Export Bid Log</button>
+            <div class="card-hdr-btns">
+              <button id="exportAuctionCsvBtn" class="ghost" type="button">CSV</button>
+              <button id="exportAuctionXlsxBtn" class="ghost" type="button">XLSX</button>
+              <button id="exportAuctionLogBtn" class="ghost" type="button">Bid Log</button>
             </div>
           </div>
           <div id="auctionResult"></div>
         </div>
-        <!-- batch results -->
         <div id="batchCard" class="card hidden">
-          <div style="display:flex; align-items:center; justify-content:space-between;">
-            <div class="label">Batch Results <span id="batchPolicyLabel" style="font-weight:400; text-transform:none; letter-spacing:0; color:#374151;"></span></div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <button id="exportBatchBtn" class="alt" type="button">Export TXT</button>
-              <button id="exportBatchCsvBtn" class="alt" type="button">Export CSV</button>
-              <button id="exportBatchXlsxBtn" class="alt" type="button">Export XLSX</button>
+          <div class="card-hdr">
+            <div class="label">Batch <span id="batchPolicyLabel" style="font-weight:400; text-transform:none; letter-spacing:0; color:#374151;"></span></div>
+            <div class="card-hdr-btns">
+              <button id="exportBatchBtn" class="ghost" type="button">TXT</button>
+              <button id="exportBatchCsvBtn" class="ghost" type="button">CSV</button>
+              <button id="exportBatchXlsxBtn" class="ghost" type="button">XLSX</button>
               <span id="batchSpinner" class="batch-spinner hidden"></span>
             </div>
           </div>
-          <div id="batchCurrentEpisode" class="row"><div class="hint">No batch episode running.</div></div>
+          <div id="batchCurrentEpisode" class="row"><div class="hint">No batch running.</div></div>
           <div id="batchOut"></div>
         </div>
         <div id="megaBatchCard" class="card hidden">
-          <div style="display:flex; align-items:center; justify-content:space-between;">
-            <div class="label">Mega-Batch Results <span id="megaBatchProgress" style="font-weight:400; text-transform:none; letter-spacing:0; color:#374151;"></span></div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <button id="exportMegaBatchBtn" class="alt" type="button">Export Mega TXT</button>
-              <button id="exportMegaBatchCsvBtn" class="alt" type="button">Export CSV</button>
-              <button id="exportMegaBatchXlsxBtn" class="alt" type="button">Export XLSX</button>
+          <div class="card-hdr">
+            <div class="label">Mega-Batch <span id="megaBatchProgress" style="font-weight:400; text-transform:none; letter-spacing:0; color:#374151;"></span></div>
+            <div class="card-hdr-btns">
+              <button id="exportMegaBatchBtn" class="ghost" type="button">TXT</button>
+              <button id="exportMegaBatchCsvBtn" class="ghost" type="button">CSV</button>
+              <button id="exportMegaBatchXlsxBtn" class="ghost" type="button">XLSX</button>
               <span id="megaBatchSpinner" class="batch-spinner hidden"></span>
             </div>
           </div>
-          <div id="megaBatchCurrentEpisode" class="row"><div class="hint">No mega-batch episode running.</div></div>
+          <div id="megaBatchCurrentEpisode" class="row"><div class="hint">No mega-batch running.</div></div>
           <div id="megaBatchOut"></div>
         </div>
       </div>
     </div>
 
     <script>
-      const MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Dynamic", "Truthful"];
-      const DEFAULT_PICK = ["5.4", "5.4", "5.4"];
+      const MODEL_POOL = ["GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Dynamic", "Truthful"];
+      const DEFAULT_PICK = ["GPT-5.4", "GPT-5.4", "GPT-5.4"];
       const SCENARIOS_BY_MODE = {
         five_attr: [
           ["control", "control — all True, no incentive to lie"],
@@ -421,7 +460,7 @@
         mode = canonicalMode(mode);
         if (mode === "open_painting_auction") {
           return [
-            ["bidder1", "Bidder 1", "5.4"],
+            ["bidder1", "Bidder 1", "GPT-5.4"],
             ["bidder2", "Bidder 2", "Sonnet"],
             ["bidder3", "Bidder 3", "Flash"],
             ["bidder4", "Bidder 4", "Llama"],
@@ -430,7 +469,7 @@
         }
         if (mode === "buyer_seller_negotiation") {
           return [
-            ["customer", "Buyer", "5.4"],
+            ["customer", "Buyer", "GPT-5.4"],
             ["agent", "Seller", "Sonnet"],
             ["neg3", "Model Slot 3", "Flash"],
             ["neg4", "Model Slot 4", "Llama"],
@@ -439,7 +478,7 @@
         }
         if (mode === "five_attr") {
           return [
-            ["customer", "Buyer", "5.4"],
+            ["customer", "Buyer", "GPT-5.4"],
             ["agent", "Agent", "Sonnet"],
             ["five3", "Model Slot 3", "Flash"],
             ["five4", "Model Slot 4", "Llama"],
@@ -461,14 +500,14 @@
         mode = canonicalMode(mode);
         const out = migrateLegacyDefaultModels(mode, Array.isArray(models) ? models : []);
         if (mode === "five_attr") {
-          const defaults = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+          const defaults = ["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"];
           const cleaned = Array.isArray(out) ? out.filter((m) => MODEL_POOL.includes(m)) : [];
           if (cleaned.length === 3 && cleaned[0] === "Haiku" && cleaned[1] === "Sonnet" && cleaned[2] === "Pro") {
             return [...defaults];
           }
           if (
             cleaned.length >= 5 &&
-            cleaned[0] === "5.4" &&
+            cleaned[0] === "GPT-5.4" &&
             cleaned[1] === "Opus" &&
             cleaned[2] === "Pro" &&
             cleaned[3] === "Grok" &&
@@ -488,7 +527,8 @@
 
       function normalizeDisplayedModelName(mode, name, index = null) {
         mode = canonicalMode(mode);
-        const raw = String(name || "").trim();
+        const raw0 = String(name || "").trim();
+        const raw = raw0 === "4o" ? "GPT-4o" : (raw0 === "5.4" ? "GPT-5.4" : raw0);
         if (!raw) return raw;
         if (mode === "five_attr" && raw === "Mathematical" && index === 4) return "Truthful";
         return raw;
@@ -572,11 +612,26 @@
         const out = [...models];
         if (mode === "five_attr") {
           if (out.length === 3 && out[0] === "Haiku" && out[1] === "Sonnet" && out[2] === "Pro") {
-            return ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+            return ["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"];
           }
           if (out.length >= 5 && out[4] === "Mathematical") {
             out[4] = "Truthful";
           }
+        }
+        if (mode === "buyer_seller_negotiation" || mode === "open_painting_auction") {
+          if (
+            out.length >= 5 &&
+            (
+              (out[0] === "GPT-5.4" && out[1] === "Opus" && out[2] === "Flash" && out[3] === "DeepSeek" && out[4] === "Mathematical") ||
+              (out[0] === "GPT-5.4" && out[1] === "Sonnet" && out[2] === "Flash" && out[3] === "DeepSeek" && out[4] === "Mathematical")
+            )
+          ) {
+            out[3] = "Llama";
+          }
+        }
+        for (let i = 0; i < out.length; i += 1) {
+          if (out[i] === "4o") out[i] = "GPT-4o";
+          if (out[i] === "5.4") out[i] = "GPT-5.4";
         }
         return out;
       }
@@ -640,6 +695,7 @@
 
       const SESSION_STORAGE_KEY = "simulation_live_session_id";
       const SAVE_SLOT_STORAGE_KEY = "simulation_save_slot_id";
+      let cachedSaveSlots = [];
 
       function simulationSessionId() {
         try {
@@ -657,7 +713,7 @@
 
       function activeSaveSlot() {
         try {
-          return window.localStorage?.getItem(SAVE_SLOT_STORAGE_KEY) || "";
+          return window.sessionStorage?.getItem(SAVE_SLOT_STORAGE_KEY) || "";
         } catch (_error) {
           return "";
         }
@@ -665,10 +721,22 @@
 
       function setActiveSaveSlot(slotId) {
         try {
-          if (slotId) window.localStorage?.setItem(SAVE_SLOT_STORAGE_KEY, slotId);
-          else window.localStorage?.removeItem(SAVE_SLOT_STORAGE_KEY);
+          if (slotId) window.sessionStorage?.setItem(SAVE_SLOT_STORAGE_KEY, slotId);
+          else window.sessionStorage?.removeItem(SAVE_SLOT_STORAGE_KEY);
         } catch (_error) {
         }
+      }
+
+      function findSlot(slotId, slots) {
+        const list = Array.isArray(slots) ? slots : cachedSaveSlots;
+        return list.find((it) => (it?.slot_id || "") === (slotId || "")) || null;
+      }
+
+      function slotDisplayName(slotId, slots) {
+        const slot = findSlot(slotId, slots);
+        if (slot && slot.name) return slot.name;
+        if (!slotId) return "Transient";
+        return String(slotId).replace("save_slot_", "Save Slot ");
       }
 
       function showSlotMenu() {
@@ -688,6 +756,22 @@
       function withSession(path) {
         const sep = path.includes("?") ? "&" : "?";
         return `${path}${sep}session_id=${encodeURIComponent(activeSessionId())}&_=${Date.now()}`;
+      }
+
+      function parseDownloadFilename(res) {
+        const header = res?.headers?.get("Content-Disposition") || "";
+        const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+        if (utf8Match && utf8Match[1]) {
+          try {
+            return decodeURIComponent(utf8Match[1]).replace(/^["']|["']$/g, "");
+          } catch (_error) {
+          }
+        }
+        const basicMatch = header.match(/filename="?([^\";]+)"?/i);
+        if (basicMatch && basicMatch[1]) {
+          return basicMatch[1].trim();
+        }
+        return "";
       }
 
       async function apiGet(path) {
@@ -770,14 +854,36 @@
 
       async function openSessionFromMenu(slotId) {
         setActiveSaveSlot(slotId || "");
-        document.getElementById("saveSlot").value = slotId || "";
         await refreshSaveSlots();
+        document.getElementById("saveSlot").value = slotId || "";
         showAppShell();
         const data = await refreshRender();
         if (data && data.empty) {
           await resetSimulation();
         }
         await resumeActiveJobs();
+      }
+
+      async function createSlotFromMenu() {
+        showInput("New Save Slot", "Name (optional)", "", async (name) => {
+          const res = await apiPost("/api/save_slot_create", { name: name || "" });
+          const data = await res.json();
+          if (!res.ok) { alert(data.detail || "Could not create save slot."); return; }
+          const slotId = data?.slot?.slot_id || "";
+          await refreshSaveSlots();
+          if (slotId) { await openSessionFromMenu(slotId); }
+        });
+      }
+
+      async function renameSlotFromMenu(slotId) {
+        const current = slotDisplayName(slotId, cachedSaveSlots);
+        showInput("Rename Slot", "Slot name", current, async (next) => {
+          if (!next && next !== "") return;
+          const res = await apiPost("/api/save_slot_rename", { slot_id: slotId, name: next });
+          const data = await res.json();
+          if (!res.ok) { alert(data.detail || "Rename failed"); return; }
+          await refreshSaveSlots();
+        });
       }
 
       async function deleteSlotFromMenu(slotId) {
@@ -810,21 +916,12 @@
       }
 
       function renderSlotMenu(slots) {
+        cachedSaveSlots = Array.isArray(slots) ? slots : [];
         const grid = document.getElementById("slotMenuGrid");
         const active = activeSaveSlot();
         const cards = [];
-        cards.push(`
-          <div class="slot-card">
-            <div class="slot-badge ${active ? "empty" : "filled"}">${active ? "Scratch Session" : "Current Scratch Session"}</div>
-            <div class="slot-title">Transient</div>
-            <div class="slot-meta">A scratch session for quick work. It now survives reloads too, but it is still the lightweight place to experiment.</div>
-            <div class="slot-actions">
-              <button type="button" data-open-slot="">Open</button>
-            </div>
-          </div>
-        `);
-        for (const slot of slots) {
-          const label = (slot.slot_id || "").replace("save_slot_", "Save Slot ");
+        for (const slot of cachedSaveSlots) {
+          const label = slotDisplayName(slot.slot_id, cachedSaveSlots);
           const isRunning = !!(slot.step_running || slot.mega_batch_running);
           const badgeClass = isRunning ? "running" : (slot.filled ? "filled" : "empty");
           const badgeText = isRunning ? "Running" : (slot.filled ? "Filled" : "Empty");
@@ -835,77 +932,144 @@
               <div class="slot-title">${label}</div>
               <div class="slot-meta">${slotSummaryText(slot)}</div>
               <div class="slot-actions">
-                <button type="button" data-open-slot="${slot.slot_id}">${openLabel}</button>
-                <button type="button" class="alt" data-delete-slot="${slot.slot_id}">Delete</button>
-                <button type="button" class="alt" data-force-clear-slot="${slot.slot_id}">Force Clear</button>
+                <button type="button" data-open-slot="${slot.slot_id}" style="flex:0 0 100%">${openLabel}</button>
+                <button type="button" class="alt" data-rename-slot="${slot.slot_id}">Rename</button>
+                <button type="button" class="danger" data-remove-slot="${slot.slot_id}" data-remove-slot-name="${label}">Remove</button>
               </div>
             </div>
           `);
         }
+        cards.push(`<div class="slot-card slot-card-new" id="newSlotCard"><span>+</span></div>`);
         grid.innerHTML = cards.join("");
+        document.getElementById("newSlotCard").onclick = async () => { await createSlotFromMenu(); };
         for (const btn of Array.from(grid.querySelectorAll("[data-open-slot]"))) {
           btn.onclick = async () => {
             await openSessionFromMenu(btn.getAttribute("data-open-slot") || "");
           };
         }
-        for (const btn of Array.from(grid.querySelectorAll("[data-delete-slot]"))) {
-          btn.onclick = async () => {
-            const slotId = btn.getAttribute("data-delete-slot") || "";
+        for (const btn of Array.from(grid.querySelectorAll("[data-remove-slot]"))) {
+          btn.onclick = () => {
+            const slotId = btn.getAttribute("data-remove-slot") || "";
+            const name = btn.getAttribute("data-remove-slot-name") || slotId;
             if (!slotId) return;
-            await deleteSlotFromMenu(slotId);
+            showConfirm(
+              "Remove Slot",
+              `Remove "${name}"? This will stop any running workers and permanently delete the slot.`,
+              async () => {
+                await forceClearSlot(slotId);
+                await deleteSlotFromMenu(slotId);
+              }
+            );
           };
         }
-        for (const btn of Array.from(grid.querySelectorAll("[data-force-clear-slot]"))) {
+        for (const btn of Array.from(grid.querySelectorAll("[data-rename-slot]"))) {
           btn.onclick = async () => {
-            const slotId = btn.getAttribute("data-force-clear-slot") || "";
+            const slotId = btn.getAttribute("data-rename-slot") || "";
             if (!slotId) return;
-            await forceClearSlot(slotId);
+            await renameSlotFromMenu(slotId);
           };
         }
       }
+
+      let _confirmCallback = null;
+      function showConfirm(title, body, onConfirm) {
+        document.getElementById("confirmTitle").textContent = title;
+        document.getElementById("confirmBody").textContent = body;
+        _confirmCallback = onConfirm;
+        document.getElementById("confirmOverlay").classList.add("show");
+      }
+      document.getElementById("confirmCancelBtn").onclick = () => {
+        document.getElementById("confirmOverlay").classList.remove("show");
+        _confirmCallback = null;
+      };
+      document.getElementById("confirmOkBtn").onclick = async () => {
+        document.getElementById("confirmOverlay").classList.remove("show");
+        const cb = _confirmCallback;
+        _confirmCallback = null;
+        if (cb) await cb();
+      };
+      document.getElementById("confirmOverlay").addEventListener("click", e => {
+        if (e.target === e.currentTarget) {
+          document.getElementById("confirmOverlay").classList.remove("show");
+          _confirmCallback = null;
+        }
+      });
+
+      let _inputCallback = null;
+      function showInput(title, placeholder, defaultValue, onConfirm) {
+        document.getElementById("inputTitle").textContent = title;
+        const field = document.getElementById("inputField");
+        field.placeholder = placeholder;
+        field.value = defaultValue || "";
+        _inputCallback = onConfirm;
+        document.getElementById("inputOverlay").classList.add("show");
+        setTimeout(() => field.focus(), 50);
+      }
+      document.getElementById("inputCancelBtn").onclick = () => {
+        document.getElementById("inputOverlay").classList.remove("show");
+        _inputCallback = null;
+      };
+      document.getElementById("inputOkBtn").onclick = async () => {
+        const val = document.getElementById("inputField").value;
+        document.getElementById("inputOverlay").classList.remove("show");
+        const cb = _inputCallback;
+        _inputCallback = null;
+        if (cb) await cb(val);
+      };
+      document.getElementById("inputField").addEventListener("keydown", e => {
+        if (e.key === "Enter") document.getElementById("inputOkBtn").click();
+        if (e.key === "Escape") document.getElementById("inputCancelBtn").click();
+      });
+      document.getElementById("inputOverlay").addEventListener("click", e => {
+        if (e.target === e.currentTarget) {
+          document.getElementById("inputOverlay").classList.remove("show");
+          _inputCallback = null;
+        }
+      });
 
       async function refreshSaveSlots() {
         const select = document.getElementById("saveSlot");
         const hint = document.getElementById("saveSlotHint");
         if (!select || !hint) return;
-        const active = activeSaveSlot();
-        select.value = active;
+        let active = activeSaveSlot();
         try {
           const res = await fetch(`/api/save_slots?_=${Date.now()}`, { cache: "no-store" });
           const data = await res.json();
           const slots = Array.isArray(data.slots) ? data.slots : [];
           renderSlotMenu(slots);
-          for (const option of Array.from(select.options)) {
-            if (!option.value) continue;
-            const slot = slots.find((it) => it.slot_id === option.value);
-            const base = option.value.replace("save_slot_", "Save Slot ");
-            if (!slot || !slot.filled) {
-              option.textContent = `${base} - empty`;
-              continue;
-            }
-            const parts = ["filled"];
+          select.innerHTML = `<option value="">Transient (auto-updating)</option>`;
+          for (const slot of slots) {
+            const parts = [slot.filled ? "filled" : "empty"];
             if (slot.mode) parts.push(slot.mode);
             if (slot.step_running) parts.push("running");
             if (slot.mega_batch_running) parts.push("mega-batch running");
-            option.textContent = `${base} - ${parts.join(" · ")}`;
+            const option = document.createElement("option");
+            option.value = slot.slot_id || "";
+            option.textContent = `${slotDisplayName(slot.slot_id, slots)} - ${parts.join(" · ")}`;
+            select.appendChild(option);
           }
+          if (active && !findSlot(active, slots)) {
+            setActiveSaveSlot("");
+            active = "";
+          }
+          select.value = active;
           if (!active) {
             hint.textContent = "Transient mode updates with reloads. Filled save slots persist until you delete them.";
             return;
           }
-          const slot = slots.find((it) => it.slot_id === active);
+          const slot = findSlot(active, slots);
           if (!slot || !slot.filled) {
-            hint.textContent = `${active.replace("save_slot_", "Save Slot ")} is empty. Reset it to create a simulation.`;
+            hint.textContent = `${slotDisplayName(active, slots)} is empty. Reset it to create a simulation.`;
             return;
           }
-          const parts = [`${active.replace("save_slot_", "Save Slot ")} loaded`];
+          const parts = [`${slotDisplayName(active, slots)} loaded`];
           if (slot.mode) parts.push(slot.mode);
           if (slot.step_running) parts.push("running");
           if (slot.mega_batch_running) parts.push("mega-batch running");
           hint.textContent = parts.join(" · ");
         } catch (_error) {
           hint.textContent = active
-            ? `${active.replace("save_slot_", "Save Slot ")} selected.`
+            ? `${slotDisplayName(active)} selected.`
             : "Transient mode updates with reloads. Filled save slots persist until you delete them.";
           renderSlotMenu([]);
         }
@@ -1242,6 +1406,15 @@
         const counts = data.painting_counts || {};
         const completed = Array.isArray(data.completed_paintings) ? data.completed_paintings : [];
         const bidders = Array.isArray(round.turn_order) && round.turn_order.length ? round.turn_order : Object.keys(budgets);
+        const tableBidders = [...bidders].sort((a, b) => {
+          const winsA = Number(counts[a] || 0);
+          const winsB = Number(counts[b] || 0);
+          if (winsB !== winsA) return winsB - winsA;
+          const budgetA = Number(budgets[a] || 0);
+          const budgetB = Number(budgets[b] || 0);
+          if (budgetB !== budgetA) return budgetB - budgetA;
+          return String(a).localeCompare(String(b));
+        });
         const active = new Set(Array.isArray(round.active_bidders) ? round.active_bidders : []);
         const passed = new Set(Array.isArray(round.passed_bidders) ? round.passed_bidders : []);
         const history = Array.isArray(round.bid_history) ? round.bid_history : [];
@@ -1257,7 +1430,7 @@
           <table class="batch-table">
             <thead><tr><th>Bidder</th><th>Budget</th><th>Current Bid</th><th>Won</th><th>Status</th></tr></thead><tbody>
         `;
-        for (const bidderId of bidders) {
+        for (const bidderId of tableBidders) {
           let status = "waiting";
           if (bidderId === data.current_turn_bidder) status = "current turn";
           else if (bidderId === round.current_leader) status = "leader";
@@ -1307,7 +1480,22 @@
           const n = Math.max(1, completed.length);
           const xAt = (idx) => padL + (n === 1 ? plotW / 2 : (idx * plotW) / (n - 1));
           const yAt = (value) => padT + plotH - (value / yMax) * plotH;
-          const palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2", "#be185d", "#4f46e5"];
+          const normalizeBidderKey = (bidderId) => String(bidderId || "").trim().toLowerCase();
+          const bidderColor = (bidderId) => {
+            const key = normalizeBidderKey(bidderId);
+            if (key === "5.4" || key === "gpt-5.4" || key === "gpt 5.4") return "#9ca3af"; // gray
+            if (key === "opus" || key.includes("opus")) return "#f97316"; // orange
+            if (key === "pro" || key.includes("gemini") && key.includes("pro")) return "#1e3a8a"; // lighter dark navy
+            if (key === "grok" || key.includes("grok")) return "#000000";
+            if (key === "deepseek" || key.includes("deepseek")) return "#bacbe6";
+            if (key === "llama" || key.includes("llama")) return "#db2777"; // slightly darker hot pink
+            // Stable fallback for other models.
+            const fallbackPalette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2", "#be185d", "#4f46e5"];
+            let hash = 0;
+            for (let i = 0; i < key.length; i += 1) hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+            const idx = Math.abs(hash) % fallbackPalette.length;
+            return fallbackPalette[idx];
+          };
           const yTicks = 4;
           let svg = `<div class="section-head">Final Bid Per Painting</div><svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">`;
           for (let i = 0; i <= yTicks; i += 1) {
@@ -1321,8 +1509,8 @@
             svg += `<line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + plotH}" stroke="#f9fafb" stroke-width="1" />`;
             svg += `<text x="${x}" y="${height - 12}" font-size="11" text-anchor="middle" fill="#6b7280">P${i + 1}</text>`;
           }
-          chartBidders.forEach((bidderId, bidderIdx) => {
-            const color = palette[bidderIdx % palette.length];
+          chartBidders.forEach((bidderId) => {
+            const color = bidderColor(bidderId);
             const values = seriesByBidder[bidderId];
             let path = "";
             let started = false;
@@ -1347,8 +1535,8 @@
             });
           });
           svg += `</svg>`;
-          const legend = chartBidders.map((bidderId, bidderIdx) => {
-            const color = palette[bidderIdx % palette.length];
+          const legend = chartBidders.map((bidderId) => {
+            const color = bidderColor(bidderId);
             return `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;"><span style="width:10px;height:10px;border-radius:999px;background:${color};display:inline-block;"></span>${bidderId}</span>`;
           }).join("");
           html += `${svg}<div style="margin-top:8px;font-size:12px;color:#475569;">${legend}</div>`;
@@ -1451,7 +1639,6 @@
         if (!advanced) return { use_models: true };
         if (mode === "five_attr") return {
           use_models: true,
-          resort_policy:   document.getElementById("fa-resortPolicy").value,
           agent_policy:    document.getElementById("fa-agentPolicy").value,
           customer_policy: document.getElementById("fa-customerPolicy").value,
         };
@@ -1528,11 +1715,27 @@
         refreshScenarioOptions();
         refreshPolicyPanels();
         refreshModeChrome();
+        try {
+          const runningCheck = await apiGet("/api/step_status");
+          const runningPayload = await runningCheck.json();
+          if (runningCheck.ok && runningPayload?.status?.running) {
+            alert("A step worker is currently running. Stop or wait for it to finish before changing mode.");
+            return;
+          }
+        } catch (_) {}
         await resetSimulation();
       });
 
       document.getElementById("modelBox").addEventListener("change", async () => {
         renderSelectedModelsDebug();
+        try {
+          const runningCheck = await apiGet("/api/step_status");
+          const runningPayload = await runningCheck.json();
+          if (runningCheck.ok && runningPayload?.status?.running) {
+            alert("A step worker is currently running. Stop or wait for it to finish before changing models.");
+            return;
+          }
+        } catch (_) {}
         await resetSimulation();
       });
 
@@ -1546,33 +1749,19 @@
         await resumeActiveJobs();
       });
 
-      document.getElementById("deleteSlotBtn").onclick = async () => {
+      document.getElementById("deleteSlotBtn").onclick = () => {
         const slotId = activeSaveSlot();
-        if (!slotId) {
-          alert("Select a save slot first.");
-          return;
-        }
-        const res = await apiPost("/api/save_slot_delete", { slot_id: slotId });
-        const data = await res.json();
-        if (!res.ok) {
-          alert(data.detail || "Delete failed");
-          return;
-        }
-        setActiveSaveSlot("");
-        document.getElementById("saveSlot").value = "";
-        await refreshSaveSlots();
-        showSlotMenu();
-      };
-
-      document.getElementById("forceClearSlotBtn").onclick = async () => {
-        const slotId = activeSaveSlot();
-        if (!slotId) {
-          alert("Select a save slot first.");
-          return;
-        }
-        const ok = await forceClearSlot(slotId);
-        if (!ok) return;
-        showSlotMenu();
+        if (!slotId) { alert("Select a save slot first."); return; }
+        const name = slotDisplayName(slotId, cachedSaveSlots);
+        showConfirm(
+          "Remove Slot",
+          `Remove "${name}"? This will stop any running workers and permanently delete the slot.`,
+          async () => {
+            await forceClearSlot(slotId);
+            await deleteSlotFromMenu(slotId);
+            showSlotMenu();
+          }
+        );
       };
 
       document.getElementById("openSlotMenuBtn").onclick = async () => {
@@ -1580,17 +1769,18 @@
         showSlotMenu();
       };
 
-      document.getElementById("stopAllStepWorkersBtn").onclick = async () => {
-        const proceed = window.confirm("Destroy all active step workers across all sessions and save slots?");
-        if (!proceed) return;
-        const res = await apiPost("/api/stop_all_step_workers", {});
-        const data = await res.json();
-        if (!res.ok) {
-          alert(data.detail || "Failed to stop step workers.");
-          return;
-        }
-        await refreshSaveSlots();
-        alert(`Stopped ${Number(data.terminated_count || 0)} step worker(s).`);
+
+      document.getElementById("stopAllStepWorkersBtn").onclick = () => {
+        showConfirm(
+          "Stop All Workers",
+          "Stop all active step workers across every session and save slot?",
+          async () => {
+            const res = await apiPost("/api/stop_all_step_workers", {});
+            const data = await res.json();
+            if (!res.ok) { alert(data.detail || "Failed to stop step workers."); return; }
+            await refreshSaveSlots();
+          }
+        );
       };
 
       document.getElementById("seed").addEventListener("input", () => {
@@ -2155,7 +2345,9 @@
         const url = URL.createObjectURL(data);
         const a = document.createElement("a");
         a.href = url;
-        a.download = "auction_bid_log.txt";
+        const fromHeader = parseDownloadFilename(res);
+        const slotId = activeSaveSlot();
+        a.download = fromHeader || (slotId ? `auction_bid_log_${slotId}.txt` : "auction_bid_log_transient.txt");
         document.body.appendChild(a);
         a.click();
         a.remove();

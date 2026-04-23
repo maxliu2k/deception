@@ -1,0 +1,94 @@
+{
+  "checkpoint_path": "C:\\Users\\maxim\\Research\\simulation\\models\\auction_policy_nn.pt",
+  "dataset_path": "C:\\Users\\maxim\\Research\\simulation\\datasets\\auction_nn_dataset_v4.jsonl",
+  "target_model": "Pro",
+  "objective": "regression_raise_amount_above_current_bid",
+  "output_postprocess_rule": "clip pred at >=0, then quantize to nearest multiple of min_raise (or nearest integer if min_raise<=0)",
+  "examples_total": 274,
+  "examples_train": 155,
+  "examples_val": 63,
+  "examples_test": 56,
+  "in_dim": 54,
+  "hidden": 256,
+  "depth": 3,
+  "dropout": 0.1,
+  "batch_norm": true,
+  "init": "he",
+  "epochs": 20,
+  "epochs_ran": 6,
+  "batch_size": 128,
+  "lr": 0.001,
+  "weight_decay": 1e-05,
+  "delta_loss_weight": 0.25,
+  "early_stop_patience": 5,
+  "early_stop_min_delta": 0.0001,
+  "best_val_loss": 41718.984375,
+  "best_epoch": 1,
+  "test_loss": 89.50830841064453,
+  "test_metrics": {
+    "action_accuracy_from_regression": 0.1785714328289032,
+    "raise_mae": 91.07142639160156,
+    "raise_rmse": 122.10943603515625
+  },
+  "train_loss_history": [
+    73.44047068934287,
+    73.01107842230027,
+    72.51965477235855,
+    71.89741476735762,
+    71.41177978515626,
+    71.04651174237651
+  ],
+  "val_loss_history": [
+    41718.984375,
+    49025.265625,
+    60779.57421875,
+    72809.09375,
+    85108.5390625,
+    95041.2265625
+  ],
+  "val_acc_history": [
+    0.2222222238779068,
+    0.2222222238779068,
+    0.2222222238779068,
+    0.2222222238779068,
+    0.2222222238779068,
+    0.2222222238779068
+  ],
+  "loss_plot_path": "C:\\Users\\maxim\\Research\\simulation\\models\\auction_policy_nn_meta_loss.png",
+  "loss_plot_written": true,
+  "loss_plot_error": null,
+  "split_mode": "explicit_log_split",
+  "train_logs": [
+    1,
+    2,
+    3
+  ],
+  "val_logs": [
+    4
+  ],
+  "test_logs": [
+    5
+  ],
+  "ordered_logs": [
+    "C:\\Users\\maxim\\Research\\simulation\\.runtime\\save_slots\\save_slot_11\\auction_exports\\auction_20260419_210509\\auction_bid_log.txt",
+    "C:\\Users\\maxim\\Research\\simulation\\.runtime\\save_slots\\save_slot_12\\auction_exports\\auction_20260419_210559\\auction_bid_log.txt",
+    "C:\\Users\\maxim\\Research\\simulation\\.runtime\\save_slots\\save_slot_13\\auction_exports\\auction_20260419_210406\\auction_bid_log.txt",
+    "C:\\Users\\maxim\\Research\\simulation\\.runtime\\save_slots\\save_slot_14\\auction_exports\\auction_20260419_210607\\auction_bid_log.txt",
+    "C:\\Users\\maxim\\Research\\simulation\\.runtime\\save_slots\\save_slot_15\\auction_exports\\auction_20260419_210555\\auction_bid_log.txt"
+  ],
+  "bidder_vocab": {
+    "GPT-5.4": 0,
+    "Grok": 1,
+    "Llama": 2,
+    "Opus": 3,
+    "Pro": 4
+  },
+  "leader_vocab": {
+    "": 0,
+    "GPT-5.4": 1,
+    "Grok": 2,
+    "Llama": 3,
+    "Opus": 4,
+    "Pro": 5
+  }
+}

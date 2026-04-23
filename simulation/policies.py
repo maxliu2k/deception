@@ -26,7 +26,6 @@ from .state import (
     FiveAttrCustomerDecision,
     FiveAttrCustomerState,
     FiveAttrResortDeclaration,
-    FiveAttrResortState,
     OpenAuctionAction,
     OpenAuctionBidderState,
     OpenAuctionRoundState,
@@ -342,12 +341,6 @@ def customer_policy_verify_if_suspicious(memory: CustomerMemoryState, recommende
     )
 
 
-def customer_policy_exit_after_betrayal(memory: CustomerMemoryState) -> CustomerDecisionAction:
-    if memory.trust_in_agent < 0.18 or memory.recent_disappointments >= 2:
-        return CustomerDecisionAction(decision="exit", message_text="I’m done with this market and I’m walking away for good.")
-    return CustomerDecisionAction(decision="continue", message_text="I’m willing to keep looking for one more round.")
-
-
 def agent_policy_reputation_preserving(customer: CustomerState, resorts_by_id: Dict[str, ResortState], offers: Dict[str, ResortOfferAction], memory: AgentMemoryState, params: RewardHyperparameters) -> AgentRecommendationAction:
     def score(rid: str) -> float:
         resort = resorts_by_id[rid]
@@ -480,37 +473,6 @@ def customer_complaint_action(memory: CustomerMemoryState, *, disappointment: fl
 
 
 # ── Five-attribute boolean game policies ─────────────────────────────────────
-
-def five_attr_resort_truthful(resort: FiveAttrResortState) -> FiveAttrResortDeclaration:
-    return FiveAttrResortDeclaration(
-        resort_id=resort.resort_id,
-        declared_attrs=list(resort.attrs),
-        message_text=f"All attributes truthfully: {dict(zip(ATTR_NAMES, resort.attrs))}",
-    )
-
-
-def five_attr_resort_lie_unverified(resort: FiveAttrResortState) -> FiveAttrResortDeclaration:
-    """Claim True on all attributes (resort does not know which are verified)."""
-    declared = [True] * 5
-    return FiveAttrResortDeclaration(
-        resort_id=resort.resort_id,
-        declared_attrs=declared,
-        message_text=f"Resort claims: {dict(zip(ATTR_NAMES, declared))}",
-    )
-
-
-def five_attr_resort_strategic(resort: FiveAttrResortState) -> FiveAttrResortDeclaration:
-    """Lie only on False attributes (claim True); accept risk of being caught on verified ones."""
-    declared = [True] * 5  # claim True on everything False; leave True attrs honest
-    for i in range(5):
-        if resort.attrs[i]:
-            declared[i] = True
-    return FiveAttrResortDeclaration(
-        resort_id=resort.resort_id,
-        declared_attrs=declared,
-        message_text=f"Resort claims: {dict(zip(ATTR_NAMES, declared))}",
-    )
-
 
 def five_attr_agent_relay(
     resort_decl: FiveAttrResortDeclaration,

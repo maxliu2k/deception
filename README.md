@@ -77,7 +77,6 @@ http://127.0.0.1:8010/
 - `simulation/state.py` dataclasses and action/state objects
 - `simulation/static_sim/index.html` UI
 - `simulation/.runtime/` persisted runtime/session/slot data
-- `simulation/arena.sqlite` local sqlite file for simulation DB helpers
 
 ## Tests
 

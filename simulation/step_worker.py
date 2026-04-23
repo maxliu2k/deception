@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import traceback
 from pathlib import Path
 from typing import Any, Dict
 
@@ -23,9 +24,25 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any]) -> None:
         runtime.step_status["running"] = True
         runtime.step_status["done"] = False
         runtime.step_status["error"] = None
+        print(
+            f"[simulation.step_worker] start session={session_id} pid={os.getpid()} mode="
+            f"{(runtime.env.config.get('mode') if runtime.env else None)}",
+            flush=True,
+        )
         _persist_runtime()
         await _run_step_job(payload)
         _persist_runtime()
+        print(f"[simulation.step_worker] complete session={session_id} pid={os.getpid()}", flush=True)
+    except Exception as exc:
+        print(f"[simulation.step_worker] crash session={session_id} pid={os.getpid()} error={exc}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        runtime = _runtime()
+        runtime.step_status["error"] = str(exc)
+        runtime.step_status["error_detail"] = traceback.format_exc()
+        runtime.step_status["running"] = False
+        runtime.step_status["done"] = True
+        _persist_runtime()
+        raise
     finally:
         SESSION_ID_CTX.reset(token)
 
