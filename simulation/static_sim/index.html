@@ -116,6 +116,13 @@
       .slot-card-new { align-items: center; justify-content: center; min-height: 100px; cursor: pointer; color: #d6d3d1; }
       .slot-card-new:hover { color: #9a3412; border-color: #9a3412; box-shadow: 0 3px 10px rgba(0,0,0,.07); }
       .slot-card-new span { font-size: 48px; font-weight: 300; line-height: 1; user-select: none; }
+      .folder-card { background: #fef9f3; border: 1px solid #e7d4b8; cursor: pointer; }
+      .folder-card:hover { border-color: #9a3412; box-shadow: 0 3px 10px rgba(0,0,0,.07); }
+      .folder-card .folder-icon { font-size: 28px; margin-bottom: 4px; }
+      .folder-card-back { background: #f5f4f0; }
+      .breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #78716c; margin-bottom: 12px; }
+      .breadcrumb a { color: #9a3412; cursor: pointer; text-decoration: none; }
+      .breadcrumb a:hover { text-decoration: underline; }
       .slot-badge { display: inline-block; border-radius: 5px; padding: 3px 8px; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 2px; }
       .slot-badge.empty { background: #f5f4f0; color: #78716c; }
       .slot-badge.filled { background: #dbeafe; color: #1e40af; }
@@ -185,6 +192,7 @@
       <div class="menu-actions">
         <button id="stopAllStepWorkersBtn" class="ghost" type="button">Stop All Workers</button>
       </div>
+      <div id="slotMenuBreadcrumb" class="breadcrumb"></div>
       <div id="slotMenuGrid" class="menu-grid"></div>
     </div>
     <div class="wrap hidden" id="appWrap">
@@ -192,6 +200,7 @@
       <div class="card">
         <div class="cfg-section">
           <div class="label">Models by Role</div>
+          <div id="presetBar" class="hidden" style="gap:6px;margin-bottom:8px;flex-wrap:wrap;"></div>
           <div id="modelBox" class="models"></div>
         </div>
         <div class="cfg-section">
@@ -390,7 +399,14 @@
     </div>
 
     <script>
-      const MODEL_POOL = ["GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Dynamic", "Truthful"];
+      const MODEL_POOL = ["GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Dynamic", "Truthful", "Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"];
+
+      const PRESETS = {
+        "open_painting_auction": [
+          { label: "LLM Loadout",   models: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"] },
+          { label: "Mimic Loadout", models: ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"] },
+        ],
+      };
       const DEFAULT_PICK = ["GPT-5.4", "GPT-5.4", "GPT-5.4"];
       const SCENARIOS_BY_MODE = {
         five_attr: [
@@ -575,6 +591,33 @@
         seedManuallyEdited = false;
       }
 
+      function renderPresetBar(mode) {
+        const bar = document.getElementById("presetBar");
+        const presets = (PRESETS[mode] || []);
+        if (!presets.length) {
+          bar.innerHTML = "";
+          bar.classList.add("hidden");
+          return;
+        }
+        bar.classList.remove("hidden");
+        bar.style.display = "flex";
+        bar.innerHTML = presets.map((p, i) =>
+          `<button type="button" class="ghost" style="font-size:11px;padding:3px 10px;" data-preset-idx="${i}">${p.label}</button>`
+        ).join("");
+        bar.querySelectorAll("[data-preset-idx]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const preset = presets[parseInt(btn.dataset.presetIdx)];
+            if (!preset) return;
+            const selects = Array.from(document.querySelectorAll("#modelBox select"));
+            preset.models.forEach((m, idx) => {
+              if (selects[idx]) selects[idx].value = m;
+            });
+            renderSelectedModelsDebug();
+            await resetSimulation();
+          });
+        });
+      }
+
       function renderModelCheckboxes() {
         const box = document.getElementById("modelBox");
         box.innerHTML = "";
@@ -589,6 +632,7 @@
           row.innerHTML = `<div class="label">${label}</div><select id="model-${roleId}" class="field">${options}</select>`;
           box.appendChild(row);
         }
+        renderPresetBar(mode);
         renderSelectedModelsDebug();
       }
 
@@ -696,6 +740,8 @@
       const SESSION_STORAGE_KEY = "simulation_live_session_id";
       const SAVE_SLOT_STORAGE_KEY = "simulation_save_slot_id";
       let cachedSaveSlots = [];
+      let cachedFolders = [];
+      let currentFolderId = null;  // null = root
 
       function simulationSessionId() {
         try {
@@ -866,13 +912,85 @@
 
       async function createSlotFromMenu() {
         showInput("New Save Slot", "Name (optional)", "", async (name) => {
-          const res = await apiPost("/api/save_slot_create", { name: name || "" });
+          const body = { name: name || "" };
+          if (currentFolderId) body.folder_id = currentFolderId;
+          const res = await apiPost("/api/save_slot_create", body);
           const data = await res.json();
           if (!res.ok) { alert(data.detail || "Could not create save slot."); return; }
           const slotId = data?.slot?.slot_id || "";
           await refreshSaveSlots();
           if (slotId) { await openSessionFromMenu(slotId); }
         });
+      }
+
+      async function createFolderFromMenu() {
+        showInput("New Folder", "Folder name", "", async (name) => {
+          if (!name || !name.trim()) return;
+          const res = await apiPost("/api/folder_create", { name: name.trim() });
+          const data = await res.json();
+          if (!res.ok) { alert(data.detail || "Could not create folder."); return; }
+          await refreshSaveSlots();
+        });
+      }
+
+      async function renameFolderFromMenu(folderId, currentName) {
+        showInput("Rename Folder", "New folder name", currentName || "", async (name) => {
+          if (!name || !name.trim()) return;
+          const res = await apiPost("/api/folder_rename", { folder_id: folderId, name: name.trim() });
+          const data = await res.json();
+          if (!res.ok) { alert(data.detail || "Could not rename folder."); return; }
+          await refreshSaveSlots();
+        });
+      }
+
+      async function deleteFolderFromMenu(folderId, folderName) {
+        showConfirm(
+          "Delete Folder",
+          `Delete folder "${folderName}"? Slots inside will be moved back to the root.`,
+          async () => {
+            const res = await apiPost("/api/folder_delete", { folder_id: folderId });
+            const data = await res.json();
+            if (!res.ok) { alert(data.detail || "Could not delete folder."); return; }
+            if (currentFolderId === folderId) currentFolderId = null;
+            await refreshSaveSlots();
+          }
+        );
+      }
+
+      async function moveSlotToFolder(slotId, slotName) {
+        // Build modal body with folder choices.
+        const choices = [{ id: null, label: "(Root)" }, ...cachedFolders.map((f) => ({ id: f.folder_id, label: f.name }))];
+        const overlay = document.getElementById("confirmOverlay");
+        const titleEl = document.getElementById("confirmTitle");
+        const bodyEl = document.getElementById("confirmBody");
+        const okBtn = document.getElementById("confirmOkBtn");
+        const cancelBtn = document.getElementById("confirmCancelBtn");
+        titleEl.textContent = `Move "${slotName}"`;
+        bodyEl.innerHTML = `
+          <div style="margin-bottom:8px;">Pick destination:</div>
+          <div id="moveFolderList" style="display:flex;flex-direction:column;gap:4px;"></div>
+        `;
+        const list = bodyEl.querySelector("#moveFolderList");
+        list.innerHTML = choices.map((c, i) =>
+          `<button type="button" class="ghost" data-folder-pick="${c.id == null ? '' : c.id}" style="text-align:left;font-size:12px;padding:6px 10px;">${c.label}</button>`
+        ).join("");
+        okBtn.style.display = "none";
+        const close = () => {
+          overlay.classList.remove("show");
+          okBtn.style.display = "";
+        };
+        cancelBtn.onclick = close;
+        list.querySelectorAll("[data-folder-pick]").forEach((btn) => {
+          btn.onclick = async () => {
+            const fid = btn.getAttribute("data-folder-pick") || null;
+            const res = await apiPost("/api/save_slot_move", { slot_id: slotId, folder_id: fid });
+            const data = await res.json();
+            if (!res.ok) { alert(data.detail || "Could not move slot."); return; }
+            close();
+            await refreshSaveSlots();
+          };
+        });
+        overlay.classList.add("show");
       }
 
       async function renameSlotFromMenu(slotId) {
@@ -915,12 +1033,48 @@
         return true;
       }
 
-      function renderSlotMenu(slots) {
+      function renderSlotMenu(slots, folders) {
         cachedSaveSlots = Array.isArray(slots) ? slots : [];
+        cachedFolders = Array.isArray(folders) ? folders : [];
+        // If we drilled into a folder that no longer exists, snap back to root.
+        if (currentFolderId && !cachedFolders.some((f) => f.folder_id === currentFolderId)) {
+          currentFolderId = null;
+        }
+        renderBreadcrumb();
         const grid = document.getElementById("slotMenuGrid");
-        const active = activeSaveSlot();
         const cards = [];
-        for (const slot of cachedSaveSlots) {
+
+        if (currentFolderId === null) {
+          // Root view: show all top-level folders, then root-level slots.
+          for (const folder of cachedFolders) {
+            const slotCount = cachedSaveSlots.filter((s) => s.folder_id === folder.folder_id).length;
+            cards.push(`
+              <div class="slot-card folder-card" data-enter-folder="${folder.folder_id}">
+                <div class="folder-icon">📁</div>
+                <div class="slot-title">${folder.name}</div>
+                <div class="slot-meta">${slotCount} slot${slotCount === 1 ? "" : "s"}</div>
+                <div class="slot-actions" onclick="event.stopPropagation();">
+                  <button type="button" class="alt" data-rename-folder="${folder.folder_id}" data-rename-folder-name="${folder.name}">Rename</button>
+                  <button type="button" class="danger" data-delete-folder="${folder.folder_id}" data-delete-folder-name="${folder.name}">Delete</button>
+                </div>
+              </div>
+            `);
+          }
+        } else {
+          // Folder view: show a "back to root" card.
+          cards.push(`
+            <div class="slot-card folder-card folder-card-back" id="backToRootCard">
+              <div class="folder-icon">⬅</div>
+              <div class="slot-title">Back</div>
+              <div class="slot-meta">Return to all slots</div>
+            </div>
+          `);
+        }
+
+        const visibleSlots = cachedSaveSlots.filter((s) =>
+          (s.folder_id || null) === currentFolderId
+        );
+        for (const slot of visibleSlots) {
           const label = slotDisplayName(slot.slot_id, cachedSaveSlots);
           const isRunning = !!(slot.step_running || slot.mega_batch_running);
           const badgeClass = isRunning ? "running" : (slot.filled ? "filled" : "empty");
@@ -934,14 +1088,46 @@
               <div class="slot-actions">
                 <button type="button" data-open-slot="${slot.slot_id}" style="flex:0 0 100%">${openLabel}</button>
                 <button type="button" class="alt" data-rename-slot="${slot.slot_id}">Rename</button>
+                <button type="button" class="alt" data-move-slot="${slot.slot_id}" data-move-slot-name="${label}">Move</button>
                 <button type="button" class="danger" data-remove-slot="${slot.slot_id}" data-remove-slot-name="${label}">Remove</button>
               </div>
             </div>
           `);
         }
-        cards.push(`<div class="slot-card slot-card-new" id="newSlotCard"><span>+</span></div>`);
+
+        // Always show "+ New Slot" card. Show "+ New Folder" only at root.
+        cards.push(`<div class="slot-card slot-card-new" id="newSlotCard" title="New save slot"><span>+</span></div>`);
+        if (currentFolderId === null) {
+          cards.push(`<div class="slot-card slot-card-new" id="newFolderCard" title="New folder"><span>📁+</span></div>`);
+        }
+
         grid.innerHTML = cards.join("");
         document.getElementById("newSlotCard").onclick = async () => { await createSlotFromMenu(); };
+        const newFolderBtn = document.getElementById("newFolderCard");
+        if (newFolderBtn) newFolderBtn.onclick = async () => { await createFolderFromMenu(); };
+        const backCard = document.getElementById("backToRootCard");
+        if (backCard) backCard.onclick = () => { currentFolderId = null; renderSlotMenu(cachedSaveSlots, cachedFolders); };
+
+        for (const card of Array.from(grid.querySelectorAll("[data-enter-folder]"))) {
+          card.onclick = (e) => {
+            // Ignore clicks that bubble from buttons inside the actions row.
+            if (e.target.closest("[data-rename-folder], [data-delete-folder]")) return;
+            currentFolderId = card.getAttribute("data-enter-folder");
+            renderSlotMenu(cachedSaveSlots, cachedFolders);
+          };
+        }
+        for (const btn of Array.from(grid.querySelectorAll("[data-rename-folder]"))) {
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            renameFolderFromMenu(btn.getAttribute("data-rename-folder"), btn.getAttribute("data-rename-folder-name"));
+          };
+        }
+        for (const btn of Array.from(grid.querySelectorAll("[data-delete-folder]"))) {
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            deleteFolderFromMenu(btn.getAttribute("data-delete-folder"), btn.getAttribute("data-delete-folder-name"));
+          };
+        }
         for (const btn of Array.from(grid.querySelectorAll("[data-open-slot]"))) {
           btn.onclick = async () => {
             await openSessionFromMenu(btn.getAttribute("data-open-slot") || "");
@@ -968,6 +1154,28 @@
             if (!slotId) return;
             await renameSlotFromMenu(slotId);
           };
+        }
+        for (const btn of Array.from(grid.querySelectorAll("[data-move-slot]"))) {
+          btn.onclick = () => {
+            const slotId = btn.getAttribute("data-move-slot") || "";
+            const name = btn.getAttribute("data-move-slot-name") || slotId;
+            if (!slotId) return;
+            moveSlotToFolder(slotId, name);
+          };
+        }
+      }
+
+      function renderBreadcrumb() {
+        const el = document.getElementById("slotMenuBreadcrumb");
+        if (!el) return;
+        if (currentFolderId === null) {
+          el.innerHTML = `<span>All Slots</span>`;
+        } else {
+          const folder = cachedFolders.find((f) => f.folder_id === currentFolderId);
+          const name = folder ? folder.name : currentFolderId;
+          el.innerHTML = `<a id="bcRoot">All Slots</a><span>›</span><span>${name}</span>`;
+          const root = el.querySelector("#bcRoot");
+          if (root) root.onclick = () => { currentFolderId = null; renderSlotMenu(cachedSaveSlots, cachedFolders); };
         }
       }
 
@@ -1036,7 +1244,8 @@
           const res = await fetch(`/api/save_slots?_=${Date.now()}`, { cache: "no-store" });
           const data = await res.json();
           const slots = Array.isArray(data.slots) ? data.slots : [];
-          renderSlotMenu(slots);
+          const folders = Array.isArray(data.folders) ? data.folders : [];
+          renderSlotMenu(slots, folders);
           select.innerHTML = `<option value="">Transient (auto-updating)</option>`;
           for (const slot of slots) {
             const parts = [slot.filled ? "filled" : "empty"];
@@ -1071,7 +1280,7 @@
           hint.textContent = active
             ? `${slotDisplayName(active)} selected.`
             : "Transient mode updates with reloads. Filled save slots persist until you delete them.";
-          renderSlotMenu([]);
+          renderSlotMenu([], []);
         }
       }
 

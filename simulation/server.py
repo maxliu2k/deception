@@ -79,6 +79,7 @@ from .policies import (
     simple_resort_policy_truthful,
     resort_policy,
 )
+from .mimic_agent import is_mimic, mimic_bid
 from .scenarios import FIVE_ATTR_SCENARIOS, REPEATED_MEDIATION_SCENARIOS
 from .state import (
     ATTR_NAMES,
@@ -264,6 +265,35 @@ def _load_slot_catalog() -> dict[str, Any]:
     payload = _read_json_file(SAVE_SLOT_CATALOG_PATH, None)
     if not isinstance(payload, dict):
         payload = {}
+
+    folders_raw = payload.get("folders") if isinstance(payload.get("folders"), list) else []
+    folders: list[dict[str, Any]] = []
+    used_folder_ids: set[str] = set()
+    max_folder_idx = 0
+    for item in folders_raw:
+        if not isinstance(item, dict):
+            continue
+        fid = str(item.get("folder_id") or "").strip()
+        if not fid.startswith("folder_") or fid in used_folder_ids:
+            continue
+        suffix = fid.removeprefix("folder_")
+        try:
+            max_folder_idx = max(max_folder_idx, int(suffix))
+        except Exception:
+            pass
+        name = str(item.get("name") or "").strip() or fid.replace("folder_", "Folder ")
+        folders.append({
+            "folder_id": fid,
+            "name": name[:64],
+            "created_at": float(item.get("created_at") or time.time()),
+        })
+        used_folder_ids.add(fid)
+    next_folder_index = payload.get("next_folder_index")
+    try:
+        next_folder_index_int = max(int(next_folder_index), max_folder_idx + 1)
+    except Exception:
+        next_folder_index_int = max_folder_idx + 1
+
     slots_raw = payload.get("slots")
     if not isinstance(slots_raw, list):
         slots_raw = []
@@ -282,11 +312,15 @@ def _load_slot_catalog() -> dict[str, Any]:
         except Exception:
             pass
         name = str(item.get("name") or "").strip() or sid.replace("save_slot_", "Save Slot ")
+        folder_id = item.get("folder_id")
+        if folder_id and str(folder_id) not in used_folder_ids:
+            folder_id = None  # orphan reference -> root
         slots.append(
             {
                 "slot_id": sid,
                 "name": name[:64],
                 "created_at": float(item.get("created_at") or time.time()),
+                "folder_id": str(folder_id) if folder_id else None,
             }
         )
         used_ids.add(sid)
@@ -295,7 +329,12 @@ def _load_slot_catalog() -> dict[str, Any]:
         next_index_int = max(int(next_index), max_idx + 1)
     except Exception:
         next_index_int = max_idx + 1
-    normalized = {"slots": slots, "next_index": next_index_int}
+    normalized = {
+        "slots": slots,
+        "folders": folders,
+        "next_index": next_index_int,
+        "next_folder_index": next_folder_index_int,
+    }
     _SAVE_SLOT_CATALOG_CACHE = normalized
     return normalized
 
@@ -304,7 +343,9 @@ def _save_slot_catalog(catalog: dict[str, Any]) -> None:
     global _SAVE_SLOT_CATALOG_CACHE
     payload = {
         "slots": list(catalog.get("slots") or []),
+        "folders": list(catalog.get("folders") or []),
         "next_index": int(catalog.get("next_index") or 1),
+        "next_folder_index": int(catalog.get("next_folder_index") or 1),
     }
     _SAVE_SLOT_CATALOG_CACHE = payload
     _write_json_atomic(SAVE_SLOT_CATALOG_PATH, payload)
@@ -327,13 +368,102 @@ def _find_slot_entry(slot_id: str | None) -> dict[str, Any] | None:
     return None
 
 
-def _create_save_slot(name: str | None = None) -> dict[str, Any]:
+def _folder_list() -> list[dict[str, Any]]:
+    catalog = _load_slot_catalog()
+    return list(catalog.get("folders") or [])
+
+
+def _all_folder_ids() -> set[str]:
+    return {str(item.get("folder_id")) for item in _folder_list() if str(item.get("folder_id"))}
+
+
+def _create_folder(name: str | None) -> dict[str, Any]:
+    catalog = _load_slot_catalog()
+    folders = list(catalog.get("folders") or [])
+    next_idx = int(catalog.get("next_folder_index") or 1)
+    fid = f"folder_{next_idx}"
+    folder_name = str(name or "").strip() or f"Folder {next_idx}"
+    entry = {"folder_id": fid, "name": folder_name[:64], "created_at": time.time()}
+    folders.append(entry)
+    catalog["folders"] = folders
+    catalog["next_folder_index"] = next_idx + 1
+    _save_slot_catalog(catalog)
+    return entry
+
+
+def _rename_folder(folder_id: str | None, name: str | None) -> dict[str, Any]:
+    fid = str(folder_id or "").strip()
+    next_name = str(name or "").strip()
+    if not next_name:
+        raise HTTPException(status_code=400, detail="Folder name is required.")
+    catalog = _load_slot_catalog()
+    folders = list(catalog.get("folders") or [])
+    for idx, item in enumerate(folders):
+        if item.get("folder_id") == fid:
+            updated = dict(item)
+            updated["name"] = next_name[:64]
+            folders[idx] = updated
+            catalog["folders"] = folders
+            _save_slot_catalog(catalog)
+            return updated
+    raise HTTPException(status_code=400, detail="Unknown folder.")
+
+
+def _delete_folder(folder_id: str | None) -> None:
+    fid = str(folder_id or "").strip()
+    if not fid:
+        raise HTTPException(status_code=400, detail="folder_id required.")
+    catalog = _load_slot_catalog()
+    folders = list(catalog.get("folders") or [])
+    if not any(item.get("folder_id") == fid for item in folders):
+        raise HTTPException(status_code=400, detail="Unknown folder.")
+    # Move any slots in this folder back to root, then drop the folder.
+    slots = list(catalog.get("slots") or [])
+    for idx, item in enumerate(slots):
+        if item.get("folder_id") == fid:
+            updated = dict(item)
+            updated["folder_id"] = None
+            slots[idx] = updated
+    catalog["slots"] = slots
+    catalog["folders"] = [item for item in folders if item.get("folder_id") != fid]
+    _save_slot_catalog(catalog)
+
+
+def _move_save_slot(slot_id: str | None, folder_id: str | None) -> dict[str, Any]:
+    sid = _normalize_session_id(slot_id)
+    if sid not in _all_save_slot_ids():
+        raise HTTPException(status_code=400, detail="Unknown save slot.")
+    fid = str(folder_id).strip() if folder_id else None
+    if fid and fid not in _all_folder_ids():
+        raise HTTPException(status_code=400, detail="Unknown folder.")
+    catalog = _load_slot_catalog()
+    slots = list(catalog.get("slots") or [])
+    for idx, item in enumerate(slots):
+        if item.get("slot_id") == sid:
+            updated = dict(item)
+            updated["folder_id"] = fid
+            slots[idx] = updated
+            catalog["slots"] = slots
+            _save_slot_catalog(catalog)
+            return updated
+    raise HTTPException(status_code=400, detail="Unknown save slot.")
+
+
+def _create_save_slot(name: str | None = None, folder_id: str | None = None) -> dict[str, Any]:
     catalog = _load_slot_catalog()
     slots = list(catalog.get("slots") or [])
     next_index = int(catalog.get("next_index") or 1)
     sid = f"save_slot_{next_index}"
     slot_name = str(name or "").strip() or f"Save Slot {next_index}"
-    entry = {"slot_id": sid, "name": slot_name[:64], "created_at": time.time()}
+    fid = str(folder_id).strip() if folder_id else None
+    if fid and fid not in _all_folder_ids():
+        fid = None  # silently fall back to root if folder not found
+    entry = {
+        "slot_id": sid,
+        "name": slot_name[:64],
+        "created_at": time.time(),
+        "folder_id": fid,
+    }
     slots.append(entry)
     catalog["slots"] = slots
     catalog["next_index"] = next_index + 1
@@ -592,7 +722,7 @@ def _delete_save_slot(session_id: str | None) -> None:
     _get_slot(sid).clear()
 
 
-def _save_slot_info(session_id: str, slot_name: str | None = None) -> dict[str, Any]:
+def _save_slot_info(session_id: str, slot_name: str | None = None, folder_id: str | None = None) -> dict[str, Any]:
     sid = _normalize_session_id(session_id)
     runtime = _get_slot(sid).get_runtime(create_if_missing=False)
     mega_status = _load_mega_batch_status_from_disk(sid)
@@ -626,6 +756,7 @@ def _save_slot_info(session_id: str, slot_name: str | None = None) -> dict[str, 
         "step_running": step_running,
         "mega_batch_running": bool(mega_status and mega_status.get("running")),
         "mega_batch_done": bool(mega_status and mega_status.get("done")),
+        "folder_id": folder_id,
     }
 
 
@@ -2902,6 +3033,31 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
             _append_conversation("auction", bidder_name, "", display_text)
             _mark_done(_auction_bidder_turn_id(bidder_id))
             return {"auction_action": action, "used_models": True, "llm_error": None}
+        if is_mimic(bidder_alias):
+            action = mimic_bid(
+                alias=bidder_alias,
+                bidder_id=bidder_id,
+                your_budget=bidder.remaining_budget,
+                your_count=bidder.paintings_won,
+                current_bid=round_state.current_bid,
+                current_leader=round_state.current_leader,
+                active_bidders=list(round_state.active_bidders),
+                bid_history=list(round_state.bid_history or []),
+                all_budgets={bid: state.remaining_budget for bid, state in env.world["auction_bidders"].items()},
+                all_counts={bid: state.paintings_won for bid, state in env.world["auction_bidders"].items()},
+                public_bid_table=public_bid_table,
+                painting_number=painting_number,
+                total_paintings=total_paintings,
+                paintings_remaining=paintings_remaining,
+                is_last_painting=is_last_painting,
+                min_next_bid=min_next_bid,
+                start_budget=int(env.config.get("start_budget") or 10000),
+            )
+            bidder_name = _auction_display_name(bidder_id, env) or bidder_id
+            display_text = f"{bidder_name} passes." if action.action_type == "pass" else f"{bidder_name} raises to ${action.bid_amount}."
+            _append_conversation("auction", bidder_name, "", display_text)
+            _mark_done(_auction_bidder_turn_id(bidder_id))
+            return {"auction_action": action, "used_models": True, "llm_error": None}
         raw_action = await _call_llm_text_with_timeout(
             bidder_alias,
             "You are one bidder among five in a sequential open ascending painting auction. "
@@ -5008,10 +5164,15 @@ async def api_export_auction_log(session_id: str | None = Query(default=None)) -
 @app.get("/api/save_slots")
 async def api_save_slots() -> JSONResponse:
     slots = _slot_list()
+    folders = _folder_list()
     return JSONResponse(
         {
             "ok": True,
-            "slots": [_save_slot_info(item["slot_id"], item.get("name")) for item in slots],
+            "slots": [
+                _save_slot_info(item["slot_id"], item.get("name"), item.get("folder_id"))
+                for item in slots
+            ],
+            "folders": folders,
         }
     )
 
@@ -5019,7 +5180,7 @@ async def api_save_slots() -> JSONResponse:
 @app.post("/api/save_slot_create")
 async def api_save_slot_create(payload: Dict[str, Any] | None = None) -> JSONResponse:
     body = payload or {}
-    entry = _create_save_slot(body.get("name"))
+    entry = _create_save_slot(body.get("name"), body.get("folder_id"))
     return JSONResponse({"ok": True, "slot": entry})
 
 
@@ -5028,6 +5189,32 @@ async def api_save_slot_rename(payload: Dict[str, Any]) -> JSONResponse:
     slot_id = _normalize_session_id(payload.get("slot_id"))
     updated = _rename_save_slot(slot_id, payload.get("name"))
     return JSONResponse({"ok": True, "slot": updated})
+
+
+@app.post("/api/save_slot_move")
+async def api_save_slot_move(payload: Dict[str, Any]) -> JSONResponse:
+    slot_id = _normalize_session_id(payload.get("slot_id"))
+    updated = _move_save_slot(slot_id, payload.get("folder_id"))
+    return JSONResponse({"ok": True, "slot": updated})
+
+
+@app.post("/api/folder_create")
+async def api_folder_create(payload: Dict[str, Any] | None = None) -> JSONResponse:
+    body = payload or {}
+    entry = _create_folder(body.get("name"))
+    return JSONResponse({"ok": True, "folder": entry})
+
+
+@app.post("/api/folder_rename")
+async def api_folder_rename(payload: Dict[str, Any]) -> JSONResponse:
+    updated = _rename_folder(payload.get("folder_id"), payload.get("name"))
+    return JSONResponse({"ok": True, "folder": updated})
+
+
+@app.post("/api/folder_delete")
+async def api_folder_delete(payload: Dict[str, Any]) -> JSONResponse:
+    _delete_folder(payload.get("folder_id"))
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/stop_all_step_workers")

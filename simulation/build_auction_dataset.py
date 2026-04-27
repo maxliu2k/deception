@@ -471,186 +471,180 @@ def _topk(values: list[float], k: int) -> list[float]:
 
 
 def build_nn_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    bidder_set: set[str] = set()
-    leader_set: set[str] = {""}
     episode_set: set[str] = set()
     log_set: set[str] = set()
+    bidder_set: set[str] = set()
     for row in rows:
         inp = row.get("llm_input") or {}
-        bidder_id = str(row.get("bidder_id") or inp.get("your_bidder_id") or "")
-        bidder_set.add(bidder_id)
-        for key in (inp.get("all_budgets") or {}).keys():
-            bidder_set.add(str(key))
-            leader_set.add(str(key))
-        leader_set.add(str(inp.get("current_leader") or ""))
         episode_set.add(str(row.get("episode_id") or ""))
         log_set.add(str(row.get("source_log_path") or ""))
+        bidder_set.add(str(row.get("bidder_id") or inp.get("your_bidder_id") or ""))
+        for k in (inp.get("all_budgets") or {}).keys():
+            bidder_set.add(str(k))
 
-    bidder_vocab = {name: idx for idx, name in enumerate(sorted(bidder_set))}
-    leader_vocab = {name: idx for idx, name in enumerate(sorted(leader_set))}
     episode_vocab = {name: idx for idx, name in enumerate(sorted(episode_set))}
     log_vocab = {name: idx for idx, name in enumerate(sorted(log_set))}
+    bidder_vocab = {name: idx for idx, name in enumerate(sorted(bidder_set))}
 
     feature_names: list[str] = [
-        "current_bid",
-        "minimum_legal_bid",
-        "your_remaining_budget",
-        "your_paintings_won",
-        "paintings_remaining",
-        "total_paintings",
-        "is_last_painting",
-        "active_bidders_count",
-        "passed_bidders_count",
-        "bid_history_count",
-        "completed_paintings_count",
-        "own_current_bid_this_painting",
-        "own_gap_to_min_legal",
-        "last_action_is_raise",
-        "last_action_is_pass",
-        "last_bid_amount",
-        "last_bidder_is_self",
-        "budgets_mean",
-        "budgets_std",
-        "budgets_min",
-        "budgets_max",
-        "counts_mean",
-        "counts_std",
-        "counts_min",
-        "counts_max",
-        "painting_bids_mean",
-        "painting_bids_std",
-        "painting_bids_min",
-        "painting_bids_max",
-        "top_opp_budget_1",
-        "top_opp_budget_2",
-        "top_opp_budget_3",
-        "top_opp_budget_4",
+        # Game progress
+        "painting_number_frac",       # painting_idx / total_paintings
+        "paintings_remaining",        # raw count of paintings left including current
+        "is_last_painting",           # binary
+        # Round state
+        "current_bid_frac",           # current_bid / self_start_budget
+        "min_legal_bid_frac",         # minimum_legal_bid / self_start_budget
+        "active_bidders_count",       # bidders still alive this round
+        "bid_history_count",          # turns taken so far this painting
+        # Self state
+        "budget_fraction",            # your_remaining / self_start_budget
+        "budget_vs_mean_opp",         # your_remaining / mean(opp_budgets)
+        "budget_vs_min_legal",        # your_remaining / minimum_legal_bid
+        "your_paintings_won",         # raw count
+        "paintings_gap_to_leader",    # your_paintings_won - max(all_counts); <=0 if behind
+        "fair_share_budget",          # (your_remaining / paintings_remaining) / self_start
+        "own_current_bid_frac",       # own bid placed this painting / self_start_budget
+        # Last action context
+        "last_action_is_raise",       # binary: was the most recent history entry a raise
+        "last_bid_frac",              # last bid amount / self_start_budget (0 if pass/none)
+        "last_bidder_is_self",        # binary: was that last bidder this agent
+        # Opponent budget stats (all normalised by self_start_budget)
+        "opp_budget_mean_frac",
+        "opp_budget_std_frac",
+        "opp_budget_min_frac",
+        "opp_budget_max_frac",
+        # Opponent count stats
+        "opp_count_mean",
+        "opp_count_std",
+        "opp_count_max",
+        # Top-4 opponent budgets sorted descending (normalised)
+        "top_opp_budget_frac_1",
+        "top_opp_budget_frac_2",
+        "top_opp_budget_frac_3",
+        "top_opp_budget_frac_4",
+        # Top-4 opponent painting counts sorted descending
         "top_opp_count_1",
         "top_opp_count_2",
         "top_opp_count_3",
         "top_opp_count_4",
     ]
-    feature_names.extend([f"bidder_is::{name}" for name in sorted(bidder_vocab.keys())])
-    feature_names.extend([f"leader_is::{name}" for name in sorted(leader_vocab.keys())])
+
+    def _safe_div(a: float, b: float) -> float:
+        return a / b if b > 0.0 else 0.0
 
     nn_rows: list[dict[str, Any]] = []
     for row in rows:
         inp = row.get("llm_input") or {}
         target = row.get("target") or {}
         bidder_id = str(row.get("bidder_id") or inp.get("your_bidder_id") or "")
-        current_leader = str(inp.get("current_leader") or "")
+
+        # Recover per-bidder start budget from the "start" sentinel entry in budget_log.
+        budget_log_by_bidder = inp.get("budget_log_by_bidder") or {}
+        def _start_budget(bid: str) -> float:
+            for entry in (budget_log_by_bidder.get(bid) or []):
+                if entry.get("painting_id") == "start":
+                    return max(1.0, _safe_float(entry.get("remaining_budget"), 10000.0))
+            return 10000.0
+
+        self_start = _start_budget(bidder_id)
+
         all_budgets = inp.get("all_budgets") or {}
         all_counts = inp.get("all_painting_counts") or {}
         public_bid = inp.get("public_bid_table") or {}
         bid_history = list(inp.get("bid_history") or [])
-        completed = list(inp.get("completed_painting_summaries") or [])
 
-        bidder_names = sorted(set(str(k) for k in all_budgets.keys()) | {bidder_id})
-        budget_vals = [_safe_float(all_budgets.get(name, 0.0)) for name in bidder_names]
-        count_vals = [_safe_float(all_counts.get(name, 0.0)) for name in bidder_names]
-        painting_bid_vals = [
-            _safe_float((public_bid.get(name) or {}).get("current_bid_this_painting", 0.0))
-            for name in bidder_names
-        ]
-        b_mean, b_std, b_min, b_max = _stats(budget_vals)
-        c_mean, c_std, c_min, c_max = _stats(count_vals)
-        p_mean, p_std, p_min, p_max = _stats(painting_bid_vals)
+        painting_idx = int(row.get("painting_index") or inp.get("painting_number") or 1)
+        total_paintings = max(1, int(inp.get("total_paintings") or 12))
+        paintings_remaining = max(1.0, _safe_float(inp.get("paintings_remaining"), 1.0))
+        current_bid = _safe_float(inp.get("current_bid"))
+        min_legal = _safe_float(inp.get("minimum_legal_bid"))
+        your_budget = _safe_float(inp.get("your_remaining_budget"))
+        your_count = _safe_float(all_counts.get(bidder_id, 0.0))
 
         opp_budgets = sorted(
-            [_safe_float(all_budgets.get(name, 0.0)) for name in bidder_names if name != bidder_id],
+            [_safe_float(all_budgets[k]) for k in all_budgets if k != bidder_id],
             reverse=True,
         )
         opp_counts = sorted(
-            [_safe_float(all_counts.get(name, 0.0)) for name in bidder_names if name != bidder_id],
+            [_safe_float(all_counts[k]) for k in all_counts if k != bidder_id],
             reverse=True,
         )
+        opp_b_mean, opp_b_std, opp_b_min, opp_b_max = _stats(opp_budgets) if opp_budgets else (0.0, 0.0, 0.0, 0.0)
+        opp_c_mean, opp_c_std, _opp_c_min, opp_c_max = _stats(opp_counts) if opp_counts else (0.0, 0.0, 0.0, 0.0)
         top_opp_budgets = _topk(opp_budgets, 4)
         top_opp_counts = _topk(opp_counts, 4)
 
+        all_counts_vals = [_safe_float(v) for v in all_counts.values()]
+        global_count_max = max(all_counts_vals) if all_counts_vals else 0.0
+
         last_hist = bid_history[-1] if bid_history else {}
         own_current_bid = _safe_float((public_bid.get(bidder_id) or {}).get("current_bid_this_painting"))
-        min_legal = _safe_float(inp.get("minimum_legal_bid"))
-        own_gap_to_min = max(0.0, min_legal - own_current_bid)
-
-        bidder_onehot = [0.0] * len(bidder_vocab)
-        if bidder_id in bidder_vocab:
-            bidder_onehot[bidder_vocab[bidder_id]] = 1.0
-        leader_onehot = [0.0] * len(leader_vocab)
-        if current_leader in leader_vocab:
-            leader_onehot[leader_vocab[current_leader]] = 1.0
 
         x: list[float] = [
-            _safe_float(inp.get("current_bid")),
-            min_legal,
-            _safe_float(inp.get("your_remaining_budget")),
-            _safe_float((all_counts or {}).get(bidder_id, 0.0)),
-            _safe_float(inp.get("paintings_remaining")),
-            _safe_float(inp.get("total_paintings")),
+            painting_idx / total_paintings,
+            paintings_remaining,
             1.0 if bool(inp.get("is_last_painting")) else 0.0,
+            _safe_div(current_bid, self_start),
+            _safe_div(min_legal, self_start),
             float(len(inp.get("active_bidders") or [])),
-            float(len(inp.get("passed_bidders") or [])),
             float(len(bid_history)),
-            float(len(completed)),
-            own_current_bid,
-            own_gap_to_min,
+            _safe_div(your_budget, self_start),
+            _safe_div(your_budget, opp_b_mean),
+            _safe_div(your_budget, min_legal),
+            your_count,
+            your_count - global_count_max,
+            _safe_div(_safe_div(your_budget, paintings_remaining), self_start),
+            _safe_div(own_current_bid, self_start),
             1.0 if str(last_hist.get("action_type") or "") == "raise" else 0.0,
-            1.0 if str(last_hist.get("action_type") or "") == "pass" else 0.0,
-            _safe_float(last_hist.get("bid_amount", 0.0)),
+            _safe_div(_safe_float(last_hist.get("bid_amount", 0.0)), self_start),
             1.0 if str(last_hist.get("bidder_id") or "") == bidder_id else 0.0,
-            b_mean,
-            b_std,
-            b_min,
-            b_max,
-            c_mean,
-            c_std,
-            c_min,
-            c_max,
-            p_mean,
-            p_std,
-            p_min,
-            p_max,
-            *top_opp_budgets,
+            _safe_div(opp_b_mean, self_start),
+            _safe_div(opp_b_std, self_start),
+            _safe_div(opp_b_min, self_start),
+            _safe_div(opp_b_max, self_start),
+            opp_c_mean,
+            opp_c_std,
+            opp_c_max,
+            *[_safe_div(b, self_start) for b in top_opp_budgets],
             *top_opp_counts,
-            *bidder_onehot,
-            *leader_onehot,
         ]
 
         action_type = str(target.get("action_type") or "").lower()
         y_action = 1.0 if action_type == "raise" else 0.0
-        # Regression target: amount above current highest bid (0 for pass).
-        y_delta = _safe_float(target.get("raise_size_from_prev_bid"), 0.0)
-        if y_delta < 0:
-            y_delta = 0.0
+        y_delta = max(0.0, _safe_float(target.get("raise_over_min_legal"), 0.0))
+        cb_dollars = int(_safe_float(inp.get("current_bid"), 0.0))
+        step = 50 if cb_dollars < 1000 else (100 if cb_dollars < 3000 else 250)
+        y_delta_steps = round(y_delta / step) if step > 0 else 0.0
 
-        nn_rows.append(
-            {
-                "x": x,
-                "y_action": y_action,
-                "y_delta": y_delta,
-                # Backward-compatible alias retained for existing readers.
-                "y_raise_delta": y_delta,
-                "y_delta_mask": y_action,
-                # Backward-compatible alias retained for existing readers.
-                "y_raise_mask": y_action,
-                "episode_index": int(episode_vocab.get(str(row.get("episode_id") or ""), 0)),
-                "source_log_index": int(log_vocab.get(str(row.get("source_log_path") or ""), 0)),
-                "painting_index": int(row.get("painting_index") or 0),
-                "turn_number": int(row.get("turn_number") or 0),
-                "bidder_index": int(bidder_vocab.get(bidder_id, 0)),
-                "leader_index": int(leader_vocab.get(current_leader, 0)),
-            }
-        )
+        nn_rows.append({
+            "x": x,
+            "y_action": y_action,
+            "y_delta": y_delta,
+            "y_delta_steps": float(y_delta_steps),
+            "y_delta_mask": y_action,
+            "step_dollars": float(step),
+            "episode_index": int(episode_vocab.get(str(row.get("episode_id") or ""), 0)),
+            "source_log_index": int(log_vocab.get(str(row.get("source_log_path") or ""), 0)),
+            "painting_index": int(row.get("painting_index") or 0),
+            "turn_number": int(row.get("turn_number") or 0),
+            "bidder_index": int(bidder_vocab.get(bidder_id, 0)),
+        })
 
     meta = {
         "feature_names": feature_names,
         "input_dim": len(feature_names),
         "target_definition": {
             "y_action": "1 if raise, 0 if pass",
-            "y_delta": "raise amount over current highest bid (0 for pass)",
+            "y_delta": "overbid above minimum legal bid in raw dollars (0 for pass); mask with y_delta_mask",
+            "y_delta_steps": "overbid expressed as # of legal raise increments (50/100/250 by current_bid range); always integer-valued by construction",
             "y_delta_mask": "1 when y_action==1 else 0",
+            "step_dollars": "the legal raise increment ($) for this row, derived from current_bid",
         },
+        "normalization_note": (
+            "budget features are divided by self_start_budget recovered from budget_log_by_bidder start entry "
+            "(default 10000); count features are raw integers; all features are bounded"
+        ),
         "bidder_vocab": bidder_vocab,
-        "leader_vocab": leader_vocab,
         "episode_vocab": episode_vocab,
         "source_log_vocab": log_vocab,
     }
