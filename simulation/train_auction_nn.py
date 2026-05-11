@@ -87,6 +87,46 @@ def fit_scaler(X: np.ndarray, eps: float = 1e-6) -> tuple[torch.Tensor, torch.Te
 
 
 # ---------------------------------------------------------------------------
+# Calibration
+# ---------------------------------------------------------------------------
+
+def fit_temperature(
+    model: "AuctionClassifier",
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    device: torch.device,
+    *,
+    min_T: float = 0.05,
+    max_iter: int = 200,
+) -> float:
+    """Fit a single scalar T (Platt-style temperature) so sigmoid(logit/T)
+    minimises validation BCE. Standard post-hoc calibration trick — preserves
+    argmax accuracy but tightens log_loss and sampling fidelity."""
+    if X_val is None or len(X_val) == 0:
+        return 1.0
+    model.eval()
+    with torch.no_grad():
+        logits = model(torch.from_numpy(X_val).to(device)).detach()
+    targets = torch.from_numpy(y_val).to(device)
+    T = torch.nn.Parameter(torch.tensor(1.0, device=device))
+    optimizer = torch.optim.LBFGS([T], lr=0.1, max_iter=max_iter)
+    loss_fn = nn.BCEWithLogitsLoss()
+
+    def _closure():
+        optimizer.zero_grad()
+        scaled = logits / T.clamp(min=min_T)
+        loss = loss_fn(scaled, targets)
+        loss.backward()
+        return loss
+
+    try:
+        optimizer.step(_closure)
+    except Exception:
+        return 1.0
+    return float(T.detach().clamp(min=min_T).cpu().item())
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -232,13 +272,17 @@ def train_regressor(
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def _eval_clf(model: AuctionClassifier, X: np.ndarray, y: np.ndarray, device: torch.device) -> tuple[float, float]:
+def _eval_clf(model: AuctionClassifier, X: np.ndarray, y: np.ndarray, device: torch.device, *, temperature: float = 1.0) -> tuple[float, float]:
     model.eval()
     logit = model(torch.from_numpy(X).to(device)).cpu().numpy()
+    if temperature != 1.0 and temperature > 0:
+        logit = logit / float(temperature)
     proba = 1.0 / (1.0 + np.exp(-logit))
     proba = np.clip(proba, 1e-7, 1 - 1e-7)
     preds = (proba >= 0.5).astype(np.float32)
-    return float(accuracy_score(y, preds)), float(log_loss(y, proba))
+    # `labels=[0,1]` so log_loss tolerates folds where the held-out test
+    # episode contains only one class (e.g. all-PASS).
+    return float(accuracy_score(y, preds)), float(log_loss(y, proba, labels=[0.0, 1.0]))
 
 
 @torch.no_grad()
@@ -351,6 +395,14 @@ def train_one(
     X_val, y_act_val, y_steps_val, y_mask_val, _ = rows_to_arrays(val_rows)
 
     clf, _ = train_classifier(X_tr, y_act_tr, X_val, y_act_val, args, device)
+    # Post-hoc temperature scaling on val. Optional because tiny val sets
+    # (typical here: ~30 rows for Pro) produce unreliable T fits — the chi²
+    # test showed calibration *hurt* mimic-vs-LLM distributional fidelity at
+    # this data scale. Off by default; enable with --calibrate.
+    if getattr(args, "calibrate", False):
+        calibration_T = fit_temperature(clf, X_val, y_act_val, device)
+    else:
+        calibration_T = 1.0
 
     reg = None
     m_tr = y_mask_tr.astype(bool)
@@ -367,13 +419,18 @@ def train_one(
     test_metrics: dict[str, float] = {}
     if test_rows:
         X_te, y_act_te, y_steps_te, y_mask_te, _ = rows_to_arrays(test_rows)
-        acc, ll = _eval_clf(clf, X_te, y_act_te, device)
+        acc, ll_raw = _eval_clf(clf, X_te, y_act_te, device, temperature=1.0)
+        _,   ll_cal = _eval_clf(clf, X_te, y_act_te, device, temperature=calibration_T)
         test_metrics["test_acc"] = acc
-        test_metrics["test_log_loss"] = ll
+        test_metrics["test_log_loss"] = ll_raw
+        test_metrics["test_log_loss_calibrated"] = ll_cal
         m_te = y_mask_te.astype(bool)
         if reg is not None and m_te.sum() >= 1:
             test_metrics["test_mae_steps"] = _eval_reg(reg, X_te[m_te], y_steps_te[m_te], device)
-        msg = f"  Test (ep {test_ep})  acc={test_metrics['test_acc']:.3f}  log_loss={test_metrics['test_log_loss']:.4f}"
+        msg = (
+            f"  Test (ep {test_ep})  acc={acc:.3f}  log_loss={ll_raw:.4f}->{ll_cal:.4f}  "
+            f"T={calibration_T:.3f}"
+        )
         if "test_mae_steps" in test_metrics:
             msg += f"  mae[steps]={test_metrics['test_mae_steps']:.3f}"
         print(msg)
@@ -387,8 +444,9 @@ def train_one(
         "hidden": args.hidden,
         "dropout": args.dropout,
         "bidder_name": bidder_name,
+        "calibration_temperature": calibration_T,
     }, clf_path)
-    print(f"  Saved clf -> {clf_path.name}")
+    print(f"  Saved clf -> {clf_path.name}  (calibration T={calibration_T:.3f})")
 
     if reg is not None:
         reg_path = out_dir / f"auction_reg_v6_{safe}.pt"
@@ -474,6 +532,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--calibrate", action="store_true",
+                   help="Fit post-hoc Platt-style temperature scaling on val. Off by default.")
     p.add_argument("--huber-delta", type=float, default=1.0,
                    help="Huber transition; target unit is # of legal increments.")
     p.add_argument("--seed", type=int, default=42)

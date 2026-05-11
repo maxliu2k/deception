@@ -750,3 +750,110 @@ def open_auction_policy_dynamic(
     if min_next_bid <= bidder.remaining_budget:
         return OpenAuctionAction(action_type="raise", bid_amount=int(min_next_bid), message_text=f"Dynamic fallback: bidding ${int(min_next_bid)}.")
     return OpenAuctionAction(action_type="pass", message_text="Dynamic fallback: pass.")
+
+
+# ---------------------------------------------------------------------------
+# Tiered math models for the auction-vs-NN experiment.
+#
+# Each tier is strictly more sophisticated than the previous, so the
+# complexity gradient is monotonic. Existing policies above (balanced,
+# catchup, dynamic, etc.) are NOT used here — these tiered functions are
+# canonical, single-strategy implementations to make the experiment legible.
+# ---------------------------------------------------------------------------
+
+
+def open_auction_policy_tier1_trivial(
+    bidder: OpenAuctionBidderState,
+    round_state: OpenAuctionRoundState,
+    *,
+    min_next_bid: int,
+) -> OpenAuctionAction:
+    """Tier 1 — Trivial baseline.
+
+    Always bids the minimum legal amount until budget is exhausted; passes
+    otherwise. Zero opponent reasoning, zero budget pacing, zero state.
+    Establishes the floor: the "doing literally anything" benchmark.
+    """
+    del round_state
+    if min_next_bid <= int(bidder.remaining_budget):
+        return OpenAuctionAction(
+            action_type="raise",
+            bid_amount=int(min_next_bid),
+            message_text=f"Tier1 trivial: min-bid ${int(min_next_bid)}.",
+        )
+    return OpenAuctionAction(action_type="pass", message_text="Tier1 trivial: out of budget, passing.")
+
+
+def open_auction_policy_tier2_fair_share(
+    bidder: OpenAuctionBidderState,
+    round_state: OpenAuctionRoundState,
+    *,
+    paintings_remaining: int,
+    min_next_bid: int,
+) -> OpenAuctionAction:
+    """Tier 2 — Fair-share budgeter (with mild headroom).
+
+    Spreads budget evenly across remaining paintings, then allows a small 5%
+    headroom over the strict fair share so a bidder won't pass on a painting
+    that costs only marginally more than its even-allocation cap.
+    Bid up to ``1.05 * your_remaining_budget / paintings_remaining``; pass
+    above that threshold. No opponent info, no catch-up, no phase awareness.
+    """
+    del round_state
+    fair_share = float(bidder.remaining_budget) / max(1, int(paintings_remaining))
+    cap = int(fair_share * 1.05)
+    if min_next_bid > int(bidder.remaining_budget) or min_next_bid > cap:
+        return OpenAuctionAction(
+            action_type="pass",
+            message_text=f"Tier2 fair-share: cap=${cap}, min_next=${int(min_next_bid)}, passing.",
+        )
+    return OpenAuctionAction(
+        action_type="raise",
+        bid_amount=int(min_next_bid),
+        message_text=f"Tier2 fair-share: bidding ${int(min_next_bid)} (cap=${cap}).",
+    )
+
+
+def open_auction_policy_tier3_reactive(
+    bidder: OpenAuctionBidderState,
+    round_state: OpenAuctionRoundState,
+    *,
+    paintings_remaining: int,
+    min_next_bid: int,
+    painting_counts: Dict[str, int],
+) -> OpenAuctionAction:
+    """Tier 3 — Reactive heuristic.
+
+    Fair-share base, scaled by two reactive factors using the public
+    scoreboard (painting counts only — no opponent budget tracking):
+
+      - Catch-up factor: +18% headroom per painting deficit vs the leader.
+      - Endgame factor: +75% headroom in the final 3 paintings, +15% in 4-6.
+
+    No per-opponent modeling, no opponent budget reasoning, no lookahead.
+    """
+    del round_state
+    fair_share = float(bidder.remaining_budget) / max(1, int(paintings_remaining))
+
+    leader_count = max(painting_counts.values()) if painting_counts else 0
+    deficit = max(0, int(leader_count) - int(bidder.paintings_won))
+    catchup_factor = 1.0 + 0.18 * deficit
+
+    if int(paintings_remaining) <= 3:
+        endgame_factor = 1.75
+    elif int(paintings_remaining) <= 6:
+        endgame_factor = 1.15
+    else:
+        endgame_factor = 1.0
+
+    cap = int(fair_share * catchup_factor * endgame_factor)
+    if min_next_bid > int(bidder.remaining_budget) or min_next_bid > cap:
+        return OpenAuctionAction(
+            action_type="pass",
+            message_text=f"Tier3 reactive: cap=${cap} (deficit={deficit}, paintings_remaining={int(paintings_remaining)}), passing.",
+        )
+    return OpenAuctionAction(
+        action_type="raise",
+        bid_amount=int(min_next_bid),
+        message_text=f"Tier3 reactive: bidding ${int(min_next_bid)} (cap=${cap}).",
+    )

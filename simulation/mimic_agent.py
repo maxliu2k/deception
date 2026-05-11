@@ -9,6 +9,8 @@ Models are loaded lazily and cached for the lifetime of the process.
 """
 from __future__ import annotations
 
+import os
+import random as _stdlib_random
 import re
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,23 @@ import torch
 import torch.nn as nn
 
 from .state import OpenAuctionAction
+
+
+def _temperature() -> float:
+    """Global stochasticity knob, read from MIMIC_TEMPERATURE env var.
+
+    0    → deterministic argmax (committed default).
+    >0   → sample from sharpened Bernoulli on the classifier probability,
+           and add Gaussian noise to the regressor's step count.
+
+    Default 0.3 reproduces the mimic-auction behaviour that the original
+    chi-squared test (p=0.146) was measured against — slight sampling that
+    breaks ties between two confident mimics without making them erratic.
+    """
+    try:
+        return max(0.0, float(os.environ.get("MIMIC_TEMPERATURE", "0.3")))
+    except Exception:
+        return 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -302,11 +321,22 @@ def mimic_bid(
         start_budget=start_budget,
     )
     X = torch.from_numpy(np.array([x], dtype=np.float32))
+    T = _temperature()
 
     with torch.no_grad():
         logit = clf(X).item()
     raise_prob = 1.0 / (1.0 + float(np.exp(-logit)))
-    action_pred = 1 if raise_prob >= 0.5 else 0
+
+    if T > 0:
+        # Temperature-sharpened Bernoulli sample. Lower T → closer to argmax;
+        # T=1 samples raw probability. Prevents deterministic ties between two
+        # equally confident mimics that would otherwise fight to budget exhaustion.
+        sharp = raise_prob ** (1.0 / T)
+        sharp_neg = (1.0 - raise_prob) ** (1.0 / T)
+        sampled_p = sharp / max(1e-9, sharp + sharp_neg)
+        action_pred = 1 if _stdlib_random.random() < sampled_p else 0
+    else:
+        action_pred = 1 if raise_prob >= 0.5 else 0
 
     if action_pred == 0:
         return OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS")
@@ -317,6 +347,8 @@ def mimic_bid(
     if reg is not None:
         with torch.no_grad():
             raw = float(reg(X).item())
+        if T > 0:
+            raw += _stdlib_random.gauss(0.0, 0.7 * T)
         extra_steps = max(0, int(round(raw)))
 
     bid_amount = min_next_bid + extra_steps * step
