@@ -52,6 +52,9 @@ from .policies import (
     open_auction_policy_conservative,
     open_auction_policy_dynamic,
     open_auction_policy_endgame,
+    open_auction_policy_tier1_trivial,
+    open_auction_policy_tier2_fair_share,
+    open_auction_policy_tier3_reactive,
     negotiation_policy_buyer_constrained_expected_utility,
     customer_policy_skeptical_memory,
     customer_policy_trusting,
@@ -409,23 +412,22 @@ def _rename_folder(folder_id: str | None, name: str | None) -> dict[str, Any]:
     raise HTTPException(status_code=400, detail="Unknown folder.")
 
 
-def _delete_folder(folder_id: str | None) -> None:
+def _slots_in_folder(folder_id: str) -> list[str]:
     fid = str(folder_id or "").strip()
-    if not fid:
-        raise HTTPException(status_code=400, detail="folder_id required.")
+    return [
+        str(item.get("slot_id"))
+        for item in _slot_list()
+        if str(item.get("folder_id") or "") == fid and item.get("slot_id")
+    ]
+
+
+def _drop_folder_entry(folder_id: str) -> None:
+    """Remove the folder entry from the catalog. Caller is responsible for
+    deleting any slots that lived inside it first (or moving them out)."""
+    fid = str(folder_id or "").strip()
     catalog = _load_slot_catalog()
-    folders = list(catalog.get("folders") or [])
-    if not any(item.get("folder_id") == fid for item in folders):
-        raise HTTPException(status_code=400, detail="Unknown folder.")
-    # Move any slots in this folder back to root, then drop the folder.
-    slots = list(catalog.get("slots") or [])
-    for idx, item in enumerate(slots):
-        if item.get("folder_id") == fid:
-            updated = dict(item)
-            updated["folder_id"] = None
-            slots[idx] = updated
-    catalog["slots"] = slots
-    catalog["folders"] = [item for item in folders if item.get("folder_id") != fid]
+    folders = [item for item in (catalog.get("folders") or []) if item.get("folder_id") != fid]
+    catalog["folders"] = folders
     _save_slot_catalog(catalog)
 
 
@@ -3033,6 +3035,34 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
             _append_conversation("auction", bidder_name, "", display_text)
             _mark_done(_auction_bidder_turn_id(bidder_id))
             return {"auction_action": action, "used_models": True, "llm_error": None}
+        if bidder_alias in {"Math-T1", "Math-T2", "Math-T3"}:
+            if bidder_alias == "Math-T1":
+                action = open_auction_policy_tier1_trivial(
+                    bidder,
+                    round_state,
+                    min_next_bid=min_next_bid,
+                )
+            elif bidder_alias == "Math-T2":
+                action = open_auction_policy_tier2_fair_share(
+                    bidder,
+                    round_state,
+                    paintings_remaining=paintings_remaining,
+                    min_next_bid=min_next_bid,
+                )
+            else:  # Math-T3
+                counts = {bid: state.paintings_won for bid, state in env.world["auction_bidders"].items()}
+                action = open_auction_policy_tier3_reactive(
+                    bidder,
+                    round_state,
+                    paintings_remaining=paintings_remaining,
+                    min_next_bid=min_next_bid,
+                    painting_counts=counts,
+                )
+            bidder_name = _auction_display_name(bidder_id, env) or bidder_id
+            display_text = f"{bidder_name} passes." if action.action_type == "pass" else f"{bidder_name} raises to ${action.bid_amount}."
+            _append_conversation("auction", bidder_name, "", display_text)
+            _mark_done(_auction_bidder_turn_id(bidder_id))
+            return {"auction_action": action, "used_models": True, "llm_error": None}
         if is_mimic(bidder_alias):
             action = mimic_bid(
                 alias=bidder_alias,
@@ -5213,8 +5243,18 @@ async def api_folder_rename(payload: Dict[str, Any]) -> JSONResponse:
 
 @app.post("/api/folder_delete")
 async def api_folder_delete(payload: Dict[str, Any]) -> JSONResponse:
-    _delete_folder(payload.get("folder_id"))
-    return JSONResponse({"ok": True})
+    fid = str(payload.get("folder_id") or "").strip()
+    if not fid:
+        raise HTTPException(status_code=400, detail="folder_id required.")
+    if fid not in _all_folder_ids():
+        raise HTTPException(status_code=400, detail="Unknown folder.")
+    slot_ids = _slots_in_folder(fid)
+    deleted_slots: list[dict[str, Any]] = []
+    for sid in slot_ids:
+        terminated = _full_delete_slot(sid)
+        deleted_slots.append({"slot_id": sid, "terminated": terminated})
+    _drop_folder_entry(fid)
+    return JSONResponse({"ok": True, "folder_id": fid, "deleted_slots": deleted_slots})
 
 
 @app.post("/api/stop_all_step_workers")
@@ -5252,10 +5292,12 @@ async def api_stop_all_step_workers() -> JSONResponse:
 
 
 @app.post("/api/save_slot_delete")
-async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
-    slot_id = _normalize_session_id(payload.get("slot_id"))
+def _full_delete_slot(slot_id: str) -> list[str]:
+    """Stop any running workers for the slot, clear its runtime, and remove
+    it from the catalog. Returns the list of worker types that were terminated.
+    Raises HTTPException 409 if a worker can't be stopped."""
     if slot_id not in _all_save_slot_ids():
-        raise HTTPException(status_code=400, detail="Unknown save slot.")
+        raise HTTPException(status_code=400, detail=f"Unknown save slot: {slot_id}")
     status = _load_mega_batch_status_from_disk(slot_id)
     terminated: list[str] = []
     if status and status.get("running"):
@@ -5263,7 +5305,7 @@ async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
             terminated.append("mega_batch")
         status = _load_mega_batch_status_from_disk(slot_id)
         if status and status.get("running"):
-            raise HTTPException(status_code=409, detail="Could not stop the mega-batch worker for this save slot.")
+            raise HTTPException(status_code=409, detail=f"Could not stop the mega-batch worker for slot {slot_id}.")
     slot = _get_slot(slot_id)
     runtime = slot.get_runtime(create_if_missing=False)
     if runtime and runtime.step_status.get("running"):
@@ -5271,15 +5313,21 @@ async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
             terminated.append("step")
         runtime.step_status = _mark_status_stopped(runtime.step_status, "Step worker stopped because the save slot was deleted.")
         if runtime.step_status.get("running"):
-            raise HTTPException(status_code=409, detail="Could not stop the step worker for this save slot.")
+            raise HTTPException(status_code=409, detail=f"Could not stop the step worker for slot {slot_id}.")
     if runtime and runtime.batch_status.get("running"):
         if _stop_pid_and_wait(runtime.batch_status.get("pid")):
             terminated.append("batch")
         runtime.batch_status = _mark_status_stopped(runtime.batch_status, "Batch worker stopped because the save slot was deleted.")
         if runtime.batch_status.get("running"):
-            raise HTTPException(status_code=409, detail="Could not stop the batch worker for this save slot.")
+            raise HTTPException(status_code=409, detail=f"Could not stop the batch worker for slot {slot_id}.")
     _delete_save_slot(slot_id)
     _remove_slot_from_catalog(slot_id)
+    return terminated
+
+
+async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
+    slot_id = _normalize_session_id(payload.get("slot_id"))
+    terminated = _full_delete_slot(slot_id)
     return JSONResponse({"ok": True, "slot_id": slot_id, "deleted": True, "terminated": terminated})
 
 

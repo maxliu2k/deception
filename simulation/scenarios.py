@@ -20,7 +20,13 @@ from .state import (
 )
 
 
-MODEL_POOL = ["GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Dynamic", "Truthful", "Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"]
+MODEL_POOL = [
+    "GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM",
+    "Mathematical", "Dynamic", "Truthful",
+    "Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama",
+    "Legacy-Grok", "Legacy-Opus", "Legacy-GPT-5.4", "Legacy-Pro", "Legacy-Llama",
+    "Math-T1", "Math-T2", "Math-T3",
+]
 
 
 def _agent_template(selected_models: List[str], *, resort_1_commission: float, resort_2_commission: float) -> AgentState:
