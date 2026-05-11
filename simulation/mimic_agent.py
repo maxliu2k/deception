@@ -34,9 +34,9 @@ def _temperature() -> float:
     breaks ties between two confident mimics without making them erratic.
     """
     try:
-        return max(0.0, float(os.environ.get("MIMIC_TEMPERATURE", "0.3")))
+        return max(0.0, float(os.environ.get("MIMIC_TEMPERATURE", "1.0")))
     except Exception:
-        return 0.3
+        return 1.0
 
 
 # ---------------------------------------------------------------------------
