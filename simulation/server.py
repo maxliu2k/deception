@@ -5676,6 +5676,127 @@ async def api_export_auction_thinking(session_id: str | None = Query(default=Non
         SESSION_ID_CTX.reset(token)
 
 
+@app.get("/api/t5_training_metrics")
+async def api_t5_training_metrics() -> JSONResponse:
+    """Return up to the 5 most recent T5 PPO training runs, newest first.
+
+    Reads per-run JSONL files from models/rl/runs/. Older runs are returned
+    in full; the frontend truncates them to the length of the newest run.
+    Legacy single-file `t5_training_metrics.jsonl` is included as a fallback
+    run if it exists and no per-run files are present.
+    """
+    rl_dir = Path(__file__).parent / "models" / "rl"
+    runs_dir = rl_dir / "runs"
+    runs: list[dict[str, Any]] = []
+
+    def _parse(path: Path) -> list[dict]:
+        rows: list[dict] = []
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        return rows
+
+    if runs_dir.is_dir():
+        files = sorted(
+            (p for p in runs_dir.iterdir() if p.is_file() and p.suffix == ".jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:5]
+        for p in files:
+            rows = _parse(p)
+            if not rows:
+                continue
+            runs.append({
+                "id": p.stem,
+                "started_at": float(p.stat().st_mtime),
+                "metrics": rows,
+            })
+    if not runs:
+        legacy = rl_dir / "t5_training_metrics.jsonl"
+        if legacy.exists():
+            rows = _parse(legacy)
+            if rows:
+                runs.append({
+                    "id": "legacy",
+                    "started_at": float(legacy.stat().st_mtime),
+                    "metrics": rows,
+                })
+    return JSONResponse({"runs": runs})
+
+
+@app.get("/api/t5_training_status")
+async def api_t5_training_status() -> JSONResponse:
+    """Return all T5 PPO training statuses, newest-updated first.
+
+    The UI shows one progress bar per status file so multiple parallel runs
+    can be tracked side-by-side. Each entry has `running`/`alive` derived from
+    the recorded PID and `finished` flag.
+
+    Backward compat: if `t5_training_status.json` (singular, no run-id) exists
+    from an older training run it's included too. The latest entry is also
+    exposed at the top level as `status` so old single-bar code paths still
+    show *something*.
+    """
+    rl_dir = Path(__file__).parent / "models" / "rl"
+    rows: list[dict[str, Any]] = []
+    # Auto-prune: status files whose PID is dead AND not marked finished AND
+    # whose last update was over STALE_PRUNE_SECONDS ago are zombies (killed
+    # processes / crashed runs) — delete them so they don't linger as
+    # "stalled" bars forever.
+    STALE_PRUNE_SECONDS = 600  # 10 min
+    now = time.time()
+    if rl_dir.is_dir():
+        per_run = sorted(
+            (p for p in rl_dir.iterdir()
+             if p.is_file() and p.name.startswith("t5_training_status_") and p.suffix == ".json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        legacy = rl_dir / "t5_training_status.json"
+        paths = list(per_run)
+        if legacy.exists() and not paths:
+            paths.append(legacy)
+        for p in paths:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            pid = data.get("pid")
+            finished = bool(data.get("finished"))
+            updated_at = float(data.get("updated_at") or 0.0)
+            alive = bool(pid) and _pid_is_running(int(pid))
+            running = (not finished) and alive
+            # Prune zombies (dead pid + unfinished + old).
+            if not alive and not finished and (now - updated_at) > STALE_PRUNE_SECONDS:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                continue
+            rows.append({
+                "run_id": data.get("run_id"),
+                "running": running,
+                "alive": alive,
+                "status": data,
+            })
+    top = rows[0] if rows else None
+    return JSONResponse({
+        "runs": rows,
+        "running": bool(top and top.get("running")),
+        "alive": bool(top and top.get("alive")),
+        "status": top["status"] if top else None,
+    })
+
+
 @app.get("/api/save_slots")
 async def api_save_slots() -> JSONResponse:
     slots = _slot_list()
@@ -5867,7 +5988,6 @@ async def api_stop_all_step_workers() -> JSONResponse:
     )
 
 
-@app.post("/api/save_slot_delete")
 def _full_delete_slot(slot_id: str) -> list[str]:
     """Stop any running workers for the slot, clear its runtime, and remove
     it from the catalog. Returns the list of worker types that were terminated.
@@ -5901,6 +6021,7 @@ def _full_delete_slot(slot_id: str) -> list[str]:
     return terminated
 
 
+@app.post("/api/save_slot_delete")
 async def api_save_slot_delete(payload: Dict[str, Any]) -> JSONResponse:
     slot_id = _normalize_session_id(payload.get("slot_id"))
     terminated = _full_delete_slot(slot_id)

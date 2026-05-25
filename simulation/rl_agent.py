@@ -26,7 +26,7 @@ MODELS_DIR = Path(__file__).parent / "models" / "rl"
 DEFAULT_CKPT = MODELS_DIR / "t5_ppo.pt"
 
 OBS_DIM = 32
-N_ACTIONS = 2  # 0 = PASS, 1 = RAISE-min
+N_ACTIONS = 3  # 0 = PASS, 1 = RAISE-min, 2 = JUMP (richest_opp+1, snapped to legal step)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +71,44 @@ class ValueNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = (x - self.input_mean) / self.input_std
         return self.net(x).squeeze(-1)
+
+
+class HybridPolicyNet(nn.Module):
+    """Hybrid PASS/RAISE-with-continuous-bid policy.
+
+    Outputs:
+      - 2 discrete logits over {PASS, RAISE}
+      - Gaussian (mean, log_std) for bid_fraction ∈ [0, 1]
+        where the actual bid_amount = min_next_bid + bid_fraction * (your_budget - min_next_bid)
+
+    Sampling: discrete first; if RAISE, sample bid_fraction from N(mean, exp(log_std))
+    clamped to [0, 1]. Total log_prob = log P(discrete) + (log P(bid_frac) if RAISE else 0).
+    """
+
+    def __init__(self, obs_dim: int = OBS_DIM, hidden: int = 64):
+        super().__init__()
+        self.register_buffer("input_mean", torch.zeros(obs_dim))
+        self.register_buffer("input_std", torch.ones(obs_dim))
+        self.trunk = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+        )
+        self.discrete_head = nn.Linear(hidden, 2)
+        self.bid_mean_head = nn.Linear(hidden, 1)
+        # State-independent log_std initialized to log(0.3) ≈ -1.2 so initial
+        # exploration spans a meaningful range of bid fractions.
+        self.bid_log_std = nn.Parameter(torch.full((1,), -1.2))
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns (discrete_logits[B,2], bid_mean[B] in (0,1), bid_log_std[B])."""
+        x = (x - self.input_mean) / self.input_std
+        h = self.trunk(x)
+        d_logits = self.discrete_head(h)
+        bid_mean = torch.sigmoid(self.bid_mean_head(h)).squeeze(-1)  # squeeze last dim
+        bid_log_std = self.bid_log_std.expand(d_logits.size(0))
+        return d_logits, bid_mean, bid_log_std
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +199,24 @@ def rl_bid(
 
     if action_idx == 0 or int(min_next_bid) > int(your_budget):
         return OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS")
+    if action_idx == 2:
+        # JUMP: bid just above the richest opponent's budget so they can't
+        # legally counter. Only fires when we can outbid WITHOUT going all-in
+        # — otherwise it'd degenerate into a "spend everything early" trap.
+        opps = {bid: b for bid, b in all_budgets.items() if bid != bidder_id}
+        richest_opp = max(opps.values(), default=0)
+        cb = int(current_bid)
+        step = 50 if cb < 1000 else (100 if cb < 3000 else 250)
+        target = max(int(min_next_bid), int(richest_opp) + 1)
+        snapped = ((target + step - 1) // step) * step
+        if snapped <= int(your_budget) and snapped >= int(min_next_bid):
+            return OpenAuctionAction(
+                action_type="raise",
+                bid_amount=int(snapped),
+                message_text=f"JUMP {snapped}",
+            )
+        return OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS")
+    # action_idx == 1 → RAISE-min
     return OpenAuctionAction(
         action_type="raise",
         bid_amount=int(min_next_bid),
