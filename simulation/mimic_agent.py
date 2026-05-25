@@ -87,7 +87,7 @@ class _Regressor(nn.Module):
 # Model paths / cache
 # ---------------------------------------------------------------------------
 
-_MODELS_DIR = Path(__file__).parent / "models" / "v6"
+_MODELS_DIR = Path(__file__).parent / "models" / "v7"
 
 _MIMIC_NAMES = {"Grok", "Opus", "GPT-5.4", "Pro", "Llama"}
 

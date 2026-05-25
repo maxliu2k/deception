@@ -857,3 +857,61 @@ def open_auction_policy_tier3_reactive(
         bid_amount=int(min_next_bid),
         message_text=f"Tier3 reactive: bidding ${int(min_next_bid)} (cap=${cap}).",
     )
+
+
+def open_auction_policy_tier4_market_clearing(
+    bidder: OpenAuctionBidderState,
+    round_state: OpenAuctionRoundState,
+    *,
+    paintings_remaining: int,
+    min_next_bid: int,
+    painting_counts: Dict[str, int],
+    all_budgets: Dict[str, int],
+) -> OpenAuctionAction:
+    """Tier 4 — Market-clearing competitive pacing.
+
+    Adds opponent-budget visibility on top of T3. The cap is the competitive-
+    equilibrium price: sum of all live (solvent) bidders' remaining budgets
+    divided by paintings remaining. This is the price each painting would
+    clear at if everyone allocated their remaining budget proportionally
+    across remaining paintings.
+
+    Mathematically T4_cap >= T3_cap whenever opponents have any solvent
+    budget — so T4 is uniformly at least as aggressive as T3, and more so
+    when opponents are flush. When opponents go broke (drop out of the
+    solvent set) the cap correctly stretches further.
+
+    Still bids the minimum legal raise; T4 is "smarter pacing," not "variable
+    bid amounts." Same catchup and endgame multipliers as T3.
+    """
+    del round_state
+    active_money = float(sum(b for b in all_budgets.values() if b >= int(min_next_bid)))
+    if active_money <= 0.0:
+        active_money = float(bidder.remaining_budget)
+    market_price = active_money / max(1, int(paintings_remaining))
+
+    leader_count = max(painting_counts.values()) if painting_counts else 0
+    deficit = max(0, int(leader_count) - int(bidder.paintings_won))
+    catchup_factor = 1.0 + 0.18 * deficit
+
+    if int(paintings_remaining) <= 3:
+        endgame_factor = 1.75
+    elif int(paintings_remaining) <= 6:
+        endgame_factor = 1.15
+    else:
+        endgame_factor = 1.0
+
+    cap = int(market_price * catchup_factor * endgame_factor)
+    if min_next_bid > int(bidder.remaining_budget) or min_next_bid > cap:
+        return OpenAuctionAction(
+            action_type="pass",
+            message_text=(
+                f"Tier4 market: market_price=${int(market_price)} cap=${cap} "
+                f"(deficit={deficit}, paintings_remaining={int(paintings_remaining)}), passing."
+            ),
+        )
+    return OpenAuctionAction(
+        action_type="raise",
+        bid_amount=int(min_next_bid),
+        message_text=f"Tier4 market: bidding ${int(min_next_bid)} (cap=${cap}, market_price=${int(market_price)}).",
+    )

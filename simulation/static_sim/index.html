@@ -120,6 +120,14 @@
       .folder-card:hover { border-color: #9a3412; box-shadow: 0 3px 10px rgba(0,0,0,.07); }
       .folder-card .folder-icon { font-size: 28px; margin-bottom: 4px; }
       .folder-card-back { background: #f5f4f0; }
+      .folder-dist { margin: 6px 0 10px; display: flex; flex-direction: column; gap: 3px; }
+      .folder-dist-head { color: #57534e; font-size: 11px; margin-bottom: 4px; }
+      .folder-dist-row { display: grid; grid-template-columns: 96px 1fr auto; align-items: center; gap: 6px; font-size: 11px; }
+      .folder-dist-label { color: #1c1917; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .folder-dist-bar { background: #f5f4f0; border-radius: 3px; height: 8px; overflow: hidden; }
+      .folder-dist-fill { height: 100%; border-radius: 3px; }
+      .folder-dist-val { color: #57534e; font-variant-numeric: tabular-nums; }
+      .folder-dist-empty { color: #a8a29e; font-size: 11px; margin: 4px 0 8px; font-style: italic; }
       .breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #78716c; margin-bottom: 12px; }
       .breadcrumb a { color: #9a3412; cursor: pointer; text-decoration: none; }
       .breadcrumb a:hover { text-decoration: underline; }
@@ -365,6 +373,7 @@
               <button id="exportAuctionCsvBtn" class="ghost" type="button">CSV</button>
               <button id="exportAuctionXlsxBtn" class="ghost" type="button">XLSX</button>
               <button id="exportAuctionLogBtn" class="ghost" type="button">Bid Log</button>
+              <button id="exportAuctionThinkingBtn" class="ghost" type="button">Thinking</button>
             </div>
           </div>
           <div id="auctionResult"></div>
@@ -399,13 +408,12 @@
     </div>
 
     <script>
-      const MODEL_POOL = ["GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Dynamic", "Truthful", "Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama", "Legacy-Grok", "Legacy-Opus", "Legacy-GPT-5.4", "Legacy-Pro", "Legacy-Llama", "Math-T1", "Math-T2", "Math-T3"];
+      const MODEL_POOL = ["GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama", "Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T5"];
 
       const PRESETS = {
         "open_painting_auction": [
           { label: "LLM Loadout",   models: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"] },
           { label: "Mimic Loadout", models: ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"] },
-          { label: "Legacy Loadout", models: ["Legacy-Grok", "Legacy-Opus", "Legacy-GPT-5.4", "Legacy-Pro", "Legacy-Llama"] },
         ],
       };
       const DEFAULT_PICK = ["GPT-5.4", "GPT-5.4", "GPT-5.4"];
@@ -629,7 +637,7 @@
           if (mode === "buyer_seller_negotiation" && roleId === "resort") {
             row.classList.add("hidden");
           }
-          const options = MODEL_POOL.map((m) => `<option value="${m}" ${m === def ? "selected" : ""}>${m}</option>`).join("");
+          const options = MODEL_POOL.map((m) => `<option value="${m}" ${m === def ? "selected" : ""}>${modelDisplayName(m)}</option>`).join("");
           row.innerHTML = `<div class="label">${label}</div><select id="model-${roleId}" class="field">${options}</select>`;
           box.appendChild(row);
         }
@@ -742,6 +750,7 @@
       const SAVE_SLOT_STORAGE_KEY = "simulation_save_slot_id";
       let cachedSaveSlots = [];
       let cachedFolders = [];
+      let cachedFolderDistributions = {};
       let currentFolderId = null;  // null = root
 
       function simulationSessionId() {
@@ -888,6 +897,94 @@
         }
       }
 
+      const MODEL_DISPLAY_NAMES = {
+        "GPT-5.4": "GPT-5.4",
+        "5.4": "GPT-5.4",
+        "GPT-4o": "GPT-4o",
+        "4o": "GPT-4o",
+        "Pro": "Gemini 3.1 Pro",
+        "Opus": "Claude Opus 4.6",
+        "Sonnet": "Claude Sonnet 4.6",
+        "Haiku": "Claude Haiku 4.5",
+        "Grok": "Grok 4.3",
+        "Llama": "Llama 4 Maverick",
+        "Flash": "Gemini 3.0 Flash",
+        "DeepSeek": "DeepSeek V3.2",
+        "Kimi": "Kimi K2.5",
+        "GLM": "GLM-5",
+      };
+
+      function modelDisplayName(alias) {
+        if (!alias) return alias;
+        const s = String(alias);
+        // Mimics keep their short alias to avoid bloating chart legends and
+        // tables with "Mimic-Claude Opus 4.6" etc. Only base LLMs get expanded.
+        if (s.startsWith("Mimic-")) {
+          return s;
+        }
+        return MODEL_DISPLAY_NAMES[s] || s;
+      }
+
+      function normalizeBidderKey(bidderId) {
+        return String(bidderId || "").trim().toLowerCase();
+      }
+      function bidderColor(bidderId) {
+        const key = normalizeBidderKey(bidderId);
+        if (key === "math-t1") return "#ef4444";
+        if (key === "math-t2") return "#fde047";
+        if (key === "math-t3") return "#22c55e";
+        if (key === "math-t4") return "#06b6d4";
+        if (key === "math-t5") return "#a855f7";
+        if (key === "mimic-pro") return "#4285f4";
+        if (key === "mimic-gpt-5.4" || key === "mimic-5.4") return "#d1d5db";
+        if (key === "mimic-grok") return "#4b5563";
+        if (key === "mimic-llama") return "#ec4899";
+        if (key === "mimic-opus") return "#fbbf24";
+        if (key === "5.4" || key === "gpt-5.4" || key === "gpt 5.4") return "#9ca3af";
+        if (key === "opus" || key.includes("opus")) return "#f97316";
+        if (key === "pro" || (key.includes("gemini") && key.includes("pro"))) return "#1e3a8a";
+        if (key === "grok" || key.includes("grok")) return "#000000";
+        if (key === "deepseek" || key.includes("deepseek")) return "#bacbe6";
+        if (key === "llama" || key.includes("llama")) return "#db2777";
+        const fallbackPalette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2", "#be185d", "#4f46e5"];
+        let hash = 0;
+        for (let i = 0; i < key.length; i += 1) hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+        return fallbackPalette[Math.abs(hash) % fallbackPalette.length];
+      }
+
+      function escapeHtml(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+      }
+
+      function folderDistributionHtml(dist) {
+        if (!dist || !dist.bidders || !dist.bidders.length || !dist.total_paintings) {
+          return `<div class="folder-dist-empty">No completed auctions yet.</div>`;
+        }
+        const total = dist.total_paintings;
+        const ppa = dist.paintings_per_auction || 12;
+        const rows = dist.bidders.map((b) => {
+          const share = b.share || 0;
+          const pct = (share * 100).toFixed(1);
+          const winRate = (b.win_rate || 0) * 100;
+          const color = bidderColor(b.bidder);
+          const widthPct = Math.max(2, share * 100);
+          const displayLabel = modelDisplayName(b.bidder);
+          return `
+            <div class="folder-dist-row">
+              <div class="folder-dist-label" title="${escapeHtml(displayLabel)}">${escapeHtml(displayLabel)}</div>
+              <div class="folder-dist-bar"><div class="folder-dist-fill" style="width:${widthPct}%;background:${color}"></div></div>
+              <div class="folder-dist-val">${b.won} (${pct}%)</div>
+            </div>`;
+        }).join("");
+        return `
+          <div class="folder-dist">
+            <div class="folder-dist-head">${dist.completed_slots}/${dist.total_slots} auctions · ${total} paintings · ${ppa}/auction</div>
+            ${rows}
+          </div>`;
+      }
+
       function slotSummaryText(slot) {
         if (!slot || !slot.filled) return "Empty slot. Open it to configure or reset a new simulation.";
         const parts = [];
@@ -936,6 +1033,10 @@
           <div style="display:flex;flex-direction:column;gap:6px;">
             <button type="button" id="chooseSlotBtn" style="text-align:left;padding:8px 12px;font-size:13px;">📄 New Save Slot</button>
             <button type="button" id="chooseFolderBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">📁 New Folder</button>
+            <div style="border-top:1px solid #e7e5e0;margin:8px 0 4px;padding-top:8px;font-size:11px;color:#78716c;text-transform:uppercase;letter-spacing:.05em;">Quick batch presets</div>
+            <button type="button" id="chooseBatchLLMBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🤖 10 Real-LLM auctions</button>
+            <button type="button" id="chooseBatchMimicBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🧠 30 Mimic auctions</button>
+            <button type="button" id="chooseBatchMathBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🧮 50 Math auctions (pick tier)</button>
           </div>
         `;
         okBtn.style.display = "none";
@@ -943,7 +1044,218 @@
         cancelBtn.onclick = close;
         document.getElementById("chooseSlotBtn").onclick = async () => { close(); await createSlotFromMenu(); };
         document.getElementById("chooseFolderBtn").onclick = async () => { close(); await createFolderFromMenu(); };
+        document.getElementById("chooseBatchLLMBtn").onclick = async () => {
+          close();
+          await startBatchPreset({
+            kind: "llm",
+            defaultName: "Real LLM Batch",
+            count: 10,
+            parallel: 5,
+            loadout: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"],
+            slotPrefix: "R",
+            estimateNote: "Heads-up: 10 real-LLM auctions cost roughly $40-50 (mostly Opus input). Continue?",
+          });
+        };
+        document.getElementById("chooseBatchMimicBtn").onclick = async () => {
+          close();
+          await startBatchPreset({
+            kind: "mimic",
+            defaultName: "Mimic Batch",
+            count: 30,
+            parallel: 10,
+            loadout: ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"],
+            slotPrefix: "Mv7",
+            estimateNote: null,
+          });
+        };
+        document.getElementById("chooseBatchMathBtn").onclick = async () => {
+          close();
+          showMathTierChooser(async (tier) => {
+            const mimics = ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"];
+            // Math vs 4 mimics with one mimic displaced (rotates per auction)
+            await startBatchPreset({
+              kind: "math",
+              defaultName: `Math-${tier} Batch`,
+              count: 50,
+              parallel: 10,
+              loadout: [`Math-${tier}`].concat(mimics.slice(0, 4)),
+              slotPrefix: tier,
+              rotateMimics: true,
+              estimateNote: null,
+            });
+          });
+        };
         overlay.classList.add("show");
+      }
+
+      function showMathTierChooser(onPick) {
+        const overlay = document.getElementById("confirmOverlay");
+        const titleEl = document.getElementById("confirmTitle");
+        const bodyEl = document.getElementById("confirmBody");
+        const okBtn = document.getElementById("confirmOkBtn");
+        const cancelBtn = document.getElementById("confirmCancelBtn");
+        titleEl.textContent = "Pick a math tier";
+        bodyEl.innerHTML = `
+          <div style="margin-bottom:12px;">Which math tier should play against the 5 mimics?</div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            ${["T1","T2","T3","T4","T5"].map(t => `<button type="button" data-tier="${t}" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">Math-${t}</button>`).join("")}
+          </div>
+        `;
+        okBtn.style.display = "none";
+        const close = () => { overlay.classList.remove("show"); okBtn.style.display = ""; };
+        cancelBtn.onclick = close;
+        bodyEl.querySelectorAll("[data-tier]").forEach((btn) => {
+          btn.onclick = async () => { close(); await onPick(btn.getAttribute("data-tier")); };
+        });
+        overlay.classList.add("show");
+      }
+
+      // Sample N distinct random permutations of an array (Fisher-Yates), Math.random().
+      function _sampleDistinctPermutations(arr, n) {
+        const perms = [];
+        const seen = new Set();
+        const factorial = (k) => { let r = 1; for (let i = 2; i <= k; i++) r *= i; return r; };
+        const maxUnique = factorial(arr.length);
+        let guard = 0;
+        while (perms.length < n && guard < n * 100) {
+          const p = arr.slice();
+          for (let i = p.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [p[i], p[j]] = [p[j], p[i]];
+          }
+          const key = p.join("|");
+          if (!seen.has(key)) {
+            seen.add(key);
+            perms.push(p);
+            if (perms.length >= maxUnique) break;
+          }
+          guard++;
+        }
+        // Top up with repeats if we asked for more than maxUnique.
+        while (perms.length < n) {
+          const p = arr.slice();
+          for (let i = p.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [p[i], p[j]] = [p[j], p[i]];
+          }
+          perms.push(p);
+        }
+        return perms;
+      }
+
+      // Pool of mimics used to fill the "displaced" slot for math-tier batches.
+      const MIMIC_POOL_FOR_MATH = ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"];
+
+      async function startBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, rotateMimics = false, estimateNote = null }) {
+        const promptMessage = (kind === "math")
+          ? `Folder name (will hold ${count} auctions of ${loadout[0]} vs 4 rotating mimics):`
+          : `Folder name (will hold ${count} auctions):`;
+        showInput("Start Batch", promptMessage, defaultName, async (rawName) => {
+          const folderName = (rawName || "").trim();
+          if (!folderName) return;
+          if (estimateNote && !confirm(estimateNote)) return;
+          // 1. Create folder.
+          const folderRes = await apiPost("/api/folder_create", { name: folderName });
+          const folderData = await folderRes.json();
+          if (!folderRes.ok) { alert(folderData.detail || "Could not create folder."); return; }
+          const folderId = folderData.folder.folder_id;
+
+          // 2. Build per-auction loadouts (permutations).
+          const startSeed = Math.floor(Math.random() * 100000) + 1;
+          let loadouts;
+          if (rotateMimics) {
+            // Math tier displaces 1 of 5 mimics per auction; rotate through.
+            loadouts = [];
+            for (let i = 0; i < count; i++) {
+              const displaced = MIMIC_POOL_FOR_MATH[i % MIMIC_POOL_FOR_MATH.length];
+              const tierBidder = loadout[0]; // e.g. "Math-T3"
+              const mimics = MIMIC_POOL_FOR_MATH.filter((m) => m !== displaced);
+              const ordering = [tierBidder].concat(mimics);
+              // Shuffle the ordering so the tier bidder isn't always seat 0.
+              for (let j = ordering.length - 1; j > 0; j--) {
+                const k = Math.floor(Math.random() * (j + 1));
+                [ordering[j], ordering[k]] = [ordering[k], ordering[j]];
+              }
+              loadouts.push(ordering);
+            }
+          } else {
+            loadouts = _sampleDistinctPermutations(loadout, count);
+          }
+
+          // 3. Show progress modal.
+          const progressOverlay = document.getElementById("confirmOverlay");
+          const progressTitle = document.getElementById("confirmTitle");
+          const progressBody = document.getElementById("confirmBody");
+          const progressOk = document.getElementById("confirmOkBtn");
+          const progressCancel = document.getElementById("confirmCancelBtn");
+          progressTitle.textContent = `Launching ${folderName}`;
+          progressBody.innerHTML = `<div id="batchProgressMsg">Starting 0 / ${count} auctions…</div>`;
+          progressOk.style.display = "none";
+          progressCancel.textContent = "Run in background";
+          let userClosed = false;
+          progressCancel.onclick = () => { userClosed = true; progressOverlay.classList.remove("show"); progressOk.style.display = ""; progressCancel.textContent = "Cancel"; };
+          progressOverlay.classList.add("show");
+
+          // 4. Concurrency-limited launcher. Each auction = create slot, reset, step.
+          let launched = 0;
+          let failed = 0;
+          const updateProgress = () => {
+            const el = document.getElementById("batchProgressMsg");
+            if (el) el.textContent = `Started ${launched} / ${count} auctions  (${failed} failed)`;
+          };
+
+          async function launchOne(idx) {
+            try {
+              const slotName = `${slotPrefix} ${idx + 1}`;
+              const slotRes = await apiPost("/api/save_slot_create", { name: slotName, folder_id: folderId });
+              const slotData = await slotRes.json();
+              if (!slotRes.ok) throw new Error(slotData.detail || "slot_create failed");
+              const slotId = slotData.slot.slot_id;
+              const resetRes = await apiPost("/api/reset", {
+                session_id: slotId,
+                mode: "open_painting_auction",
+                selected_models: loadouts[idx],
+                scenario: "auction_baseline",
+                seed: startSeed + idx,
+              });
+              if (!resetRes.ok) {
+                const d = await resetRes.json();
+                throw new Error(d.detail || "reset failed");
+              }
+              const stepRes = await apiPost("/api/step", { session_id: slotId, use_models: true });
+              if (!stepRes.ok) {
+                const d = await stepRes.json();
+                throw new Error(d.detail || "step failed");
+              }
+              launched += 1;
+            } catch (err) {
+              failed += 1;
+              console.error("batch launch failed", idx, err);
+            }
+            updateProgress();
+          }
+
+          // Run with bounded concurrency.
+          let next = 0;
+          async function worker() {
+            while (next < count) {
+              const i = next++;
+              await launchOne(i);
+            }
+          }
+          const workers = Array.from({ length: Math.max(1, parallel) }, () => worker());
+          await Promise.all(workers);
+          // 5. Final state.
+          const msg = `Started ${launched} / ${count} auctions${failed ? ` (${failed} failed to launch — see console)` : ""}. Workers are running in the background; refresh the folder to see progress.`;
+          if (!userClosed) {
+            const el = document.getElementById("batchProgressMsg");
+            if (el) el.textContent = msg;
+            progressOk.style.display = "";
+            progressOk.textContent = "Close";
+            progressOk.onclick = () => { progressOverlay.classList.remove("show"); progressOk.textContent = "OK"; progressCancel.textContent = "Cancel"; };
+          }
+          await refreshSaveSlots();
+        });
       }
 
       async function createFolderFromMenu() {
@@ -1071,11 +1383,14 @@
           // Root view: show all top-level folders, then root-level slots.
           for (const folder of cachedFolders) {
             const slotCount = cachedSaveSlots.filter((s) => s.folder_id === folder.folder_id).length;
+            const dist = cachedFolderDistributions[folder.folder_id];
+            const distHtml = dist ? folderDistributionHtml(dist) : `<div class="folder-dist-empty">Loading distribution…</div>`;
             cards.push(`
               <div class="slot-card folder-card" data-enter-folder="${folder.folder_id}">
                 <div class="folder-icon">📁</div>
                 <div class="slot-title">${folder.name}</div>
                 <div class="slot-meta">${slotCount} slot${slotCount === 1 ? "" : "s"}</div>
+                ${distHtml}
                 <div class="slot-actions" onclick="event.stopPropagation();">
                   <button type="button" class="alt" data-rename-folder="${folder.folder_id}" data-rename-folder-name="${folder.name}">Rename</button>
                   <button type="button" class="danger" data-delete-folder="${folder.folder_id}" data-delete-folder-name="${folder.name}">Delete</button>
@@ -1260,6 +1575,20 @@
         }
       });
 
+      async function fetchFolderDistributions() {
+        try {
+          const res = await fetch(`/api/folder_distributions?_=${Date.now()}`, { cache: "no-store" });
+          if (!res.ok) return;
+          const data = await res.json();
+          cachedFolderDistributions = (data && data.distributions) ? data.distributions : {};
+          if (currentFolderId === null) {
+            renderSlotMenu(cachedSaveSlots, cachedFolders);
+          }
+        } catch (err) {
+          // Non-fatal: folder cards just remain in the "loading" state.
+        }
+      }
+
       async function refreshSaveSlots() {
         const select = document.getElementById("saveSlot");
         const hint = document.getElementById("saveSlotHint");
@@ -1271,6 +1600,9 @@
           const slots = Array.isArray(data.slots) ? data.slots : [];
           const folders = Array.isArray(data.folders) ? data.folders : [];
           renderSlotMenu(slots, folders);
+          // Fire-and-forget: aggregate folder distributions, then re-render
+          // so each folder card shows its bidder distribution.
+          fetchFolderDistributions();
           select.innerHTML = `<option value="">Transient (auto-updating)</option>`;
           for (const slot of slots) {
             const parts = [slot.filled ? "filled" : "empty"];
@@ -1626,6 +1958,111 @@
         restoreScrollState(root, scrollState);
       }
 
+      // Export the auction bid chart as PNG (high-res raster) or SVG (vector).
+      // `scale` multiplies the base 920×280 viewBox. Default scale=3 →
+      // 2760×840 (+legend strip) px PNG, comfortably print-quality.
+      window.exportAuctionChart = function (format, scale) {
+        const svgEl = document.getElementById("auctionBidChart");
+        if (!svgEl) { alert("No auction chart on screen to export."); return; }
+        const vb = (svgEl.getAttribute("viewBox") || "0 0 920 280").split(/\s+/).map(Number);
+        const baseW = vb[2] || 920;
+        const baseH = vb[3] || 280;
+        // Serialize a clone so we can give it explicit pixel dimensions
+        // and inject a legend without affecting the on-screen rendering.
+        const clone = svgEl.cloneNode(true);
+        clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        // Apply LaTeX-style font to all text in the export (axis labels + legend).
+        // Falls back through Computer Modern → Times → generic serif so the
+        // result looks paper-ready on machines that have a TeX installation.
+        const LATEX_FONT = '"Latin Modern Roman","Computer Modern Roman","CMU Serif","Times New Roman","Times",serif';
+        clone.querySelectorAll("text").forEach((t) => {
+          t.setAttribute("font-family", LATEX_FONT);
+        });
+        // --- legend injection ---
+        // Bidder→color was stashed on the SVG at render time as data-bidders.
+        let colors = {};
+        try { colors = JSON.parse(svgEl.getAttribute("data-bidders") || "{}"); }
+        catch (_e) { colors = {}; }
+        const legendH = 44;
+        const newH = baseH + legendH;
+        clone.setAttribute("viewBox", `0 0 ${baseW} ${newH}`);
+        const NS = "http://www.w3.org/2000/svg";
+        // Background fill behind the legend strip.
+        const legendBg = document.createElementNS(NS, "rect");
+        legendBg.setAttribute("x", "0");
+        legendBg.setAttribute("y", String(baseH));
+        legendBg.setAttribute("width", String(baseW));
+        legendBg.setAttribute("height", String(legendH));
+        legendBg.setAttribute("fill", "#ffffff");
+        clone.appendChild(legendBg);
+        // Compute layout: items spread across baseW with padL on left.
+        const entries = Object.entries(colors);
+        const cellW = entries.length > 0 ? (baseW - 32) / entries.length : 0;
+        entries.forEach(([name, color], i) => {
+          const cx = 16 + cellW * i + 8;
+          const cy = baseH + legendH / 2;
+          const circle = document.createElementNS(NS, "circle");
+          circle.setAttribute("cx", String(cx));
+          circle.setAttribute("cy", String(cy));
+          circle.setAttribute("r", "5");
+          circle.setAttribute("fill", color);
+          clone.appendChild(circle);
+          const text = document.createElementNS(NS, "text");
+          text.setAttribute("x", String(cx + 10));
+          text.setAttribute("y", String(cy + 4));
+          text.setAttribute("font-size", "13");
+          text.setAttribute("font-family", LATEX_FONT);
+          text.setAttribute("fill", "#1f2937");
+          text.textContent = modelDisplayName(name);
+          clone.appendChild(text);
+        });
+        // --- end legend injection ---
+        if (format === "svg") {
+          clone.setAttribute("width", String(baseW));
+          clone.setAttribute("height", String(newH));
+          const svgString = new XMLSerializer().serializeToString(clone);
+          const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `auction_bid_chart_${Date.now()}.svg`;
+          a.click();
+          URL.revokeObjectURL(url);
+          return;
+        }
+        // PNG path: paint the SVG into a hi-res canvas, then download.
+        const k = Math.max(1, Number(scale) || 3);
+        clone.setAttribute("width", String(baseW * k));
+        clone.setAttribute("height", String(newH * k));
+        const svgString = new XMLSerializer().serializeToString(clone);
+        const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+        const svgUrl = URL.createObjectURL(svgBlob);
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = baseW * k;
+          canvas.height = newH * k;
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `auction_bid_chart_${baseW * k}x${newH * k}_${Date.now()}.png`;
+            a.click();
+            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(svgUrl);
+          }, "image/png");
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(svgUrl);
+          alert("Failed to rasterize the chart.");
+        };
+        img.src = svgUrl;
+      };
+
       function renderAuctionResult(data) {
         const card = document.getElementById("auctionCard");
         const root = document.getElementById("auctionResult");
@@ -1659,7 +2096,7 @@
         }
         let html = `
           <div style="font-size:13px; color:#6b7280; margin-bottom:10px;">
-            <strong>Painting:</strong> ${data.current_painting || "complete"} | <strong>Current bid:</strong> $${Number(round.current_bid || 0).toFixed(0)} | <strong>Leader:</strong> ${round.current_leader || "none"} | <strong>Turn:</strong> ${data.current_turn_bidder || "none"}
+            <strong>Painting:</strong> ${data.current_painting || "complete"} | <strong>Current bid:</strong> $${Number(round.current_bid || 0).toFixed(0)} | <strong>Leader:</strong> ${round.current_leader ? modelDisplayName(round.current_leader) : "none"} | <strong>Turn:</strong> ${data.current_turn_bidder ? modelDisplayName(data.current_turn_bidder) : "none"}
           </div>
           <table class="batch-table">
             <thead><tr><th>Bidder</th><th>Budget</th><th>Current Bid</th><th>Won</th><th>Status</th></tr></thead><tbody>
@@ -1670,13 +2107,13 @@
           else if (bidderId === round.current_leader) status = "leader";
           else if (passed.has(bidderId)) status = "passed";
           else if (active.has(bidderId)) status = "active";
-          html += `<tr><td>${bidderId}</td><td><span class="val-zero">$${Number(budgets[bidderId] || 0).toFixed(0)}</span></td><td><span class="val-zero">${currentBidByBidder[bidderId] ? `$${Number(currentBidByBidder[bidderId]).toFixed(0)}` : "—"}</span></td><td><span class="val-zero">${Number(counts[bidderId] || 0).toFixed(0)}</span></td><td>${status}</td></tr>`;
+          html += `<tr><td>${modelDisplayName(bidderId)}</td><td><span class="val-zero">$${Number(budgets[bidderId] || 0).toFixed(0)}</span></td><td><span class="val-zero">${currentBidByBidder[bidderId] ? `$${Number(currentBidByBidder[bidderId]).toFixed(0)}` : "—"}</span></td><td><span class="val-zero">${Number(counts[bidderId] || 0).toFixed(0)}</span></td><td>${status}</td></tr>`;
         }
         html += `</tbody></table>`;
         if (completed.length) {
           html += `<div class="section-head">Completed Paintings</div><table class="batch-table"><thead><tr><th>Painting</th><th>Status</th><th>Winner</th><th>Price</th></tr></thead><tbody>`;
           for (const item of completed) {
-            html += `<tr><td>${item.painting_id}</td><td>${item.status}</td><td>${item.winner_id || "—"}</td><td><span class="val-zero">${item.winning_bid ? `$${Number(item.winning_bid).toFixed(0)}` : "—"}</span></td></tr>`;
+            html += `<tr><td>${item.painting_id}</td><td>${item.status}</td><td>${item.winner_id ? modelDisplayName(item.winner_id) : "—"}</td><td><span class="val-zero">${item.winning_bid ? `$${Number(item.winning_bid).toFixed(0)}` : "—"}</span></td></tr>`;
           }
           html += `</tbody></table>`;
           const chartBidders = Array.from(new Set([
@@ -1691,6 +2128,10 @@
               const bidderId = bid && bid.bidder_id;
               const bidAmount = bid && bid.bid_amount;
               if (!bidderId) continue;
+              // Skip invalidated bids (over budget, below min, etc.) — the env
+              // records them in bid_history but they were rejected, so the
+              // bidder's effective last bid this painting is the prior valid one.
+              if (bid && bid.invalidated) continue;
               if (typeof bidAmount === "number" && Number.isFinite(bidAmount)) {
                 lastBidByBidder[bidderId] = bidAmount;
               }
@@ -1714,25 +2155,14 @@
           const n = Math.max(1, completed.length);
           const xAt = (idx) => padL + (n === 1 ? plotW / 2 : (idx * plotW) / (n - 1));
           const yAt = (value) => padT + plotH - (value / yMax) * plotH;
-          const normalizeBidderKey = (bidderId) => String(bidderId || "").trim().toLowerCase();
-          const bidderColor = (bidderId) => {
-            const key = normalizeBidderKey(bidderId);
-            if (key === "mimic-gpt-5.4" || key === "mimic-5.4") return "#d1d5db"; // light gray
-            if (key === "5.4" || key === "gpt-5.4" || key === "gpt 5.4") return "#9ca3af"; // gray
-            if (key === "opus" || key.includes("opus")) return "#f97316"; // orange
-            if (key === "pro" || key.includes("gemini") && key.includes("pro")) return "#1e3a8a"; // lighter dark navy
-            if (key === "grok" || key.includes("grok")) return "#000000";
-            if (key === "deepseek" || key.includes("deepseek")) return "#bacbe6";
-            if (key === "llama" || key.includes("llama")) return "#db2777"; // slightly darker hot pink
-            // Stable fallback for other models.
-            const fallbackPalette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2", "#be185d", "#4f46e5"];
-            let hash = 0;
-            for (let i = 0; i < key.length; i += 1) hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
-            const idx = Math.abs(hash) % fallbackPalette.length;
-            return fallbackPalette[idx];
-          };
+          // bidderColor/normalizeBidderKey are defined at module scope so the
+          // folder-card distribution renderer can share the same palette.
           const yTicks = 4;
-          let svg = `<div class="section-head">Final Bid Per Painting</div><svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">`;
+          // Embed bidder→color data so the export function can rebuild a legend in-SVG.
+          const bidderColorMap = {};
+          chartBidders.forEach((b) => { bidderColorMap[b] = bidderColor(b); });
+          const bidderDataAttr = JSON.stringify(bidderColorMap).replace(/"/g, "&quot;");
+          let svg = `<div class="section-head">Final Bid Per Painting</div><svg id="auctionBidChart" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" data-bidders="${bidderDataAttr}" style="width:100%;height:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">`;
           for (let i = 0; i <= yTicks; i += 1) {
             const yValue = (yMax * i) / yTicks;
             const y = yAt(yValue);
@@ -1772,9 +2202,17 @@
           svg += `</svg>`;
           const legend = chartBidders.map((bidderId) => {
             const color = bidderColor(bidderId);
-            return `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;"><span style="width:10px;height:10px;border-radius:999px;background:${color};display:inline-block;"></span>${bidderId}</span>`;
+            return `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;"><span style="width:10px;height:10px;border-radius:999px;background:${color};display:inline-block;"></span>${modelDisplayName(bidderId)}</span>`;
           }).join("");
-          html += `${svg}<div style="margin-top:8px;font-size:12px;color:#475569;">${legend}</div>`;
+          html += (
+            `${svg}` +
+            `<div style="margin-top:8px;font-size:12px;color:#475569;">${legend}</div>` +
+            `<div style="margin-top:8px;display:flex;gap:6px;">` +
+            `<button type="button" class="ghost" style="font-size:11px;padding:3px 10px;" onclick="exportAuctionChart('png',3)">Export PNG (HD)</button>` +
+            `<button type="button" class="ghost" style="font-size:11px;padding:3px 10px;" onclick="exportAuctionChart('png',6)">Export PNG (2× HD)</button>` +
+            `<button type="button" class="ghost" style="font-size:11px;padding:3px 10px;" onclick="exportAuctionChart('svg')">Export SVG</button>` +
+            `</div>`
+          );
         }
         root.innerHTML = html;
         restoreScrollState(root, scrollState);
@@ -2583,6 +3021,25 @@
         const fromHeader = parseDownloadFilename(res);
         const slotId = activeSaveSlot();
         a.download = fromHeader || (slotId ? `auction_bid_log_${slotId}.txt` : "auction_bid_log_transient.txt");
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      document.getElementById("exportAuctionThinkingBtn").onclick = async () => {
+        const res = await fetch(withSession("/api/export_auction_thinking"));
+        const data = res.ok ? await res.blob() : await res.json();
+        if (!res.ok) {
+          alert(data.detail || "Export failed");
+          return;
+        }
+        const url = URL.createObjectURL(data);
+        const a = document.createElement("a");
+        a.href = url;
+        const fromHeader = parseDownloadFilename(res);
+        const slotId = activeSaveSlot();
+        a.download = fromHeader || (slotId ? `auction_thinking_${slotId}.txt` : "auction_thinking_transient.txt");
         document.body.appendChild(a);
         a.click();
         a.remove();

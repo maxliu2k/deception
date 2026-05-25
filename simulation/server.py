@@ -55,6 +55,7 @@ from .policies import (
     open_auction_policy_tier1_trivial,
     open_auction_policy_tier2_fair_share,
     open_auction_policy_tier3_reactive,
+    open_auction_policy_tier4_market_clearing,
     negotiation_policy_buyer_constrained_expected_utility,
     customer_policy_skeptical_memory,
     customer_policy_trusting,
@@ -1035,7 +1036,7 @@ MODEL_ID_BY_ALIAS = {
     "Haiku": "claude-haiku-4-5",
     "Sonnet": "claude-sonnet-4-6",
     "Opus": "claude-opus-4-6",
-    "Grok": "x-ai/grok-4.1-fast",
+    "Grok": "x-ai/grok-4.3",
     "Kimi": "moonshotai/kimi-k2.5",
     "DeepSeek": "deepseek/deepseek-v3.2",
     "Llama": "meta-llama/llama-4-maverick",
@@ -1052,7 +1053,7 @@ OPENROUTER_MODEL_ID_BY_ALIAS = {
     "Haiku": "anthropic/claude-haiku-4.5",
     "Sonnet": "anthropic/claude-sonnet-4.6",
     "Opus": "anthropic/claude-opus-4.6",
-    "Grok": "x-ai/grok-4.1-fast",
+    "Grok": "x-ai/grok-4.3",
     "Kimi": "moonshotai/kimi-k2.5",
     "DeepSeek": "deepseek/deepseek-v3.2",
     "Llama": "meta-llama/llama-4-maverick",
@@ -1402,10 +1403,14 @@ def _gemini_generation_config(alias: str, temperature: float, max_tokens: int) -
 
 
 def _openrouter_reasoning_payload(alias: str) -> dict[str, Any] | None:
-    if alias in {"GPT-5.4", "5.4", "Grok"}:
+    # High-effort reasoning for models with a dedicated reasoning mode.
+    # OpenRouter translates `effort` to the right provider-specific knob
+    # (OpenAI reasoning_effort, Anthropic extended-thinking budget, etc.).
+    if alias in {"GPT-5.4", "5.4", "Grok", "Opus", "Sonnet"}:
         return {"effort": "high"}
-    if alias in {"DeepSeek", "Pro"}:
+    if alias in {"DeepSeek", "Pro", "Haiku"}:
         return {"enabled": True}
+    # Llama (Maverick) has no native reasoning mode.
     return None
 
 
@@ -1664,6 +1669,229 @@ async def _call_llm_text(alias: str, system_prompt: str, user_prompt: str, tempe
     except Exception as exc:
         detail = _format_llm_error_detail(alias=alias, provider=provider, model=model, call_type="text", exc=exc)
         logger.exception("simulation text llm call failed: %s", detail)
+        raise RuntimeError(detail) from exc
+
+
+async def _call_llm_text_with_reasoning(
+    alias: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    temperature: float = 0.0,
+    max_tokens: int = 8192,
+    request_reasoning: bool = True,
+    response_format: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Like _call_llm_text but with generous thinking budgets and reasoning capture.
+
+    Returns {"text": <visible reply>, "thoughts": <reasoning trace if exposed>}.
+    OpenAI o-series reasoning is encrypted by the provider so thoughts will be
+    empty for those models. OpenRouter, Anthropic (Opus/Sonnet), and Gemini Pro
+    return reasoning text when available.
+    """
+    alias = _runtime_llm_alias(alias)
+    use_openrouter = _use_openrouter_for_llms()
+    model = OPENROUTER_MODEL_ID_BY_ALIAS[alias] if use_openrouter else MODEL_ID_BY_ALIAS[alias]
+    provider = "openrouter" if use_openrouter else "direct"
+    try:
+        if alias in OPENROUTER_ONLY_MODEL_ALIASES and not use_openrouter:
+            raise RuntimeError(f"{alias} is configured as an OpenRouter-only model. Set OPENROUTER_API_KEY or add keys/openkey.txt.")
+        _append_llm_trace(alias=alias, provider=provider, model=model, call_type="text+reasoning")
+        logger.info("simulation LLM text+reasoning call alias=%s provider=%s model=%s max_tokens=%s", alias, provider, model, max_tokens)
+        if use_openrouter:
+            client = AsyncOpenAI(
+                api_key=_get_openrouter_key(),
+                base_url=OPENROUTER_BASE_URL,
+                default_headers={"HTTP-Referer": OPENROUTER_REFERER, "X-Title": OPENROUTER_TITLE},
+            )
+            # Mark the (identical-across-calls) system prompt as cacheable on
+            # every provider. OpenRouter forwards `cache_control: ephemeral`
+            # to providers that honor it (Anthropic, Gemini 2.5+, Grok). For
+            # OpenAI automatic prefix caching the marker is harmless and the
+            # discount triggers regardless. For Llama, the marker is ignored.
+            system_message: Any = {
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+            }
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "messages": [system_message, {"role": "user", "content": user_prompt}],
+            }
+            if response_format is not None:
+                request_kwargs["response_format"] = response_format
+            if request_reasoning:
+                reasoning = _openrouter_reasoning_payload(alias)
+                if reasoning is not None:
+                    request_kwargs["reasoning"] = reasoning
+            try:
+                resp = await client.chat.completions.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("reasoning", None)
+                request_kwargs.pop("response_format", None)
+                # If structured-content + cache_control isn't accepted by this
+                # SDK version, fall back to a plain string system message.
+                request_kwargs["messages"] = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+                resp = await client.chat.completions.create(**request_kwargs)
+            msg = resp.choices[0].message
+            text = _normalize_message_content(msg.content).strip()
+            thoughts = ""
+            for attr in ("reasoning", "reasoning_content"):
+                val = getattr(msg, attr, None)
+                if isinstance(val, str) and val.strip():
+                    thoughts = val.strip()
+                    break
+                if isinstance(val, list):
+                    pieces: list[str] = []
+                    for item in val:
+                        if isinstance(item, str):
+                            pieces.append(item)
+                        elif isinstance(item, dict):
+                            pieces.append(str(item.get("text") or item.get("content") or ""))
+                    joined = "".join(pieces).strip()
+                    if joined:
+                        thoughts = joined
+                        break
+            usage = getattr(resp, "usage", None)
+            usage_dict: dict[str, int] = {}
+            if usage is not None:
+                usage_dict = {
+                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                    "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                }
+                details = getattr(usage, "completion_tokens_details", None)
+                if details is not None:
+                    rt = getattr(details, "reasoning_tokens", None)
+                    if rt is not None:
+                        usage_dict["reasoning_tokens"] = int(rt)
+            return {"text": text, "thoughts": thoughts, "usage": usage_dict}
+        if alias in {"GPT-4o", "4o", "GPT-5.4", "5.4"}:
+            key = _get_openai_key()
+            if not key:
+                raise RuntimeError("No LLM key found.")
+            client = AsyncOpenAI(api_key=key)
+            request_kwargs = {
+                "model": model,
+                "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                "temperature": temperature,
+                "max_completion_tokens": max_tokens,
+            }
+            if response_format is not None:
+                request_kwargs["response_format"] = response_format
+            if request_reasoning and alias in {"GPT-5.4", "5.4"}:
+                request_kwargs["reasoning_effort"] = "high"
+            try:
+                resp = await client.chat.completions.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("reasoning_effort", None)
+                request_kwargs.pop("response_format", None)
+                resp = await client.chat.completions.create(**request_kwargs)
+            text = _normalize_message_content(resp.choices[0].message.content).strip()
+            usage = getattr(resp, "usage", None)
+            usage_dict = {}
+            if usage is not None:
+                usage_dict = {
+                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                    "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                }
+                details = getattr(usage, "completion_tokens_details", None)
+                if details is not None:
+                    rt = getattr(details, "reasoning_tokens", None)
+                    if rt is not None:
+                        usage_dict["reasoning_tokens"] = int(rt)
+            return {"text": text, "thoughts": "", "usage": usage_dict}
+        if alias in {"Haiku", "Sonnet", "Opus"}:
+            key = _get_anthropic_key()
+            if not key or AsyncAnthropic is None:
+                raise RuntimeError("Anthropic key or SDK unavailable.")
+            client = AsyncAnthropic(api_key=key)
+            request_kwargs = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+            if request_reasoning and alias in {"Opus", "Sonnet"}:
+                request_kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(2048, max_tokens // 2)}
+            try:
+                resp = await client.messages.create(**request_kwargs)
+            except TypeError:
+                request_kwargs.pop("thinking", None)
+                resp = await client.messages.create(**request_kwargs)
+            text_parts: list[str] = []
+            thought_parts: list[str] = []
+            for block in resp.content:
+                btype = getattr(block, "type", "")
+                if btype == "text":
+                    text_parts.append(getattr(block, "text", "") or "")
+                elif btype == "thinking":
+                    thought_parts.append(getattr(block, "thinking", "") or "")
+            usage = getattr(resp, "usage", None)
+            usage_dict = {}
+            if usage is not None:
+                in_t = int(getattr(usage, "input_tokens", 0) or 0)
+                out_t = int(getattr(usage, "output_tokens", 0) or 0)
+                usage_dict = {
+                    "prompt_tokens": in_t,
+                    "completion_tokens": out_t,
+                    "total_tokens": in_t + out_t,
+                }
+            return {"text": "".join(text_parts).strip(), "thoughts": "".join(thought_parts).strip(), "usage": usage_dict}
+        if alias in {"Flash", "Pro"}:
+            key = _get_gemini_key()
+            if not key:
+                raise RuntimeError("Gemini key unavailable.")
+            gen_config = _gemini_generation_config(alias, temperature, max_tokens)
+            if request_reasoning:
+                if "thinkingConfig" in gen_config:
+                    gen_config["thinkingConfig"]["includeThoughts"] = True
+                elif alias == "Pro":
+                    gen_config["thinkingConfig"] = {"thinkingLevel": "high", "includeThoughts": True}
+            else:
+                # Disable thinking when reasoning will be returned in the JSON payload.
+                gen_config.pop("thinkingConfig", None)
+            body = {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                "generationConfig": gen_config,
+            }
+            obj = await asyncio.to_thread(_gemini_post_json, key, model, body, None)
+            cands = obj.get("candidates") or []
+            parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+            text_parts2: list[str] = []
+            thought_parts2: list[str] = []
+            for p in parts:
+                if p.get("thought"):
+                    thought_parts2.append(p.get("text") or "")
+                else:
+                    text_parts2.append(p.get("text") or "")
+            meta = obj.get("usageMetadata") or {}
+            usage_dict = {}
+            if meta:
+                usage_dict = {
+                    "prompt_tokens": int(meta.get("promptTokenCount") or 0),
+                    "completion_tokens": int(meta.get("candidatesTokenCount") or 0),
+                    "total_tokens": int(meta.get("totalTokenCount") or 0),
+                }
+                tt = meta.get("thoughtsTokenCount")
+                if tt is not None:
+                    usage_dict["reasoning_tokens"] = int(tt)
+            return {"text": "".join(text_parts2).strip(), "thoughts": "".join(thought_parts2).strip(), "usage": usage_dict}
+        return {"text": "", "thoughts": "", "usage": {}}
+    except Exception as exc:
+        detail = _format_llm_error_detail(alias=alias, provider=provider, model=model, call_type="text+reasoning", exc=exc)
+        logger.exception("simulation text+reasoning llm call failed: %s", detail)
         raise RuntimeError(detail) from exc
 
 
@@ -2964,7 +3192,6 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
         for bid, state in env.world["auction_bidders"].items()
     }
     current_bids = _auction_current_bid_by_bidder(env)
-    budget_log = _auction_budget_log(env)
     painting_number = int(env.world.get("auction_painting_index") or 0) + 1
     total_paintings = int(env.config.get("num_paintings") or 12)
     is_last_painting = painting_number >= total_paintings
@@ -2976,15 +3203,6 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
         }
         for bid, state in scoreboard.items()
     }
-    completed = [
-        {
-            "painting_id": item.painting_id,
-            "winner_id": item.winner_id,
-            "winning_bid": item.winning_bid,
-            "status": item.status,
-        }
-        for item in (env.world.get("auction_results") or [])
-    ]
     history = list(round_state.bid_history or [])
     try:
         _refresh_auction_turns()
@@ -3035,7 +3253,7 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
             _append_conversation("auction", bidder_name, "", display_text)
             _mark_done(_auction_bidder_turn_id(bidder_id))
             return {"auction_action": action, "used_models": True, "llm_error": None}
-        if bidder_alias in {"Math-T1", "Math-T2", "Math-T3"}:
+        if bidder_alias in {"Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T5"}:
             if bidder_alias == "Math-T1":
                 action = open_auction_policy_tier1_trivial(
                     bidder,
@@ -3049,7 +3267,7 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
                     paintings_remaining=paintings_remaining,
                     min_next_bid=min_next_bid,
                 )
-            else:  # Math-T3
+            elif bidder_alias == "Math-T3":
                 counts = {bid: state.paintings_won for bid, state in env.world["auction_bidders"].items()}
                 action = open_auction_policy_tier3_reactive(
                     bidder,
@@ -3057,6 +3275,38 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
                     paintings_remaining=paintings_remaining,
                     min_next_bid=min_next_bid,
                     painting_counts=counts,
+                )
+            elif bidder_alias == "Math-T4":
+                counts = {bid: state.paintings_won for bid, state in env.world["auction_bidders"].items()}
+                budgets = {bid: state.remaining_budget for bid, state in env.world["auction_bidders"].items()}
+                action = open_auction_policy_tier4_market_clearing(
+                    bidder,
+                    round_state,
+                    paintings_remaining=paintings_remaining,
+                    min_next_bid=min_next_bid,
+                    painting_counts=counts,
+                    all_budgets=budgets,
+                )
+            else:  # Math-T5 — learned PPO policy. Imported lazily so the auction
+                   # path doesn't pay torch import cost when only T1-T4 are used.
+                from .rl_agent import rl_bid as _rl_bid
+                action = _rl_bid(
+                    bidder_id=bidder_id,
+                    your_budget=bidder.remaining_budget,
+                    your_count=bidder.paintings_won,
+                    current_bid=round_state.current_bid,
+                    current_leader=round_state.current_leader,
+                    active_bidders=list(round_state.active_bidders),
+                    bid_history=list(round_state.bid_history or []),
+                    all_budgets={bid: state.remaining_budget for bid, state in env.world["auction_bidders"].items()},
+                    all_counts={bid: state.paintings_won for bid, state in env.world["auction_bidders"].items()},
+                    public_bid_table=public_bid_table,
+                    painting_number=painting_number,
+                    total_paintings=total_paintings,
+                    paintings_remaining=paintings_remaining,
+                    is_last_painting=is_last_painting,
+                    min_next_bid=min_next_bid,
+                    start_budget=int(env.config.get("start_budget") or 10000),
                 )
             bidder_name = _auction_display_name(bidder_id, env) or bidder_id
             display_text = f"{bidder_name} passes." if action.action_type == "pass" else f"{bidder_name} raises to ${action.bid_amount}."
@@ -3088,49 +3338,161 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
             _append_conversation("auction", bidder_name, "", display_text)
             _mark_done(_auction_bidder_turn_id(bidder_id))
             return {"auction_action": action, "used_models": True, "llm_error": None}
-        raw_action = await _call_llm_text_with_timeout(
-            bidder_alias,
-            "You are one bidder among five in a sequential open ascending painting auction. "
-            "Your only objective is to maximize the number of paintings you win. "
-            "Rules: bidders take turns in turn order. On your turn you either raise the current bid "
-            "(must be an integer >= minimum_legal_bid and <= your_remaining_budget) or pass. "
-            "Passing is permanent for this painting — you cannot re-enter once you pass. "
-            "The last bidder who has not passed wins the painting. "
-            "If you are already the current_leader, passing locks in your win unless someone outbids you later — "
-            "prefer PASS unless you have a specific reason to deter remaining active bidders. "
-            "You can see the full public scoreboard: everyone's bids this painting, remaining budgets, "
-            "budget history across prior paintings, and paintings won. "
-            "Pay especially close attention to YOUR OWN remaining budget — you can never bid above it "
-            "and it determines what you can still win later. "
-            "Do not mechanically min-raise by default; choose PASS or a bid amount strategically. "
-            "Reply with exactly one thing and nothing else: either PASS or a single integer bid amount. "
-            "No JSON. No explanation. No punctuation. No extra words. "
-            + ("This is the LAST painting, so there is no future budget value after this round. " if is_last_painting else ""),
-            "\n".join(
-                [
-                    f"painting_number={painting_number}",
-                    f"total_paintings={total_paintings}",
-                    f"is_last_painting={str(is_last_painting).lower()}",
-                    f"painting_id={round_state.painting_id}",
-                    f"current_bid={'none_yet' if round_state.current_leader is None else round_state.current_bid}",
-                    f"current_leader={round_state.current_leader}",
-                    f"your_bidder_id={bidder_id}",
-                    f"your_remaining_budget={bidder.remaining_budget}",
-                    f"minimum_legal_bid={min_next_bid}",
-                    f"active_bidders={','.join(round_state.active_bidders or [])}",
-                    f"passed_bidders={','.join(round_state.passed_bidders or [])}",
-                    f"paintings_remaining={paintings_remaining}",
-                    f"public_bid_table={json.dumps(public_bid_table)}",
-                    f"budget_log_by_bidder={json.dumps(budget_log)}",
-                    f"all_painting_counts={json.dumps({k: v['paintings_won'] for k, v in scoreboard.items()})}",
-                    f"bid_history={json.dumps(history)}",
-                    f"completed_painting_summaries={json.dumps(completed)}",
-                    ("warning=LAST_PAINTING" if is_last_painting else "warning=MORE_PAINTINGS_REMAIN"),
-                    "Return only PASS or one integer.",
-                ]
-            ),
-            max_tokens=16,
+        system_prompt = (
+            "You are one bidder among five in a sequential open ascending painting auction over "
+            f"{total_paintings} paintings.\n\n"
+            "ALL PAINTINGS ARE IDENTICAL IN VALUE. Every painting is worth exactly 1 point, "
+            "regardless of order, label, or any other property. Winning painting 1 counts the same "
+            "as winning painting 12. There is no quality difference, no prestige order, and no "
+            "special 'headline lot.' Your reward at the end is simply the count of paintings you have won.\n\n"
+            "Your only objective is to maximize the count of paintings you win.\n\n"
+            "Mechanics:\n"
+            "- Bidders take turns in turn order. On your turn you either raise the current bid "
+            "(integer between minimum_legal_bid and your_remaining_budget) or pass.\n"
+            "- Passing is permanent for this painting — you cannot re-enter once you pass.\n"
+            "- The last bidder who has not passed wins the painting at their bid amount.\n"
+            "- If you are already the current_leader, the right move is usually to pass and lock in "
+            "your win unless you have a specific reason to deter a remaining active bidder.\n\n"
+            "Budget rules:\n"
+            "- You start with $10,000.\n"
+            "- You can never bid above your_remaining_budget.\n"
+            "- Unspent budget at the end of the game is worth ZERO. There is no rebate, no bonus "
+            "for saving money, no penalty for spending. Budget exists only to win paintings. "
+            "This is true on painting 1 just as much as on painting 12 — hoarding budget for "
+            "'later paintings' throws away cheap wins on earlier ones if those later paintings "
+            "are not actually more valuable (and they are not).\n\n"
+            "You can see the full public scoreboard: everyone's bids this painting, remaining "
+            "budgets, budget history across prior paintings, and paintings won.\n\n"
+            "Reply with a single JSON object and nothing else. Do not wrap in markdown fences. "
+            "Schema:\n"
+            "{\n"
+            '  "reasoning": "<2-4 sentences. Explicitly state your fair-share computation '
+            '(remaining_budget / paintings_remaining), where you stand vs opponents, and why '
+            'you are bidding/passing at this price>",\n'
+            '  "action": "PASS" or a single integer bid amount\n'
+            "}\n"
+            "The reasoning field is required and must contain actual strategic analysis, "
+            "not a restatement of the rules or current state."
         )
+        # Match the exact information set the NN mimic agents see — own state,
+        # current-painting bidding state, scoreboard, and painting-position timing.
+        # No prior-painting bid details or budget timeline; the count of paintings
+        # won by each bidder (in public_bid_table) is the only historical signal.
+        user_prompt = "\n".join(
+            [
+                f"painting_number={painting_number}",
+                f"total_paintings={total_paintings}",
+                f"paintings_remaining={paintings_remaining}",
+                f"is_last_painting={str(is_last_painting).lower()}",
+                f"current_bid={'none_yet' if round_state.current_leader is None else round_state.current_bid}",
+                f"current_leader={round_state.current_leader}",
+                f"minimum_legal_bid={min_next_bid}",
+                f"your_bidder_id={bidder_id}",
+                f"your_remaining_budget={bidder.remaining_budget}",
+                f"your_paintings_won={bidder.paintings_won}",
+                f"active_bidders={','.join(round_state.active_bidders or [])}",
+                f"passed_bidders={','.join(round_state.passed_bidders or [])}",
+                f"public_bid_table={json.dumps(public_bid_table)}",
+                f"bid_history_this_painting={json.dumps(history)}",
+            ]
+        )
+        # Per-model output cap. Pro (Gemini 3.1) and GPT-5.4 do significant
+        # internal reasoning that counts against the visible output budget;
+        # too low and they get truncated mid-JSON, breaking the parser.
+        # Empirically observed Pro hitting 754/768 on its parse-failure calls.
+        _AUCTION_MAX_TOKENS = {
+            "Pro": 6144,
+            "GPT-5.4": 2048,
+            "5.4": 2048,
+            "Opus": 1536,
+            "Sonnet": 1536,
+            "Grok": 1536,
+        }
+        max_tokens_for_call = _AUCTION_MAX_TOKENS.get(bidder_alias, 768)
+        reply = await _call_llm_text_with_reasoning(
+            bidder_alias,
+            system_prompt,
+            user_prompt,
+            max_tokens=max_tokens_for_call,
+            request_reasoning=False,
+            response_format={"type": "json_object"},
+        )
+        raw_text = (reply.get("text") or "").strip()
+        # Parse the JSON {reasoning, action} the model returned.
+        parsed: dict[str, Any] = {}
+        try:
+            parsed = json.loads(raw_text)
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except (json.JSONDecodeError, ValueError):
+            parsed = _extract_json_object(raw_text) or {}
+        thoughts = str(parsed.get("reasoning") or "").strip()
+        usage = reply.get("usage") or {}
+        action_value = parsed.get("action")
+        if isinstance(action_value, (int, float)):
+            raw_action = str(int(action_value))
+        elif isinstance(action_value, str) and action_value.strip():
+            raw_action = action_value.strip()
+        else:
+            # HARD CRASH on parse failure. We refuse to silently substitute a
+            # PASS (or anything else) because that would contaminate the data
+            # set with non-LLM decisions attributed to the LLM. The auction
+            # dies, the slot is left half-completed, and the operator must
+            # rerun with a new seed. Loud failure > silent contamination.
+            try:
+                print(
+                    f"[auction-parse-fail] alias={bidder_alias} painting={painting_number}/{total_paintings} "
+                    f"out_tokens={usage.get('completion_tokens')} raw[:500]={raw_text[:500]!r}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Auction parse failure: {bidder_alias} returned a response with no valid "
+                f"JSON 'action' field on painting {painting_number}/{total_paintings} "
+                f"(out_tokens={usage.get('completion_tokens')}). Crashing the simulation "
+                f"to avoid silently substituting a PASS. Raw response prefix: {raw_text[:500]!r}"
+            )
+        if usage:
+            usage_payload = {
+                "alias": bidder_alias,
+                "painting": painting_number,
+                "total_paintings": total_paintings,
+                **{k: int(v) for k, v in usage.items() if isinstance(v, (int, float))},
+            }
+            print(f"[auction-usage] {json.dumps(usage_payload)}", flush=True)
+            try:
+                sid = _normalize_session_id(SESSION_ID_CTX.get())
+                usage_path = _session_runtime_dir(sid) / "auction_usage.jsonl"
+                usage_path.parent.mkdir(parents=True, exist_ok=True)
+                with usage_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(usage_payload) + "\n")
+            except Exception:
+                pass
+        if thoughts:
+            # Logging failures must never propagate — they used to trigger the
+            # outer auction fallback and replace the LLM's decision with the
+            # math heuristic. Wrap everything.
+            try:
+                print(
+                    f"[auction-think] alias={bidder_alias} painting={painting_number}/{total_paintings} "
+                    f"budget={bidder.remaining_budget} min_next={min_next_bid} reply={raw_action!r}",
+                    flush=True,
+                )
+                print(thoughts, flush=True)
+                print("[/auction-think]", flush=True)
+            except Exception:
+                pass
+            try:
+                bidder_name_for_log = _auction_display_name(bidder_id, env) or bidder_id
+                _append_conversation(
+                    "auction-thinking",
+                    f"{bidder_name_for_log} (thinking)",
+                    "",
+                    thoughts,
+                )
+            except Exception:
+                pass
         if bidder_alias == "Grok" and not re.fullmatch(r"\s*(PASS|\d+)\s*", str(raw_action or ""), flags=re.IGNORECASE):
             raw_action = await _repair_grok_auction_reply(
                 str(raw_action or ""),
@@ -3144,11 +3506,13 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
         _mark_done(_auction_bidder_turn_id(bidder_id))
         return {"auction_action": action, "used_models": True, "llm_error": None}
     except Exception as exc:
+        # HARD CRASH on any LLM-call failure or parse failure. Same rationale
+        # as the parse-fail path: silent substitutions (PASS or math heuristic)
+        # produce non-LLM decisions attributed to the LLM, which contaminates
+        # the dataset. The auction dies and the slot is left half-completed;
+        # the operator must rerun with a new seed.
         _append_fallback_notice("auction", exc)
-        fallback = _build_actions_open_auction(env, payload)
-        fallback["used_models"] = False
-        fallback["llm_error"] = str(exc)
-        return fallback
+        raise
 
 
 async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -4675,6 +5039,11 @@ def _auction_export_data(env: TravelGameEnv) -> tuple[list[str], list[list[Any]]
             bidder = str(entry.get("bidder_id") or "")
             if not bidder:
                 continue
+            # Skip bids the env rejected (over budget, below min, etc.) — they're
+            # preserved in bid_history with invalidated=True but were never
+            # accepted, so they shouldn't count toward the bidder's max bid.
+            if entry.get("invalidated"):
+                continue
             bid_amount = entry.get("bid_amount")
             if isinstance(bid_amount, (int, float)):
                 value = int(bid_amount)
@@ -5191,6 +5560,122 @@ async def api_export_auction_log(session_id: str | None = Query(default=None)) -
         SESSION_ID_CTX.reset(token)
 
 
+def _build_auction_thinking_export(session_id: str) -> str:
+    """Parse step_worker.log for a slot and emit a human-readable thinking log
+    organized by painting + per-turn entries. Includes parse-fail markers and
+    any [auction-usage] token-count headers as comments for full traceability.
+    """
+    sid = _normalize_session_id(session_id)
+    log_path = _session_runtime_dir(sid) / "step_worker.log"
+    if not log_path.exists():
+        return f"# No step_worker.log found for slot {sid}\n"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"# Failed to read step_worker.log for slot {sid}: {exc}\n"
+
+    think_re = re.compile(
+        r"\[auction-think\] alias=([\w\.\-]+) painting=(\d+)/(\d+) "
+        r"budget=(\d+) min_next=(\d+) reply=(\S+)\s*\n(.*?)\n\[/auction-think\]",
+        re.S,
+    )
+    pf_re = re.compile(
+        r"\[auction-parse-fail\] alias=([\w\.\-]+) painting=(\d+)/(\d+) "
+        r"out_tokens=(\S+) raw\[:\d+\]=(.+?)$",
+        re.M,
+    )
+
+    # Collect all events with their source-file position so we can interleave
+    # thinking, parse-fails, and tick markers in chronological order.
+    events: list[tuple[int, str, dict]] = []
+    for m in think_re.finditer(text):
+        events.append((m.start(), "think", {
+            "alias": m.group(1),
+            "painting": int(m.group(2)),
+            "total": int(m.group(3)),
+            "budget": int(m.group(4)),
+            "min_next": int(m.group(5)),
+            "reply": m.group(6).strip("'\""),
+            "body": m.group(7).strip(),
+        }))
+    for m in pf_re.finditer(text):
+        events.append((m.start(), "parse_fail", {
+            "alias": m.group(1),
+            "painting": int(m.group(2)),
+            "total": int(m.group(3)),
+            "out_tokens": m.group(4),
+            "raw": m.group(5).strip(),
+        }))
+    events.sort(key=lambda e: e[0])
+
+    if not events:
+        return f"# No thinking entries found in step_worker.log for slot {sid}\n"
+
+    total_paintings = events[0][2].get("total", 12) if events else 12
+    slot_entry = _find_slot_entry(sid)
+    slot_name = slot_entry.get("name") if slot_entry else sid
+
+    lines: list[str] = []
+    lines.append(f"# Auction Thinking Log")
+    lines.append(f"# Slot: {sid}  ({slot_name})")
+    lines.append(f"# Total events: {len(events)}")
+    lines.append(f"# Paintings: {total_paintings}")
+    lines.append(f"# Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+
+    current_painting: int | None = None
+    turn_in_painting = 0
+    for _, kind, ev in events:
+        p = ev.get("painting")
+        if p != current_painting:
+            current_painting = p
+            turn_in_painting = 0
+            lines.append("")
+            lines.append("=" * 72)
+            lines.append(f"PAINTING {p} / {total_paintings}")
+            lines.append("=" * 72)
+        turn_in_painting += 1
+        if kind == "think":
+            lines.append("")
+            lines.append(
+                f"--- Turn {turn_in_painting} | {ev['alias']} | "
+                f"budget=${ev['budget']} | min_next=${ev['min_next']} | reply={ev['reply']!r} ---"
+            )
+            lines.append(ev["body"])
+        elif kind == "parse_fail":
+            lines.append("")
+            lines.append(
+                f"--- Turn {turn_in_painting} | {ev['alias']} | PARSE_FAIL "
+                f"out_tokens={ev['out_tokens']} ---"
+            )
+            lines.append(f"raw: {ev['raw']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+@app.get("/api/export_auction_thinking")
+async def api_export_auction_thinking(session_id: str | None = Query(default=None)) -> Response:
+    token = _bind_session(_request_session_id(session_id=session_id))
+    try:
+        sid = _normalize_session_id(session_id or SESSION_ID_CTX.get())
+        text = _build_auction_thinking_export(sid)
+        slot_entry = _find_slot_entry(sid)
+        if slot_entry:
+            slug = _filename_slug(slot_entry.get("name"), fallback=sid)
+            filename = f"auction_thinking_{slug}.txt"
+        elif sid and sid != "default":
+            filename = f"auction_thinking_{_filename_slug(sid, fallback='session')}.txt"
+        else:
+            filename = "auction_thinking_transient.txt"
+        return Response(
+            content=text,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    finally:
+        SESSION_ID_CTX.reset(token)
+
+
 @app.get("/api/save_slots")
 async def api_save_slots() -> JSONResponse:
     slots = _slot_list()
@@ -5205,6 +5690,97 @@ async def api_save_slots() -> JSONResponse:
             "folders": folders,
         }
     )
+
+
+def _read_slot_paintings_won(slot_id: str) -> dict[str, int] | None:
+    """Read the latest auction_tables.csv for a slot's exports and return
+    {bidder: paintings_won}. Returns None if no completed export exists."""
+    exports = _session_runtime_dir(slot_id) / "auction_exports"
+    if not exports.is_dir():
+        return None
+    runs = sorted([d for d in exports.iterdir() if d.is_dir()])
+    if not runs:
+        return None
+    csv_path = runs[-1] / "auction_tables.csv"
+    if not csv_path.exists():
+        return None
+    try:
+        text = csv_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for section in text.split("\n\n"):
+        lines = [ln for ln in section.splitlines() if ln.strip()]
+        if not lines or not lines[0].strip().startswith("Auction Summary"):
+            continue
+        if len(lines) < 3:
+            return None
+        header = [c.strip() for c in lines[1].split(",")]
+        try:
+            bi = header.index("bidder")
+            pi = header.index("paintings_won")
+        except ValueError:
+            return None
+        out: dict[str, int] = {}
+        for row in lines[2:]:
+            cells = row.split(",")
+            if len(cells) <= max(bi, pi):
+                continue
+            try:
+                out[cells[bi].strip()] = int(cells[pi].strip())
+            except ValueError:
+                continue
+        return out
+    return None
+
+
+def _folder_distribution(folder_id: str) -> dict[str, Any]:
+    slot_ids = _slots_in_folder(folder_id)
+    bidder_totals: dict[str, int] = {}
+    bidder_appearances: dict[str, int] = {}
+    completed = 0
+    paintings_per_auction = 0
+    for sid in slot_ids:
+        summary = _read_slot_paintings_won(sid)
+        if not summary:
+            continue
+        completed += 1
+        total_here = sum(summary.values())
+        if total_here > paintings_per_auction:
+            paintings_per_auction = total_here
+        for b, n in summary.items():
+            bidder_totals[b] = bidder_totals.get(b, 0) + n
+            bidder_appearances[b] = bidder_appearances.get(b, 0) + 1
+    total_paintings = sum(bidder_totals.values())
+    bidders = sorted(
+        (
+            {
+                "bidder": b,
+                "won": n,
+                "auctions_in": bidder_appearances.get(b, 0),
+                "win_rate": (n / (bidder_appearances[b] * paintings_per_auction))
+                if (bidder_appearances.get(b) and paintings_per_auction)
+                else 0.0,
+                "share": (n / total_paintings) if total_paintings else 0.0,
+            }
+            for b, n in bidder_totals.items()
+        ),
+        key=lambda r: -r["won"],
+    )
+    return {
+        "folder_id": folder_id,
+        "total_slots": len(slot_ids),
+        "completed_slots": completed,
+        "total_paintings": total_paintings,
+        "paintings_per_auction": paintings_per_auction,
+        "bidders": bidders,
+    }
+
+
+@app.get("/api/folder_distributions")
+async def api_folder_distributions() -> JSONResponse:
+    folders = _folder_list()
+    out = {f["folder_id"]: _folder_distribution(f["folder_id"]) for f in folders}
+    return JSONResponse({"ok": True, "distributions": out})
 
 
 @app.post("/api/save_slot_create")
