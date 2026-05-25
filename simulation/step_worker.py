@@ -4,9 +4,20 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 import traceback
 from pathlib import Path
 from typing import Any, Dict
+
+# Force UTF-8 on stdout/stderr so LLM reasoning text with non-ASCII characters
+# (e.g. ≈, ×, em-dashes) doesn't crash print() under Windows cp1252 and trigger
+# the outer auction try/except — which would silently swap the LLM's decision
+# for a math-heuristic fallback.
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 from .server import SESSION_ID_CTX, _bind_session, _persist_runtime, _run_step_job, _runtime
 
