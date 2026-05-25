@@ -1,5 +1,9 @@
 """Standalone in-process auction simulator for reinforcement learning.
 
+Also exposes ``collect_t4_imitation_episode`` for behavior-cloning warm-start:
+runs an auction where the "learner" seat is filled by the T4 heuristic and
+records the (obs, T4_action_idx) pairs as a supervised dataset.
+
 Mirrors the open-painting-auction logic from simulation/env.py without any
 FastAPI/server dependencies, so episodes step ~1000x faster than going
 through HTTP. The learner agent plays one seat; the other four seats are
@@ -25,10 +29,21 @@ from .state import OpenAuctionAction
 
 MIMIC_ALIASES = ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"]
 
-# Action space (same shape as T1-T4 — no jump bids, only pass-or-min-raise).
+# Special opponent alias: a frozen RL policy loaded from a checkpoint. Used
+# for self-play training. Format: "T5-frozen:<absolute_or_relative_path>".
+# Example: "T5-frozen:simulation/models/rl/t5_v1_frozen.pt"
+T5_FROZEN_PREFIX = "T5-frozen:"
+
+# Action space.
+#   0 = PASS
+#   1 = RAISE-min       (bid the minimum legal raise)
+#   2 = JUMP-lockout    (bid just above the richest opponent's budget so they
+#                        can't legally counter — the "Opus $6601" trick. Clamps
+#                        to your own budget and snaps up to a legal bid step.)
 ACTION_PASS = 0
 ACTION_RAISE = 1
-N_ACTIONS = 2
+ACTION_JUMP = 2
+N_ACTIONS = 3
 
 
 @dataclass
@@ -153,11 +168,88 @@ class RLAuctionEnv:
                     self.learner_id,
                     OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS"),
                 )
+        elif action_idx == ACTION_JUMP:
+            # Compute richest active opponent's budget; bid just above it so
+            # no one can legally counter. Snap up to a legal bid step.
+            # CRITICAL: only JUMP when we can outbid the richest opponent
+            # WITHOUT going all-in. JUMP-as-all-in degenerates into "spend
+            # everything on painting 1" — the policy gets +1 reward and no
+            # variance, killing the learning signal. If we don't have a real
+            # budget advantage, JUMP falls back to PASS.
+            min_req = self._min_next_bid()
+            opps = [b for bid, b in self.bidders.items() if bid != self.learner_id]
+            richest_opp = max((b.remaining_budget for b in opps), default=0)
+            step = _min_raise(int(self.round.current_bid) if self.round else 0)
+            target = max(min_req, richest_opp + 1)
+            snapped = ((target + step - 1) // step) * step
+            if snapped <= int(learner.remaining_budget) and snapped >= min_req:
+                self._apply_action(
+                    self.learner_id,
+                    OpenAuctionAction(
+                        action_type="raise",
+                        bid_amount=int(snapped),
+                        message_text=f"JUMP {snapped}",
+                    ),
+                )
+            else:
+                # Either we can't actually outbid the richest opp, or the
+                # snapped amount is illegal — JUMP becomes PASS.
+                self._apply_action(
+                    self.learner_id,
+                    OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS"),
+                )
         else:
             self._apply_action(
                 self.learner_id,
                 OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS"),
             )
+        self._advance_turn()
+        self._advance_to_learner_or_end()
+        wins_after = self.bidders[self.learner_id].paintings_won
+        reward = float(wins_after - wins_before)
+        info = {"painting_index": self.painting_idx, "wins": wins_after}
+        if self.done:
+            return [0.0] * 32, reward, True, {**info, "final_wins": wins_after}
+        return self._observe_learner(), reward, False, info
+
+    def step_continuous(self, action_type: int, bid_fraction: float) -> tuple[list[float], float, bool, dict]:
+        """Hybrid-action step for the continuous policy variant.
+
+        action_type ∈ {0=PASS, 1=RAISE}
+        bid_fraction ∈ [0, 1]: bid_amount = min_next + bid_fraction * (budget - min_next).
+        If the computed bid is below min_next OR above budget, falls back to PASS.
+        """
+        if self.done:
+            return [0.0] * 32, 0.0, True, {"final_wins": self.bidders[self.learner_id].paintings_won if self.learner_id else 0}
+        learner = self.bidders[self.learner_id]
+        wins_before = learner.paintings_won
+        if action_type == 0:
+            self._apply_action(
+                self.learner_id,
+                OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS"),
+            )
+        else:
+            min_req = self._min_next_bid()
+            budget = int(learner.remaining_budget)
+            if min_req > budget:
+                self._apply_action(self.learner_id,
+                                   OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS"))
+            else:
+                frac = max(0.0, min(1.0, float(bid_fraction)))
+                # Snap to a legal step (so the auction's bid increments stay honest).
+                raw = min_req + frac * (budget - min_req)
+                step_size = _min_raise(int(self.round.current_bid) if self.round else 0)
+                # Round up to a multiple of step_size, then clamp to budget.
+                stepped = ((int(raw) + step_size - 1) // step_size) * step_size
+                stepped = max(min_req, min(budget, stepped))
+                self._apply_action(
+                    self.learner_id,
+                    OpenAuctionAction(
+                        action_type="raise",
+                        bid_amount=int(stepped),
+                        message_text=f"CONT-BID {stepped}",
+                    ),
+                )
         self._advance_turn()
         self._advance_to_learner_or_end()
         wins_after = self.bidders[self.learner_id].paintings_won
@@ -316,12 +408,14 @@ class RLAuctionEnv:
         }
 
     def _mimic_act(self, bidder_id: str) -> None:
+        """Run an opponent's bidding decision. Routes to mimic_bid for
+        Mimic-* aliases or to a frozen RL policy for T5-frozen:<path> aliases.
+        """
         assert self.round is not None
         bs = self.bidders[bidder_id]
         all_budgets = {bid: int(b.remaining_budget) for bid, b in self.bidders.items()}
         all_counts = {bid: int(b.paintings_won) for bid, b in self.bidders.items()}
-        action = mimic_bid(
-            alias=bs.alias,
+        common = dict(
             bidder_id=bidder_id,
             your_budget=int(bs.remaining_budget),
             your_count=int(bs.paintings_won),
@@ -339,6 +433,20 @@ class RLAuctionEnv:
             min_next_bid=int(self._min_next_bid()),
             start_budget=int(self.start_budget),
         )
+        if bs.alias.startswith(T5_FROZEN_PREFIX):
+            from pathlib import Path as _Path
+            from .rl_agent import rl_bid as _rl_bid, _load_policy as _rl_load
+            ckpt_path = _Path(bs.alias[len(T5_FROZEN_PREFIX):])
+            # Force-load this specific checkpoint into the policy cache (rl_bid
+            # uses DEFAULT_CKPT internally otherwise). The simplest path: load
+            # the policy once via _load_policy(ckpt_path), then call rl_bid
+            # which now finds the cached entry. But rl_bid loads from
+            # DEFAULT_CKPT by default — we need a dedicated call.
+            _ensured = _rl_load(ckpt_path)  # populates cache
+            # Build the action directly so we use THIS checkpoint, not DEFAULT.
+            action = _frozen_t5_bid(_ensured, **common)
+        else:
+            action = mimic_bid(alias=bs.alias, **common)
         self._apply_action(bidder_id, action)
 
     def _observe_learner(self) -> list[float]:
@@ -400,3 +508,119 @@ class RLAuctionEnv:
                 return
             self._mimic_act(current)
             self._advance_turn()
+
+
+def _frozen_t5_bid(
+    policy,
+    *,
+    bidder_id: str,
+    your_budget: int,
+    your_count: int,
+    current_bid: int,
+    current_leader: str | None,
+    active_bidders: list[str],
+    bid_history: list[dict],
+    all_budgets: dict[str, int],
+    all_counts: dict[str, int],
+    public_bid_table: dict[str, dict],
+    painting_number: int,
+    total_paintings: int,
+    paintings_remaining: int,
+    is_last_painting: bool,
+    min_next_bid: int,
+    start_budget: int,
+) -> OpenAuctionAction:
+    """Bid using an already-loaded PolicyNet. Mirrors the discrete-action
+    inference path in rl_agent.rl_bid but takes the policy directly so callers
+    can use a specific checkpoint without globally mutating the inference cache.
+    """
+    import numpy as np
+    import torch
+    from .mimic_agent import build_feature_vector
+    feat = build_feature_vector(
+        bidder_id=bidder_id,
+        your_budget=your_budget,
+        your_count=your_count,
+        current_bid=current_bid,
+        current_leader=current_leader,
+        active_bidders=active_bidders,
+        bid_history=bid_history,
+        all_budgets=all_budgets,
+        all_counts=all_counts,
+        public_bid_table=public_bid_table,
+        painting_number=painting_number,
+        total_paintings=total_paintings,
+        paintings_remaining=paintings_remaining,
+        is_last_painting=is_last_painting,
+        min_next_bid=min_next_bid,
+        start_budget=start_budget,
+    )
+    x = torch.from_numpy(np.array([feat], dtype=np.float32))
+    with torch.no_grad():
+        logits = policy(x)[0]
+    action_idx = int(torch.argmax(logits).item())
+    if action_idx == 0 or int(min_next_bid) > int(your_budget):
+        return OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS")
+    if action_idx == 2:
+        opps = {bid: b for bid, b in all_budgets.items() if bid != bidder_id}
+        richest_opp = max(opps.values(), default=0)
+        cb = int(current_bid)
+        step = 50 if cb < 1000 else (100 if cb < 3000 else 250)
+        target = max(int(min_next_bid), int(richest_opp) + 1)
+        snapped = ((target + step - 1) // step) * step
+        if snapped <= int(your_budget) and snapped >= int(min_next_bid):
+            return OpenAuctionAction(action_type="raise", bid_amount=int(snapped),
+                                     message_text=f"JUMP {snapped}")
+        return OpenAuctionAction(action_type="pass", bid_amount=None, message_text="PASS")
+    return OpenAuctionAction(action_type="raise", bid_amount=int(min_next_bid),
+                             message_text=f"BID {int(min_next_bid)}")
+
+
+def collect_t4_imitation_episode(
+    env: RLAuctionEnv,
+    *,
+    learner_seat: int,
+    opponent_aliases: list[str],
+) -> dict[str, list]:
+    """Run one auction where the learner-seat agent uses the T4 heuristic.
+    Returns the (obs, T4-action-label) pairs the learner observed.
+
+    Labels are in {0=PASS, 1=RAISE-min}. T4 never emits JUMP (it always bids
+    min_next_bid when below its cap), so the BC dataset contains only PASS/RAISE
+    examples. The policy can still learn to emit JUMP after PPO fine-tuning.
+    """
+    from .policies import open_auction_policy_tier4_market_clearing
+    from .state import OpenAuctionBidderState
+
+    obs, _ = env.reset(learner_seat=learner_seat, opponent_aliases=opponent_aliases)
+    states: list[list[float]] = []
+    labels: list[int] = []
+    while not env.done:
+        learner = env.bidders[env.learner_id]
+        # T4 needs a bidder-state-like object + scoreboard. Reconstruct cheaply.
+        bidder_state = OpenAuctionBidderState(
+            bidder_id=env.learner_id,
+            remaining_budget=int(learner.remaining_budget),
+            paintings_won=int(learner.paintings_won),
+            won_painting_ids=[],
+        )
+        painting_counts = {bid: int(b.paintings_won) for bid, b in env.bidders.items()}
+        all_budgets = {bid: int(b.remaining_budget) for bid, b in env.bidders.items()}
+        t4_action = open_auction_policy_tier4_market_clearing(
+            bidder_state,
+            env.round,
+            paintings_remaining=env.num_paintings - env.painting_idx,
+            min_next_bid=env._min_next_bid(),
+            painting_counts=painting_counts,
+            all_budgets=all_budgets,
+        )
+        if t4_action.action_type == "pass":
+            action_idx = ACTION_PASS
+        else:
+            action_idx = ACTION_RAISE  # T4 always bids min_next_bid → maps to RAISE-min
+        states.append(list(obs))
+        labels.append(int(action_idx))
+        obs, _r, done, _info = env.step(action_idx)
+        if done:
+            break
+    return {"states": states, "labels": labels}

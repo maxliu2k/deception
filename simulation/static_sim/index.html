@@ -9,6 +9,22 @@
       body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #f5f4f0; color: #1c1917; margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
       header { padding: 10px 20px; border-bottom: 1px solid #e7e5e0; background: #fff; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 0; }
       .header-row { display: flex; align-items: center; gap: 12px; }
+      #t5ProgressContainer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      .t5-progress-bar { display: flex; flex-direction: column; gap: 3px; min-width: 230px; max-width: 320px; padding: 5px 11px; background: #f5f4f0; border: 1px solid #e7e5e0; border-radius: 7px; cursor: pointer; }
+      .t5-progress-bar:hover { border-color: #9a3412; }
+      .t5-progress-bar .t5-line { font-size: 11px; color: #57534e; display: flex; justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; line-height: 1.2; }
+      .t5-progress-bar .t5-label { font-weight: 600; color: #1c1917; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+      .t5-progress-bar .t5-bar-outer { background: #e7e5e0; height: 5px; border-radius: 999px; overflow: hidden; }
+      .t5-progress-bar .t5-bar-fill { background: #9a3412; height: 100%; width: 0%; transition: width .4s ease; border-radius: 999px; }
+      .t5-progress-bar.finished .t5-bar-fill { background: #16a34a; }
+      .t5-progress-bar.stopped  .t5-bar-fill { background: #d97706; }
+      #t5ChartOverlay { display: none; position: fixed; inset: 0; background: rgba(28,25,23,.45); z-index: 1000; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
+      #t5ChartOverlay.show { display: flex; }
+      #t5ChartCard { background: #fff; border-radius: 10px; padding: 18px 22px; width: 100%; max-width: 800px; box-shadow: 0 8px 40px rgba(0,0,0,.18); }
+      .t5-chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+      .t5-chart-header h3 { margin: 0; font-size: 15px; }
+      .t5-chart-block { margin-bottom: 14px; }
+      .t5-chart-title { font-size: 12px; color: #57534e; margin-bottom: 4px; font-weight: 600; }
       h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
       .header-sub { font-size: 12px; color: #78716c; margin-top: 1px; }
       .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 10px; padding: 10px 14px; min-height: 0; height: 100%; overflow: hidden; box-sizing: border-box; }
@@ -122,11 +138,11 @@
       .folder-card-back { background: #f5f4f0; }
       .folder-dist { margin: 6px 0 10px; display: flex; flex-direction: column; gap: 3px; }
       .folder-dist-head { color: #57534e; font-size: 11px; margin-bottom: 4px; }
-      .folder-dist-row { display: grid; grid-template-columns: 96px 1fr auto; align-items: center; gap: 6px; font-size: 11px; }
+      .folder-dist-row { display: grid; grid-template-columns: 96px 1fr 110px; align-items: center; gap: 6px; font-size: 11px; }
       .folder-dist-label { color: #1c1917; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .folder-dist-bar { background: #f5f4f0; border-radius: 3px; height: 8px; overflow: hidden; }
       .folder-dist-fill { height: 100%; border-radius: 3px; }
-      .folder-dist-val { color: #57534e; font-variant-numeric: tabular-nums; }
+      .folder-dist-val { color: #57534e; font-variant-numeric: tabular-nums; text-align: right; }
       .folder-dist-empty { color: #a8a29e; font-size: 11px; margin: 4px 0 8px; font-style: italic; }
       .breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #78716c; margin-bottom: 12px; }
       .breadcrumb a { color: #9a3412; cursor: pointer; text-decoration: none; }
@@ -167,11 +183,11 @@
   <body>
     <div id="confirmOverlay" class="confirm-overlay">
       <div class="confirm-card">
-        <div class="confirm-card-title" id="confirmTitle">Remove Slot</div>
+        <div class="confirm-card-title" id="confirmTitle">Delete Slot</div>
         <div class="confirm-card-body" id="confirmBody"></div>
         <div class="confirm-card-btns">
           <button id="confirmCancelBtn" class="ghost" type="button">Cancel</button>
-          <button id="confirmOkBtn" class="danger" type="button">Remove</button>
+          <button id="confirmOkBtn" class="danger" type="button">Delete</button>
         </div>
       </div>
     </div>
@@ -185,11 +201,21 @@
         </div>
       </div>
     </div>
+    <div id="t5ChartOverlay" onclick="if(event.target===this)this.classList.remove('show')">
+      <div id="t5ChartCard">
+        <div class="t5-chart-header">
+          <h3>T5 Training Metrics</h3>
+          <button type="button" class="ghost" onclick="document.getElementById('t5ChartOverlay').classList.remove('show')">Close</button>
+        </div>
+        <div id="t5ChartBody"></div>
+      </div>
+    </div>
     <header>
       <div>
         <h1>AI Agent Simulation</h1>
         <div class="header-sub">Choose a session, configure, and run.</div>
       </div>
+      <div id="t5ProgressContainer" title="T5 (PPO) training progress — click any bar for charts"></div>
       <button id="openSlotMenuBtn" class="ghost" type="button">Sessions</button>
     </header>
     <div id="slotMenu" class="menu-screen">
@@ -221,20 +247,22 @@
             <option value="mediation">Mediation</option>
             <option value="repeated_mediation">Repeated Mediation</option>
           </select>
-          <div class="label" style="margin-top:8px;">Scenario</div>
-          <select id="scenario" class="field"></select>
+          <div id="scenarioRow">
+            <div class="label" style="margin-top:8px;">Scenario</div>
+            <select id="scenario" class="field"></select>
+          </div>
           <div class="label" style="margin-top:8px;">Seed</div>
           <input id="seed" class="field" type="number" value="7" />
         </div>
-        <div class="cfg-section">
-          <div class="label">Save Slot</div>
+        <!-- Save Slot section is hidden — navigate sessions via the folder
+             menu (Sessions button) instead. Elements stay in the DOM so the
+             existing JS that reads/writes activeSaveSlot() keeps working. -->
+        <div class="cfg-section" style="display:none;">
           <select id="saveSlot" class="field">
             <option value="">Transient (auto-updating)</option>
           </select>
-          <div class="hint" id="saveSlotHint" style="margin-top:4px;"></div>
-          <div class="btn-row">
-            <button id="deleteSlotBtn" class="danger" type="button">Remove</button>
-          </div>
+          <div class="hint" id="saveSlotHint"></div>
+          <button id="deleteSlotBtn" class="danger" type="button">Delete</button>
         </div>
         <div class="cfg-section">
           <div class="btn-row">
@@ -692,10 +720,17 @@
       function refreshScenarioOptions() {
         const mode = canonicalMode(document.getElementById("mode").value);
         const sel = document.getElementById("scenario");
+        const row = document.getElementById("scenarioRow");
         const options = SCENARIOS_BY_MODE[mode] || [];
         sel.innerHTML = options.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
         // Default to the random option (last entry, empty value) so each reset generates fresh data
         if (options.length) sel.value = options[options.length - 1][0];
+        // Hide the row entirely when there's no meaningful choice — i.e., when
+        // only one named scenario exists (the "random" entry just picks it).
+        // This catches open_painting_auction and buyer_seller_negotiation which
+        // each have a single canonical scenario.
+        const namedCount = options.filter(([v]) => v !== "").length;
+        if (row) row.classList.toggle("hidden", namedCount <= 1);
       }
 
       function refreshPolicyPanels() {
@@ -925,6 +960,215 @@
         return MODEL_DISPLAY_NAMES[s] || s;
       }
 
+      // ──────────────────────────────────────────────────────────────────────
+      // T5 training progress polling. Polls /api/t5_training_status every 3s
+      // and renders one bar per active or recently-completed run, side-by-side.
+      // Bars persist permanently (no auto-hide). Click any bar -> chart modal.
+      // ──────────────────────────────────────────────────────────────────────
+      function _formatElapsed(secs) {
+        const m = Math.floor(secs / 60);
+        const s = Math.floor(secs % 60);
+        return m > 0 ? `${m}m ${s}s` : `${s}s`;
+      }
+
+      function _renderT5Bar(container, run) {
+        const st = run.status || {};
+        const rid = String(run.run_id != null ? run.run_id : (st.started_at || Math.random()));
+        let bar = container.querySelector(`[data-t5-run-id="${rid}"]`);
+        if (!bar) {
+          bar = document.createElement("div");
+          bar.className = "t5-progress-bar";
+          bar.setAttribute("data-t5-run-id", rid);
+          bar.innerHTML = `
+            <div class="t5-line"><span class="t5-label"></span><span class="t5-episode"></span></div>
+            <div class="t5-bar-outer"><div class="t5-bar-fill"></div></div>
+            <div class="t5-line"><span class="t5-wins"></span><span class="t5-elapsed"></span></div>`;
+          bar.addEventListener("click", showT5TrainingCharts);
+          container.appendChild(bar);
+        }
+        const ep = Number(st.episode || 0);
+        const tgt = Number(st.target_episodes || 0);
+        const pct = tgt > 0 ? Math.max(0, Math.min(100, (ep / tgt) * 100)) : 0;
+        const avgW = (typeof st.avg_wins_last100 === "number") ? st.avg_wins_last100.toFixed(2) : "—";
+        const best = (typeof st.best_eval_wins === "number") ? ` (best ${st.best_eval_wins.toFixed(2)})` : "";
+        const baseLabel = st.label || st.action_space || `run ${rid}`;
+        let label = baseLabel;
+        bar.classList.remove("finished", "stopped");
+        if (st.finished) {
+          if (st.early_stopped) { bar.classList.add("stopped"); label += " (early-stopped)"; }
+          else { bar.classList.add("finished"); label += " (complete)"; }
+        } else if (!run.running && !run.alive) {
+          bar.classList.add("stopped");
+          label += " (stalled)";
+        }
+        bar.querySelector(".t5-label").textContent = label;
+        bar.querySelector(".t5-episode").textContent = `${ep.toLocaleString()} / ${tgt.toLocaleString()}`;
+        bar.querySelector(".t5-bar-fill").style.width = `${pct}%`;
+        bar.querySelector(".t5-wins").textContent = `avg_wins ${avgW}${best}`;
+        bar.querySelector(".t5-elapsed").textContent = _formatElapsed(Number(st.elapsed_s || 0));
+      }
+
+      async function pollT5Status() {
+        const container = document.getElementById("t5ProgressContainer");
+        if (!container) return;
+        try {
+          const res = await fetch(`/api/t5_training_status?_=${Date.now()}`, { cache: "no-store" });
+          if (!res.ok) return;
+          const data = await res.json();
+          const runs = Array.isArray(data && data.runs) ? data.runs : [];
+          // Drop bars for run_ids that no longer appear in the response.
+          const presentIds = new Set(runs.map((r) => String(r.run_id != null ? r.run_id : (r.status && r.status.started_at) || "")));
+          Array.from(container.querySelectorAll("[data-t5-run-id]")).forEach((bar) => {
+            if (!presentIds.has(bar.getAttribute("data-t5-run-id"))) {
+              bar.remove();
+            }
+          });
+          for (const run of runs) {
+            _renderT5Bar(container, run);
+          }
+        } catch (err) { /* keep current state */ }
+      }
+      setInterval(pollT5Status, 3000);
+      window.addEventListener("DOMContentLoaded", pollT5Status);
+      pollT5Status();
+
+      // ──────────────────────────────────────────────────────────────────────
+      // T5 training charts modal (avg_wins vs episode + losses vs episode).
+      // ──────────────────────────────────────────────────────────────────────
+      async function showT5TrainingCharts() {
+        const overlay = document.getElementById("t5ChartOverlay");
+        if (!overlay) return;
+        overlay.classList.add("show");
+        const body = document.getElementById("t5ChartBody");
+        body.innerHTML = '<div style="padding:24px;color:#78716c;">Loading metrics…</div>';
+        try {
+          const res = await fetch(`/api/t5_training_metrics?_=${Date.now()}`, { cache: "no-store" });
+          const data = await res.json();
+          const runs = ((data && data.runs) || []).slice(0, 5); // top 5 (newest-first)
+          if (!runs.length) {
+            body.innerHTML = '<div style="padding:24px;color:#78716c;">No training metrics yet. Kick off a T5 training run.</div>';
+            return;
+          }
+          // Newest run defines the x-axis cap; truncate older runs to it.
+          const newestMaxEp = Math.max(0, ...runs[0].metrics.map((r) => Number(r.episode || 0)));
+          for (const run of runs) {
+            run.metrics = run.metrics.filter((r) => Number(r.episode || 0) <= newestMaxEp);
+          }
+          // Opacity gradient: newest=1.0 → oldest=0.18
+          const opacityFor = (i, n) => {
+            if (n <= 1) return 1.0;
+            return Math.max(0.18, 1.0 - (i / (n - 1)) * 0.82);
+          };
+          const runsWithOpacity = runs.map((run, i) => ({ ...run, opacity: opacityFor(i, runs.length) }));
+          body.innerHTML = `
+            <div class="t5-chart-block">
+              <div class="t5-chart-title">Avg paintings won (rolling last 100 episodes)</div>
+              ${renderMultiRunChart(runsWithOpacity, [
+                { key: "avg_wins_last100", color: "#9a3412", label: "avg_wins_last100" },
+              ], { yMin: 0, yLabel: "wins" })}
+            </div>
+            <div class="t5-chart-block">
+              <div class="t5-chart-title">Loss vs episode</div>
+              ${renderMultiRunChart(runsWithOpacity, [
+                { key: "policy_loss", color: "#1e3a8a", label: "policy_loss" },
+                { key: "value_loss", color: "#dc2626", label: "value_loss" },
+              ], { yLabel: "loss" })}
+            </div>
+            <div style="margin-top:8px;font-size:11px;color:#57534e;">
+              <strong>${runs.length}</strong> run${runs.length === 1 ? "" : "s"} shown
+              (older runs truncated to ${newestMaxEp} eps; opacity fades from newest to oldest).
+              <div style="margin-top:6px;">
+                ${runsWithOpacity.map((r) => {
+                  const d = new Date((r.started_at || 0) * 1000);
+                  const stamp = isNaN(d.getTime()) ? r.id : d.toLocaleString();
+                  const eps = r.metrics.length ? r.metrics[r.metrics.length - 1].episode : 0;
+                  return `<div style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;">
+                    <span style="width:18px;height:3px;background:#1c1917;opacity:${r.opacity};display:inline-block;border-radius:2px;"></span>
+                    <span style="color:#1c1917;opacity:${0.5 + 0.5 * r.opacity};">${stamp} · ${eps} eps</span>
+                  </div>`;
+                }).join("")}
+              </div>
+            </div>`;
+        } catch (err) {
+          body.innerHTML = `<div style="padding:24px;color:#dc2626;">Failed to load metrics: ${escapeHtml(String(err))}</div>`;
+        }
+      }
+
+      function renderMultiRunChart(runs, series, opts) {
+        const W = 720, H = 220, padL = 50, padR = 14, padT = 12, padB = 32;
+        const plotW = W - padL - padR;
+        const plotH = H - padT - padB;
+        // Compute global x range from the newest run (already capped above) and
+        // global y range from all values in all runs/series.
+        let xMin = Infinity, xMax = -Infinity;
+        const allY = [];
+        for (const run of runs) {
+          for (const r of run.metrics) {
+            const ep = Number(r.episode || 0);
+            if (ep < xMin) xMin = ep;
+            if (ep > xMax) xMax = ep;
+            for (const s of series) {
+              const v = r[s.key];
+              if (typeof v === "number" && Number.isFinite(v)) allY.push(v);
+            }
+          }
+        }
+        if (!Number.isFinite(xMin)) { xMin = 0; xMax = 1; }
+        const xRange = Math.max(1, xMax - xMin);
+        let yMin = (opts && typeof opts.yMin === "number") ? opts.yMin : Math.min(...allY);
+        let yMax = (opts && typeof opts.yMax === "number") ? opts.yMax : Math.max(...allY);
+        if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) { yMin = 0; yMax = 1; }
+        if (yMin === yMax) { yMax = yMin + 1; }
+        const yPad = (yMax - yMin) * 0.08;
+        yMax += yPad; yMin -= yPad;
+        const xAt = v => padL + ((v - xMin) / xRange) * plotW;
+        const yAt = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+        let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="background:#fff;border:1px solid #e7e5e0;border-radius:6px;">`;
+        // Y grid + labels
+        const yTicks = 4;
+        for (let i = 0; i <= yTicks; i++) {
+          const v = yMin + (yMax - yMin) * i / yTicks;
+          const y = yAt(v);
+          svg += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#f5f4f0" />`;
+          svg += `<text x="${padL - 6}" y="${y + 3}" font-size="10" fill="#78716c" text-anchor="end">${v.toFixed(2)}</text>`;
+        }
+        // X axis ticks
+        const xTickCount = 5;
+        for (let i = 0; i <= xTickCount; i++) {
+          const v = xMin + xRange * i / xTickCount;
+          svg += `<text x="${xAt(v)}" y="${H - 10}" font-size="10" fill="#78716c" text-anchor="middle">${Math.round(v)}</text>`;
+        }
+        // Zero line if range crosses 0
+        if (yMin < 0 && yMax > 0) {
+          const y0 = yAt(0);
+          svg += `<line x1="${padL}" y1="${y0}" x2="${W - padR}" y2="${y0}" stroke="#a8a29e" stroke-dasharray="3 3" />`;
+        }
+        // Draw older runs first (lower z-order) so newest sits on top.
+        const reversed = runs.slice().reverse();
+        for (const run of reversed) {
+          for (const s of series) {
+            let d = "";
+            let started = false;
+            for (const r of run.metrics) {
+              const v = r[s.key];
+              if (typeof v !== "number" || !Number.isFinite(v)) continue;
+              const x = xAt(Number(r.episode || 0));
+              const y = yAt(v);
+              d += (started ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+              started = true;
+            }
+            const sw = run.opacity >= 0.99 ? 2.0 : 1.4; // newest a touch thicker
+            svg += `<path d="${d}" fill="none" stroke="${s.color}" stroke-opacity="${run.opacity}" stroke-width="${sw}" />`;
+          }
+        }
+        if (opts && opts.yLabel) {
+          svg += `<text x="14" y="${padT + plotH / 2}" font-size="11" fill="#57534e" transform="rotate(-90 14 ${padT + plotH / 2})" text-anchor="middle">${opts.yLabel}</text>`;
+        }
+        svg += "</svg>";
+        const legend = series.map(s => `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:11px;color:#57534e;"><span style="width:10px;height:10px;border-radius:999px;background:${s.color};display:inline-block;"></span>${s.label}</span>`).join("");
+        return svg + `<div style="margin-top:4px;">${legend}</div>`;
+      }
+
       function normalizeBidderKey(bidderId) {
         return String(bidderId || "").trim().toLowerCase();
       }
@@ -964,23 +1208,29 @@
         }
         const total = dist.total_paintings;
         const ppa = dist.paintings_per_auction || 12;
-        const rows = dist.bidders.map((b) => {
-          const share = b.share || 0;
-          const pct = (share * 100).toFixed(1);
-          const winRate = (b.win_rate || 0) * 100;
+        const totalAuctions = Math.max(1, dist.completed_slots || 1);
+        // Normalize by participation: rate = wins / (paintings the bidder was
+        // actually IN). Without this, mimics displaced from some math-tier
+        // batches look weaker than they are. Sort by win_rate too.
+        const sorted = dist.bidders.slice().sort((a, b) => (b.win_rate || 0) - (a.win_rate || 0));
+        const rows = sorted.map((b) => {
+          const rate = (b.win_rate || 0);
+          const ratePct = (rate * 100).toFixed(1);
           const color = bidderColor(b.bidder);
-          const widthPct = Math.max(2, share * 100);
+          const widthPct = Math.max(2, rate * 100);
           const displayLabel = modelDisplayName(b.bidder);
+          const presence = b.auctions_in || 0;
+          const presencePct = totalAuctions ? (presence / totalAuctions * 100) : 0;
           return `
             <div class="folder-dist-row">
-              <div class="folder-dist-label" title="${escapeHtml(displayLabel)}">${escapeHtml(displayLabel)}</div>
+              <div class="folder-dist-label" title="${escapeHtml(displayLabel)} — ${b.won} wins / ${presence} auctions (${presencePct.toFixed(0)}% present)">${escapeHtml(displayLabel)}</div>
               <div class="folder-dist-bar"><div class="folder-dist-fill" style="width:${widthPct}%;background:${color}"></div></div>
-              <div class="folder-dist-val">${b.won} (${pct}%)</div>
+              <div class="folder-dist-val">${b.won}/${presence * ppa} (${ratePct}%)</div>
             </div>`;
         }).join("");
         return `
           <div class="folder-dist">
-            <div class="folder-dist-head">${dist.completed_slots}/${dist.total_slots} auctions · ${total} paintings · ${ppa}/auction</div>
+            <div class="folder-dist-head">${dist.completed_slots}/${dist.total_slots} auctions · ${ppa} paintings each · % = wins ÷ paintings-bidder-was-in</div>
             ${rows}
           </div>`;
       }
@@ -1427,7 +1677,7 @@
                 <button type="button" data-open-slot="${slot.slot_id}" style="flex:0 0 100%">${openLabel}</button>
                 <button type="button" class="alt" data-rename-slot="${slot.slot_id}">Rename</button>
                 <button type="button" class="alt" data-move-slot="${slot.slot_id}" data-move-slot-name="${label}">Move</button>
-                <button type="button" class="danger" data-remove-slot="${slot.slot_id}" data-remove-slot-name="${label}">Remove</button>
+                <button type="button" class="danger" data-delete-slot="${slot.slot_id}" data-delete-slot-name="${label}">Delete</button>
               </div>
             </div>
           `);
@@ -1473,14 +1723,14 @@
             await openSessionFromMenu(btn.getAttribute("data-open-slot") || "");
           };
         }
-        for (const btn of Array.from(grid.querySelectorAll("[data-remove-slot]"))) {
+        for (const btn of Array.from(grid.querySelectorAll("[data-delete-slot]"))) {
           btn.onclick = () => {
-            const slotId = btn.getAttribute("data-remove-slot") || "";
-            const name = btn.getAttribute("data-remove-slot-name") || slotId;
+            const slotId = btn.getAttribute("data-delete-slot") || "";
+            const name = btn.getAttribute("data-delete-slot-name") || slotId;
             if (!slotId) return;
             showConfirm(
-              "Remove Slot",
-              `Remove "${name}"? This will stop any running workers and permanently delete the slot.`,
+              "Delete Slot",
+              `Delete "${name}"? This will stop any running workers and permanently delete the slot.`,
               async () => {
                 await forceClearSlot(slotId);
                 await deleteSlotFromMenu(slotId);
@@ -2427,8 +2677,8 @@
         if (!slotId) { alert("Select a save slot first."); return; }
         const name = slotDisplayName(slotId, cachedSaveSlots);
         showConfirm(
-          "Remove Slot",
-          `Remove "${name}"? This will stop any running workers and permanently delete the slot.`,
+          "Delete Slot",
+          `Delete "${name}"? This will stop any running workers and permanently delete the slot.`,
           async () => {
             await forceClearSlot(slotId);
             await deleteSlotFromMenu(slotId);
