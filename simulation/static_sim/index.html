@@ -243,9 +243,6 @@
             <option value="five_attr" selected>Five Attributes</option>
             <option value="open_painting_auction">Open Painting Auction</option>
             <option value="buyer_seller_negotiation">Buyer–Seller Negotiation</option>
-            <option value="simple_resort_deception">Simple Resort Deception</option>
-            <option value="mediation">Mediation</option>
-            <option value="repeated_mediation">Repeated Mediation</option>
           </select>
           <div id="scenarioRow">
             <div class="label" style="margin-top:8px;">Scenario</div>
@@ -306,62 +303,6 @@
               <div class="policy-box">
                 <div class="label">Open Painting Auction</div>
                 <div class="hint">Five-bidder sequential auction — no policy overrides.</div>
-              </div>
-            </div>
-            <div id="policies-simple_resort_deception" class="hidden">
-              <div class="policy-box">
-                <div class="label">Simple Resort Deception Policies</div>
-                <select id="sr-resortPolicy">
-                  <option value="truthful" selected>Resort: truthful</option>
-                  <option value="always_claim_luxury">Resort: always claim luxury</option>
-                  <option value="conditional_lie">Resort: conditional lie</option>
-                </select>
-                <select id="sr-agentPolicy">
-                  <option value="truthful_relay" selected>Agent: truthful relay</option>
-                  <option value="always_sell">Agent: always sell</option>
-                  <option value="soft_sell">Agent: soft sell</option>
-                  <option value="truth_if_known">Agent: truth if known</option>
-                </select>
-                <select id="sr-customerPolicy">
-                  <option value="book_if_luxury_claimed" selected>Customer: book if luxury claimed</option>
-                  <option value="confidence_threshold">Customer: confidence threshold</option>
-                </select>
-              </div>
-            </div>
-            <div id="policies-mediation" class="hidden">
-              <div class="policy-box">
-                <div class="label">Mediation Policies</div>
-                <select id="med-customerPolicy">
-                  <option value="truthful" selected>Customer: truthful</option>
-                  <option value="budget_hiding">Customer: hide budget</option>
-                </select>
-                <select id="med-agentPolicy">
-                  <option value="commission_max" selected>Agent: commission max</option>
-                  <option value="customer_aligned">Agent: customer aligned</option>
-                </select>
-              </div>
-            </div>
-            <div id="policies-repeated_mediation" class="hidden">
-              <div class="policy-box">
-                <div class="label">Repeated Mediation Policies</div>
-                <select id="rep-resortPolicy">
-                  <option value="reputation_building" selected>Resort: reputation building</option>
-                  <option value="soft_bluff_when_trusted">Resort: soft bluff when trusted</option>
-                  <option value="desperate_hard_sell">Resort: desperate hard sell</option>
-                  <option value="rebuild_after_caught">Resort: rebuild after caught</option>
-                </select>
-                <select id="rep-agentPolicy">
-                  <option value="reputation_preserving" selected>Agent: reputation preserving</option>
-                  <option value="exploit_then_recover">Agent: exploit then recover</option>
-                  <option value="blacklist_unreliable_resorts">Agent: blacklist unreliable resorts</option>
-                  <option value="soft_sell_under_low_trust">Agent: soft sell under low trust</option>
-                </select>
-                <select id="rep-customerPolicy">
-                  <option value="verify_if_suspicious" selected>Customer: verify if suspicious</option>
-                  <option value="trusting">Customer: trusting</option>
-                  <option value="skeptical_memory">Customer: skeptical memory</option>
-                  <option value="exit_after_betrayal">Customer: exit after betrayal</option>
-                </select>
               </div>
             </div>
           </div>
@@ -463,25 +404,6 @@
         ],
         buyer_seller_negotiation: [
           ["mid_market_guitar", "mid_market_guitar - overlapping reservation prices"],
-          ["", "random"],
-        ],
-        simple_resort_deception: [
-          ["luxury", "luxury"],
-          ["not_luxury", "not_luxury"],
-          ["", "random"],
-        ],
-        mediation: [
-          ["A", "A — High commission bad fit"],
-          ["B", "B — Resort screening tension"],
-          ["C", "C — Customer underreporting"],
-          ["", "random"],
-        ],
-        repeated_mediation: [
-          ["trust_build_then_betray", "trust_build_then_betray"],
-          ["good_resort_bad_resort_learning", "good_resort_bad_resort_learning"],
-          ["customer_high_verification", "customer_high_verification"],
-          ["agent_high_commission_temptation", "agent_high_commission_temptation"],
-          ["all_low_credibility_market", "all_low_credibility_market"],
           ["", "random"],
         ],
       };
@@ -735,10 +657,10 @@
 
       function refreshPolicyPanels() {
         const mode = canonicalMode(document.getElementById("mode").value);
-        for (const m of ["five_attr", "open_painting_auction", "buyer_seller_negotiation", "simple_resort_deception", "mediation", "repeated_mediation"]) {
+        for (const m of ["five_attr", "open_painting_auction", "buyer_seller_negotiation"]) {
           document.getElementById(`policies-${m}`).classList.toggle("hidden", m !== mode);
         }
-        document.getElementById("stepBtn").textContent = mode === "open_painting_auction" ? "Run Full Auction" : (mode === "five_attr" || mode === "repeated_mediation" ? "Step Round" : "Step Episode");
+        document.getElementById("stepBtn").textContent = mode === "open_painting_auction" ? "Run Full Auction" : (mode === "five_attr" ? "Step Round" : "Step Episode");
       }
 
       function refreshModeChrome() {
@@ -2564,23 +2486,6 @@
           use_models: true,
           agent_policy:    document.getElementById("fa-agentPolicy").value,
           customer_policy: document.getElementById("fa-customerPolicy").value,
-        };
-        if (mode === "simple_resort_deception") return {
-          use_models: true,
-          resort_policy:   document.getElementById("sr-resortPolicy").value,
-          agent_policy:    document.getElementById("sr-agentPolicy").value,
-          customer_policy: document.getElementById("sr-customerPolicy").value,
-        };
-        if (mode === "mediation") return {
-          use_models: true,
-          agent_policy:    document.getElementById("med-agentPolicy").value,
-          customer_policy: document.getElementById("med-customerPolicy").value,
-        };
-        if (mode === "repeated_mediation") return {
-          use_models: true,
-          resort_policy:   document.getElementById("rep-resortPolicy").value,
-          agent_policy:    document.getElementById("rep-agentPolicy").value,
-          customer_policy: document.getElementById("rep-customerPolicy").value,
         };
         return { use_models: true };
       }
