@@ -869,6 +869,11 @@
         "DeepSeek": "DeepSeek V3.2",
         "Kimi": "Kimi K2.5",
         "GLM": "GLM-5",
+        "Math-T1": "Math-Trivial",
+        "Math-T2": "Math-FairShare",
+        "Math-T3": "Math-Reactive",
+        "Math-T4": "Math-MarketClearing",
+        "Math-T5": "Math-RL",
       };
 
       function modelDisplayName(alias) {
@@ -1209,6 +1214,7 @@
             <button type="button" id="chooseBatchLLMBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🤖 10 Real-LLM auctions</button>
             <button type="button" id="chooseBatchMimicBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🧠 30 Mimic auctions</button>
             <button type="button" id="chooseBatchMathBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🧮 50 Math auctions (pick tier)</button>
+            <button type="button" id="chooseBatchMathLLMBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">⚔️ 5 Math vs real-LLM auctions (pick tier)</button>
           </div>
         `;
         okBtn.style.display = "none";
@@ -1254,6 +1260,23 @@
               slotPrefix: tier,
               rotateMimics: true,
               estimateNote: null,
+            });
+          });
+        };
+        document.getElementById("chooseBatchMathLLMBtn").onclick = async () => {
+          close();
+          showMathTierChooser(async (tier) => {
+            // Math tier vs the 5 real LLMs, with one LLM displaced (rotates).
+            // 5 cells × 1 auction = 5 auctions, every LLM displaced exactly once.
+            await startBatchPreset({
+              kind: "math-vs-llm",
+              defaultName: `Math-${tier} vs LLM`,
+              count: 5,
+              parallel: 5,
+              loadout: [`Math-${tier}`],  // first entry is the math tier; pool fills the rest
+              slotPrefix: `${tier}vsLLM`,
+              rotateLLMs: true,
+              estimateNote: "Heads-up: 5 real-LLM auctions cost roughly $15-20 (mostly Opus input). Continue?",
             });
           });
         };
@@ -1315,10 +1338,11 @@
         return perms;
       }
 
-      // Pool of mimics used to fill the "displaced" slot for math-tier batches.
+      // Pools used by rotateMimics / rotateLLMs (one slot rotates across the pool).
       const MIMIC_POOL_FOR_MATH = ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"];
+      const LLM_POOL_FOR_MATH   = ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"];
 
-      async function startBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, rotateMimics = false, estimateNote = null }) {
+      async function startBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, rotateMimics = false, rotateLLMs = false, estimateNote = null }) {
         const promptMessage = (kind === "math")
           ? `Folder name (will hold ${count} auctions of ${loadout[0]} vs 4 rotating mimics):`
           : `Folder name (will hold ${count} auctions):`;
@@ -1335,14 +1359,15 @@
           // 2. Build per-auction loadouts (permutations).
           const startSeed = Math.floor(Math.random() * 100000) + 1;
           let loadouts;
-          if (rotateMimics) {
-            // Math tier displaces 1 of 5 mimics per auction; rotate through.
+          if (rotateMimics || rotateLLMs) {
+            // Math tier displaces 1 of 5 opponents per auction; rotate through.
+            const pool = rotateLLMs ? LLM_POOL_FOR_MATH : MIMIC_POOL_FOR_MATH;
             loadouts = [];
             for (let i = 0; i < count; i++) {
-              const displaced = MIMIC_POOL_FOR_MATH[i % MIMIC_POOL_FOR_MATH.length];
+              const displaced = pool[i % pool.length];
               const tierBidder = loadout[0]; // e.g. "Math-T3"
-              const mimics = MIMIC_POOL_FOR_MATH.filter((m) => m !== displaced);
-              const ordering = [tierBidder].concat(mimics);
+              const opponents = pool.filter((m) => m !== displaced);
+              const ordering = [tierBidder].concat(opponents);
               // Shuffle the ordering so the tier bidder isn't always seat 0.
               for (let j = ordering.length - 1; j > 0; j--) {
                 const k = Math.floor(Math.random() * (j + 1));
@@ -1376,14 +1401,27 @@
             if (el) el.textContent = `Started ${launched} / ${count} auctions  (${failed} failed)`;
           };
 
+          // Direct POST that does NOT route through apiPost — apiPost would
+          // append ?session_id=<global_active_session> via withSession() and
+          // the server prioritizes the query param over the JSON body, which
+          // would collapse all 5 parallel launches onto the global session.
+          async function directPost(path, payload) {
+            return fetch(path, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+              cache: "no-store",
+            });
+          }
+
           async function launchOne(idx) {
             try {
               const slotName = `${slotPrefix} ${idx + 1}`;
-              const slotRes = await apiPost("/api/save_slot_create", { name: slotName, folder_id: folderId });
+              const slotRes = await directPost("/api/save_slot_create", { name: slotName, folder_id: folderId });
               const slotData = await slotRes.json();
               if (!slotRes.ok) throw new Error(slotData.detail || "slot_create failed");
               const slotId = slotData.slot.slot_id;
-              const resetRes = await apiPost("/api/reset", {
+              const resetRes = await directPost("/api/reset", {
                 session_id: slotId,
                 mode: "open_painting_auction",
                 selected_models: loadouts[idx],
@@ -1394,7 +1432,7 @@
                 const d = await resetRes.json();
                 throw new Error(d.detail || "reset failed");
               }
-              const stepRes = await apiPost("/api/step", { session_id: slotId, use_models: true });
+              const stepRes = await directPost("/api/step", { session_id: slotId, use_models: true });
               if (!stepRes.ok) {
                 const d = await stepRes.json();
                 throw new Error(d.detail || "step failed");
