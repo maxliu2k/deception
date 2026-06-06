@@ -1,0 +1,25 @@
+% =====================================================================
+% CONCLUSION (paper-wide). Auction + mimic-methodology parts are filled;
+% negotiation and deception takeaways are PLACEHOLDERS to fill from those
+% sections' final results. No em dashes (en dashes in ranges are fine).
+% Note: overlaps with the auction "Synthesis" subsubsection -- keep that
+% one short, or fold it up into this section, to avoid saying it twice.
+% =====================================================================
+
+\section{Conclusion}
+We evaluated five frontier language models across three strategic environments under incomplete information: a buyer--seller negotiation, a five-bidder sequential auction, and a five-attribute deception game. A consistent thread runs through all three: each model brings a distinct, stable, and human-legible behavioral signature to the game, yet those signatures reflect a small repertoire of simple heuristics rather than deep adaptive reasoning. % CONFIRM this framing once the negotiation and deception results are final. If either environment shows genuine strategic depth, soften the second clause to "legible per-model signatures" and drop the "simple heuristics" claim.
+
+The auction makes the point most sharply. The LLMs converge on a one-dimensional fair-share reservation-price strategy, with two consequences. First, the models are \emph{distillable}: small neural mimics reproduce their self-play behavior at the outcome level (Cram\'er's $V = 0.041$) and the decision level ($88$--$93\%$ per-decision accuracy). Second, the strategy is \emph{beatable}: a trivial minimum-bidder, a budget-aware heuristic, and a PPO-trained policy each win a larger share than the LLMs, and win rate is non-monotonic in policy sophistication. Re-running every policy against the real LLMs confirms the ranking broadly transfers, but the RL policy, alone trained against the mimics, surrenders its top position to the behavior-agnostic heuristics: optimizing against the surrogate does not carry to the source. The mimics' fidelity is therefore bounded to the regime they were trained on.
+
+% PLACEHOLDER -- negotiation takeaway (1-2 sentences). e.g. which models secure
+% the highest buyer- and seller-side utility, how the analytical/Bayesian
+% baseline ranks, and the dominant bargaining styles.
+In negotiation, \textit{[takeaway to be filled from the negotiation results].}
+
+% PLACEHOLDER -- deception takeaway (1-2 sentences). e.g. how deception rates
+% and belief misalignment vary across models, and the role of the truthful
+% baseline. (Note: the belief-misalignment metric was in progress; only state
+% what the final results support.)
+In the deception game, \textit{[takeaway to be filled from the deception results].}
+
+Methodologically, we contribute \emph{behavioral mimics}: small networks cloned from a modest sample of real games that stand in for LLMs at negligible cost, making large-scale strategic evaluation affordable. The explicit caveat, borne out by our transfer experiments, is that they are faithful enough to \emph{compare} fixed policies but not to \emph{train} one for deployment against the real models. Our main limitations follow from scale: the auction results rest on a small number of real-LLM games in a single configuration (high precision but limited scenario diversity), and the real-LLM transfer runs, though now spanning every policy, are only five auctions each. Future work should broaden scenario diversity, run powered real-LLM transfer experiments, and test whether the mimic approach extends to the richer action spaces of the negotiation and deception settings.
