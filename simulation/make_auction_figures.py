@@ -66,21 +66,19 @@ mimic = load(DATASETS / "mimic_auction_bids_long.csv")
 ymax = max(b for _, _, b in real + mimic)
 ylim = (0, int(np.ceil(ymax / 1000.0)) * 1000 + 300)
 
-# single-column: stack the two panels vertically (real over mimic)
-fig, axes = plt.subplots(2, 1, sharex=True, sharey=True, figsize=(3.4, 3.7))
+# full-width thin banner: two panels side by side
+fig, axes = plt.subplots(1, 2, sharey=True, figsize=(7.16, 2.2))
 draw(axes[0], real, ylim, alpha=1.0)
 draw(axes[1], mimic, ylim, alpha=0.4)
-for ax in axes:
-    ax.set_ylabel("Winning bid")
-axes[0].set_xlabel("")
+axes[0].set_ylabel("Winning bid")
 for ax, lab in zip(axes, ["(a) Real LLMs", "(b) Mimics"]):
-    ax.annotate(lab, xy=(0.03, 0.88), xycoords="axes fraction",
+    ax.annotate(lab, xy=(0.03, 0.87), xycoords="axes fraction",
                 fontsize=8, fontweight="bold")
 handles, labels = axes[0].get_legend_handles_labels()
-fig.legend(handles, labels, ncol=3, fontsize=6.5, frameon=False,
-           loc="upper center", bbox_to_anchor=(0.5, 1.04),
+fig.legend(handles, labels, ncol=6, fontsize=7, frameon=False,
+           loc="upper center", bbox_to_anchor=(0.5, 1.05),
            handletextpad=0.2, columnspacing=1.0)
-fig.tight_layout(pad=0.4, rect=(0, 0, 1, 0.93))
+fig.tight_layout(pad=0.4, rect=(0, 0, 1, 0.92))
 fig.savefig(OUT / "auction_bids.pdf", bbox_inches="tight")
 fig.savefig(OUT / "auction_bids.png", dpi=300, bbox_inches="tight")
 plt.close(fig)
