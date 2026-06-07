@@ -362,3 +362,106 @@ def mimic_bid(
         bid_amount=bid_amount,
         message_text=f"BID {bid_amount}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Deception Competition mimic dispatch (D9: two-head architecture)
+# ---------------------------------------------------------------------------
+
+class _DeceptionMimic(nn.Module):
+    """Two-head deception mimic — must mirror simulation/train_deception_nn.py."""
+
+    def __init__(self, input_dim: int = 10, hidden: int = 32, dropout: float = 0.2, num_attrs: int = 5):
+        super().__init__()
+        self.register_buffer("input_mean", torch.zeros(input_dim))
+        self.register_buffer("input_std", torch.ones(input_dim))
+        self.trunk = nn.Sequential(
+            nn.Linear(input_dim, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.lie_head = nn.Linear(hidden, num_attrs)
+        self.claim_head = nn.Linear(hidden, num_attrs)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = (x - self.input_mean) / self.input_std
+        h = self.trunk(x)
+        return self.lie_head(h), torch.sigmoid(self.claim_head(h))
+
+
+_DECEPTION_MODELS_DIR = Path(__file__).parent / "models" / "deception_v1"
+_DECEPTION_NET_CACHE: dict[str, _DeceptionMimic] = {}
+
+
+def _strip_mimic_prefix(alias: str) -> str:
+    return re.sub(r"^Mimic-", "", alias)
+
+
+def _deception_model_path(alias: str) -> Path:
+    """Map alias to the .pt file. 'Mimic-Opus' → mimic_Opus.pt."""
+    base = _strip_mimic_prefix(alias)
+    return _DECEPTION_MODELS_DIR / f"mimic_{base}.pt"
+
+
+def _load_deception_mimic(alias: str) -> _DeceptionMimic | None:
+    if alias in _DECEPTION_NET_CACHE:
+        return _DECEPTION_NET_CACHE[alias]
+    path = _deception_model_path(alias)
+    if not path.exists():
+        return None
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    model = _DeceptionMimic(
+        input_dim=int(payload.get("input_dim", 10)),
+        hidden=int(payload.get("hidden", 32)),
+        num_attrs=int(payload.get("num_attrs", 5)),
+    )
+    model.load_state_dict(payload["state_dict"])
+    model.eval()
+    _DECEPTION_NET_CACHE[alias] = model
+    return model
+
+
+def deception_mimic_claim(
+    alias: str,
+    truth: list[float],
+    own_trust: float,
+    opponents_trust: list[float],
+) -> list[float]:
+    """Return a 5-float claim vector for the named mimic.
+
+    Per D9:
+      - Run two-head NN: P(lie per attr) + raw claim per attr
+      - For each attr: sample/argmax lie decision → if no lie, snap claim to truth
+        (avoids float-noise spurious catches); if lie, quantize the regressor
+        output to 2dp.
+    """
+    model = _load_deception_mimic(alias)
+    if model is None:
+        # Mimic not yet trained — fall back to honest play.
+        return [round(float(t), 2) for t in truth]
+
+    # Build input. Truth (5) + own_trust (1) + opponents_trust (4).
+    if len(opponents_trust) < 4:
+        opponents_trust = list(opponents_trust) + [1.0] * (4 - len(opponents_trust))
+    x = list(truth[:5]) + [float(own_trust)] + [float(o) for o in opponents_trust[:4]]
+    x_tensor = torch.tensor([x], dtype=torch.float32)
+    with torch.no_grad():
+        lie_logits, raw_claim = model(x_tensor)
+    p_lie = torch.sigmoid(lie_logits).squeeze(0).cpu().numpy()
+    raw = raw_claim.squeeze(0).cpu().numpy()
+
+    T = _temperature()
+    out: list[float] = []
+    for a in range(5):
+        if T > 0:
+            lie_a = _stdlib_random.random() < float(p_lie[a])
+        else:
+            lie_a = float(p_lie[a]) > 0.5
+        if lie_a:
+            out.append(round(max(0.0, min(1.0, float(raw[a]))), 2))
+        else:
+            out.append(round(float(truth[a]), 2))
+    return out

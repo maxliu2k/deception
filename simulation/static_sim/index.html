@@ -136,6 +136,11 @@
       .folder-card:hover { border-color: #9a3412; box-shadow: 0 3px 10px rgba(0,0,0,.07); }
       .folder-card .folder-icon { font-size: 28px; margin-bottom: 4px; }
       .folder-card-back { background: #f5f4f0; }
+      .slot-card[draggable="true"] { cursor: grab; }
+      .slot-card.dnd-dragging { opacity: 0.4; }
+      .slot-card.dnd-drop-target { outline: 2px dashed #9a3412; outline-offset: -3px; background: #fef3c7; }
+      .slot-card.dnd-drop-forbidden { outline: 2px dashed #b91c1c; outline-offset: -3px; }
+      #slotMenuBreadcrumb a.dnd-drop-target { background: #fef3c7; padding: 2px 6px; border-radius: 4px; outline: 1px dashed #9a3412; }
       .folder-dist { margin: 6px 0 10px; display: flex; flex-direction: column; gap: 3px; }
       .folder-dist-head { color: #57534e; font-size: 11px; margin-bottom: 4px; }
       .folder-dist-row { display: grid; grid-template-columns: 96px 1fr 110px; align-items: center; gap: 6px; font-size: 11px; }
@@ -243,6 +248,7 @@
             <option value="five_attr" selected>Five Attributes</option>
             <option value="open_painting_auction">Open Painting Auction</option>
             <option value="buyer_seller_negotiation">Buyer–Seller Negotiation</option>
+            <option value="deception_competition">Deception Competition</option>
           </select>
           <div id="scenarioRow">
             <div class="label" style="margin-top:8px;">Scenario</div>
@@ -347,6 +353,15 @@
           </div>
           <div id="auctionResult"></div>
         </div>
+        <div id="deceptionCard" class="card hidden">
+          <div class="card-hdr">
+            <div class="label">Deception Competition</div>
+            <div class="card-hdr-btns">
+              <span id="deceptionRoundLabel" class="hint" style="font-weight:400; color:#374151;"></span>
+            </div>
+          </div>
+          <div id="deceptionResult"></div>
+        </div>
         <div id="batchCard" class="card hidden">
           <div class="card-hdr">
             <div class="label">Batch <span id="batchPolicyLabel" style="font-weight:400; text-transform:none; letter-spacing:0; color:#374151;"></span></div>
@@ -377,12 +392,18 @@
     </div>
 
     <script>
-      const MODEL_POOL = ["GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama", "Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T5"];
+      const MODEL_POOL = ["GPT-4o", "GPT", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mimic-Grok", "Mimic-Opus", "Mimic-GPT", "Mimic-Pro", "Mimic-Llama", "Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T5"];
 
       const PRESETS = {
         "open_painting_auction": [
           { label: "LLM Loadout",   models: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"] },
           { label: "Mimic Loadout", models: ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"] },
+        ],
+        "deception_competition": [
+          { label: "All Honest (T1×5)",       models: ["Math-T1", "Math-T1", "Math-T1", "Math-T1", "Math-T1"] },
+          { label: "Math Tier Ladder",        models: ["Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T1"] },
+          { label: "Real LLM Pitchers",       models: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"] },
+          { label: "Mimic Pitchers",          models: ["Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama"] },
         ],
       };
       const DEFAULT_PICK = ["GPT-5.4", "GPT-5.4", "GPT-5.4"];
@@ -404,6 +425,10 @@
         ],
         buyer_seller_negotiation: [
           ["mid_market_guitar", "mid_market_guitar - overlapping reservation prices"],
+          ["", "random"],
+        ],
+        deception_competition: [
+          ["default", "default — 5-agent resort pitch competition (12 rounds)"],
           ["", "random"],
         ],
       };
@@ -428,6 +453,7 @@
         const normalized = raw.toLowerCase();
         if (normalized === "five_attr" || normalized.startsWith("five_attr")) return "five_attr";
         if (FIVE_ATTR_MODE_ALIASES.has(raw)) return "five_attr";
+        if (normalized === "deception_competition" || normalized.startsWith("deception_competition") || normalized === "deception") return "deception_competition";
         return raw || "buyer_seller_negotiation";
       }
 
@@ -458,6 +484,15 @@
             ["five3", "Model Slot 3", "Flash"],
             ["five4", "Model Slot 4", "Llama"],
             ["five5", "Model Slot 5", "Truthful"],
+          ];
+        }
+        if (mode === "deception_competition") {
+          return [
+            ["dec_agent_1", "Pitcher 1", "Math-T1"],
+            ["dec_agent_2", "Pitcher 2", "Math-T2"],
+            ["dec_agent_3", "Pitcher 3", "Math-T3"],
+            ["dec_agent_4", "Pitcher 4", "Math-T4"],
+            ["dec_agent_5", "Pitcher 5", "Math-T1"],
           ];
         }
         return [
@@ -658,9 +693,13 @@
       function refreshPolicyPanels() {
         const mode = canonicalMode(document.getElementById("mode").value);
         for (const m of ["five_attr", "open_painting_auction", "buyer_seller_negotiation"]) {
-          document.getElementById(`policies-${m}`).classList.toggle("hidden", m !== mode);
+          const node = document.getElementById(`policies-${m}`);
+          if (node) node.classList.toggle("hidden", m !== mode);
         }
-        document.getElementById("stepBtn").textContent = mode === "open_painting_auction" ? "Run Full Auction" : (mode === "five_attr" ? "Step Round" : "Step Episode");
+        if (mode === "open_painting_auction") document.getElementById("stepBtn").textContent = "Run Full Auction";
+        else if (mode === "five_attr") document.getElementById("stepBtn").textContent = "Step Round";
+        else if (mode === "deception_competition") document.getElementById("stepBtn").textContent = "Run Full Episode";
+        else document.getElementById("stepBtn").textContent = "Step Episode";
       }
 
       function refreshModeChrome() {
@@ -668,6 +707,7 @@
         const negotiationMode = mode === "buyer_seller_negotiation";
         const auctionMode = mode === "open_painting_auction";
         const fiveAttrMode = mode === "five_attr";
+        const deceptionMode = mode === "deception_competition";
         const advancedPanel = document.getElementById("advancedPanel");
         const advancedBtn = document.getElementById("toggleAdvancedBtn");
         const megaBatchBtn = document.getElementById("megaBatchBtn");
@@ -688,10 +728,10 @@
         const showMegaBatch = negotiationMode || fiveAttrMode;
         megaBatchBtn.classList.toggle("hidden", !showMegaBatch);
         megaBatchBtn.style.display = showMegaBatch ? "" : "none";
-        batchBtn.classList.toggle("hidden", auctionMode);
-        randomizeSeedsBtn.classList.toggle("hidden", auctionMode);
-        restoreSeedsBtn.classList.toggle("hidden", auctionMode);
-        batchSeedsLabel.classList.toggle("hidden", auctionMode);
+        batchBtn.classList.toggle("hidden", auctionMode || deceptionMode);
+        randomizeSeedsBtn.classList.toggle("hidden", auctionMode || deceptionMode);
+        restoreSeedsBtn.classList.toggle("hidden", auctionMode || deceptionMode);
+        batchSeedsLabel.classList.toggle("hidden", auctionMode || deceptionMode);
         if (conversationCard) {
           conversationCard.classList.toggle("hidden", hideConversation);
           conversationCard.style.display = hideConversation ? "none" : "";
@@ -855,6 +895,7 @@
       }
 
       const MODEL_DISPLAY_NAMES = {
+        "GPT": "GPT-5.4",
         "GPT-5.4": "GPT-5.4",
         "5.4": "GPT-5.4",
         "GPT-4o": "GPT-4o",
@@ -1215,6 +1256,9 @@
             <button type="button" id="chooseBatchMimicBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🧠 30 Mimic auctions</button>
             <button type="button" id="chooseBatchMathBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🧮 50 Math auctions (pick tier)</button>
             <button type="button" id="chooseBatchMathLLMBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">⚔️ 5 Math vs real-LLM auctions (pick tier)</button>
+            <div style="border-top:1px solid #e7e5e0;margin:8px 0 4px;padding-top:8px;font-size:11px;color:#78716c;text-transform:uppercase;letter-spacing:.05em;">Deception Competition</div>
+            <button type="button" id="chooseBatchDeceptionMathBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🎭 20 Deception episodes (math tier ladder)</button>
+            <button type="button" id="chooseBatchDeceptionLLMBtn" class="ghost" style="text-align:left;padding:8px 12px;font-size:13px;">🎭 20 Deception episodes (5 real LLMs)</button>
           </div>
         `;
         okBtn.style.display = "none";
@@ -1261,6 +1305,34 @@
               rotateMimics: true,
               estimateNote: null,
             });
+          });
+        };
+        document.getElementById("chooseBatchDeceptionMathBtn").onclick = async () => {
+          close();
+          await startDeceptionBatchPreset({
+            kind: "math-ladder",
+            defaultName: "Deception Math Ladder",
+            count: 20,
+            parallel: 5,
+            loadout: ["Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T1"],
+            slotPrefix: "D-Math",
+            threshold: 0.3,
+            penalty: 0.05,
+            estimateNote: null,
+          });
+        };
+        document.getElementById("chooseBatchDeceptionLLMBtn").onclick = async () => {
+          close();
+          await startDeceptionBatchPreset({
+            kind: "real-llm",
+            defaultName: "Deception Real LLMs",
+            count: 20,
+            parallel: 4,
+            loadout: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"],
+            slotPrefix: "D-LLM",
+            threshold: 0.3,
+            penalty: 0.05,
+            estimateNote: "Heads-up: 20 deception episodes × 5 LLMs × 12 rounds = 1,200 LLM calls (~$50). Continue?",
           });
         };
         document.getElementById("chooseBatchMathLLMBtn").onclick = async () => {
@@ -1350,8 +1422,10 @@
           const folderName = (rawName || "").trim();
           if (!folderName) return;
           if (estimateNote && !confirm(estimateNote)) return;
-          // 1. Create folder.
-          const folderRes = await apiPost("/api/folder_create", { name: folderName });
+          // 1. Create folder (nested under current folder if we're already inside one).
+          const folderPayload = { name: folderName };
+          if (currentFolderId) folderPayload.parent_folder_id = currentFolderId;
+          const folderRes = await apiPost("/api/folder_create", folderPayload);
           const folderData = await folderRes.json();
           if (!folderRes.ok) { alert(folderData.detail || "Could not create folder."); return; }
           const folderId = folderData.folder.folder_id;
@@ -1468,10 +1542,123 @@
         });
       }
 
+      async function startDeceptionBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, threshold, penalty, estimateNote = null }) {
+        showInput("Start Deception Batch",
+          `Folder name (will hold ${count} deception episodes, 12 rounds each):`,
+          defaultName,
+          async (rawName) => {
+            const folderName = (rawName || "").trim();
+            if (!folderName) return;
+            if (estimateNote && !confirm(estimateNote)) return;
+
+            const folderPayload = { name: folderName };
+            if (currentFolderId) folderPayload.parent_folder_id = currentFolderId;
+            const folderRes = await apiPost("/api/folder_create", folderPayload);
+            const folderData = await folderRes.json();
+            if (!folderRes.ok) { alert(folderData.detail || "Could not create folder."); return; }
+            const folderId = folderData.folder.folder_id;
+
+            const startSeed = Math.floor(Math.random() * 100000) + 1;
+            const truthSeedStart = Math.floor(Math.random() * 1000000) + 10000;
+            // Each episode gets a distinct loadout permutation.
+            const loadouts = _sampleDistinctPermutations(loadout, count);
+
+            const progressOverlay = document.getElementById("confirmOverlay");
+            const progressTitle = document.getElementById("confirmTitle");
+            const progressBody = document.getElementById("confirmBody");
+            const progressOk = document.getElementById("confirmOkBtn");
+            const progressCancel = document.getElementById("confirmCancelBtn");
+            progressTitle.textContent = `Launching ${folderName}`;
+            progressBody.innerHTML = `<div id="batchProgressMsg">Starting 0 / ${count} episodes…</div>`;
+            progressOk.style.display = "none";
+            progressCancel.textContent = "Run in background";
+            let userClosed = false;
+            progressCancel.onclick = () => {
+              userClosed = true;
+              progressOverlay.classList.remove("show");
+              progressOk.style.display = "";
+              progressCancel.textContent = "Cancel";
+            };
+            progressOverlay.classList.add("show");
+
+            let launched = 0;
+            let failed = 0;
+            const updateProgress = () => {
+              const el = document.getElementById("batchProgressMsg");
+              if (el) el.textContent = `Started ${launched} / ${count} episodes  (${failed} failed)`;
+            };
+
+            async function directPost(path, payload) {
+              return fetch(path, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+                cache: "no-store",
+              });
+            }
+
+            async function launchOne(idx) {
+              try {
+                const slotName = `${slotPrefix} ${idx + 1}`;
+                const slotRes = await directPost("/api/save_slot_create", { name: slotName, folder_id: folderId });
+                const slotData = await slotRes.json();
+                if (!slotRes.ok) throw new Error(slotData.detail || "slot_create failed");
+                const slotId = slotData.slot.slot_id;
+                const resetRes = await directPost("/api/reset", {
+                  session_id: slotId,
+                  mode: "deception_competition",
+                  selected_models: loadouts[idx],
+                  seed: startSeed + idx,
+                  truth_seed: truthSeedStart + idx,
+                  threshold: threshold,
+                  penalty: penalty,
+                  num_rounds: 12,
+                });
+                if (!resetRes.ok) {
+                  const d = await resetRes.json();
+                  throw new Error(d.detail || "reset failed");
+                }
+                const stepRes = await directPost("/api/step", { session_id: slotId, use_models: true });
+                if (!stepRes.ok) {
+                  const d = await stepRes.json();
+                  throw new Error(d.detail || "step failed");
+                }
+                launched += 1;
+              } catch (err) {
+                failed += 1;
+                console.error("deception batch launch failed", idx, err);
+              }
+              updateProgress();
+            }
+
+            let next = 0;
+            async function worker() {
+              while (next < count) {
+                const i = next++;
+                await launchOne(i);
+              }
+            }
+            const workers = Array.from({ length: Math.max(1, parallel) }, () => worker());
+            await Promise.all(workers);
+
+            const msg = `Started ${launched} / ${count} episodes${failed ? ` (${failed} failed to launch — see console)` : ""}. Workers are running in the background; refresh the folder to see progress.`;
+            if (!userClosed) {
+              const el = document.getElementById("batchProgressMsg");
+              if (el) el.textContent = msg;
+              progressOk.style.display = "";
+              progressOk.textContent = "Close";
+              progressOk.onclick = () => { progressOverlay.classList.remove("show"); progressOk.textContent = "OK"; progressCancel.textContent = "Cancel"; };
+            }
+            await refreshSaveSlots();
+          });
+      }
+
       async function createFolderFromMenu() {
         showInput("New Folder", "Folder name", "", async (name) => {
           if (!name || !name.trim()) return;
-          const res = await apiPost("/api/folder_create", { name: name.trim() });
+          const body = { name: name.trim() };
+          if (currentFolderId) body.parent_folder_id = currentFolderId;  // nest under current
+          const res = await apiPost("/api/folder_create", body);
           const data = await res.json();
           if (!res.ok) { alert(data.detail || "Could not create folder."); return; }
           await refreshSaveSlots();
@@ -1488,23 +1675,95 @@
         });
       }
 
+      async function moveFolderFromMenu(folderId, folderName) {
+        // Build a picker over (root + every folder except folderId and its descendants).
+        const all = cachedFolders || [];
+        const forbidden = new Set([folderId]);
+        // BFS descendants of folderId to forbid.
+        const stack = [folderId];
+        while (stack.length) {
+          const cur = stack.pop();
+          for (const f of all) {
+            if (f.parent_folder_id === cur && !forbidden.has(f.folder_id)) {
+              forbidden.add(f.folder_id);
+              stack.push(f.folder_id);
+            }
+          }
+        }
+        const targets = [{ value: "", label: "(root — top level)" }];
+        for (const f of all) {
+          if (forbidden.has(f.folder_id)) continue;
+          // Build a path label for clarity.
+          const labelPath = folderPath(f.folder_id).map((p) => p.name).join(" › ");
+          targets.push({ value: f.folder_id, label: labelPath });
+        }
+        const overlay = document.getElementById("confirmOverlay");
+        const titleEl = document.getElementById("confirmTitle");
+        const bodyEl = document.getElementById("confirmBody");
+        const okBtn = document.getElementById("confirmOkBtn");
+        const cancelBtn = document.getElementById("confirmCancelBtn");
+        titleEl.textContent = `Move "${folderName}"`;
+        bodyEl.innerHTML = `
+          <div style="margin-bottom:8px;">Move to:</div>
+          <select id="moveFolderTarget" class="field" style="width:100%; padding:6px;">
+            ${targets.map((t) => `<option value="${t.value}">${t.label}</option>`).join("")}
+          </select>
+        `;
+        okBtn.textContent = "Move";
+        cancelBtn.textContent = "Cancel";
+        okBtn.style.display = "";
+        const close = () => { overlay.classList.remove("show"); okBtn.textContent = "OK"; cancelBtn.textContent = "Cancel"; };
+        cancelBtn.onclick = close;
+        okBtn.onclick = async () => {
+          const target = document.getElementById("moveFolderTarget").value || null;
+          const res = await apiPost("/api/folder_move", { folder_id: folderId, parent_folder_id: target });
+          const data = await res.json();
+          if (!res.ok) { alert(data.detail || "Could not move folder."); close(); return; }
+          close();
+          await refreshSaveSlots();
+        };
+        overlay.classList.add("show");
+      }
+
       async function deleteFolderFromMenu(folderId, folderName) {
+        const subfolderCount = cachedFolders.filter((f) => f.parent_folder_id === folderId).length;
+        const directSlotCount = cachedSaveSlots.filter((s) => s.folder_id === folderId).length;
+        const extras = [];
+        if (directSlotCount > 0) extras.push(`${directSlotCount} slot${directSlotCount === 1 ? "" : "s"}`);
+        if (subfolderCount > 0) extras.push(`${subfolderCount} subfolder${subfolderCount === 1 ? "" : "s"} (and their contents)`);
+        const tail = extras.length ? ` ${extras.join(" and ")} inside will also be permanently deleted.` : "";
         showConfirm(
           "Delete Folder",
-          `Delete folder "${folderName}"? All slots inside will also be permanently deleted, and any running workers for them will be stopped.`,
+          `Delete folder "${folderName}"?${tail}`,
           async () => {
             const res = await apiPost("/api/folder_delete", { folder_id: folderId });
             const data = await res.json();
             if (!res.ok) { alert(data.detail || "Could not delete folder."); return; }
-            if (currentFolderId === folderId) currentFolderId = null;
+            // If we deleted the folder we're inside (or an ancestor of it), snap up to its parent.
+            const inDeletedTree = (() => {
+              if (!currentFolderId) return false;
+              if (currentFolderId === folderId) return true;
+              const path = folderPath(currentFolderId);
+              return path.some((p) => p.folder_id === folderId);
+            })();
+            if (inDeletedTree) {
+              const deletedFolder = cachedFolders.find((f) => f.folder_id === folderId);
+              currentFolderId = deletedFolder ? (deletedFolder.parent_folder_id || null) : null;
+            }
             await refreshSaveSlots();
           }
         );
       }
 
       async function moveSlotToFolder(slotId, slotName) {
-        // Build modal body with folder choices.
-        const choices = [{ id: null, label: "(Root)" }, ...cachedFolders.map((f) => ({ id: f.folder_id, label: f.name }))];
+        // Build modal body with folder choices. Show full path so nested folders are distinguishable.
+        const choices = [{ id: null, label: "(Root)" }];
+        for (const f of cachedFolders) {
+          const path = folderPath(f.folder_id).map((p) => p.name).join(" › ");
+          choices.push({ id: f.folder_id, label: path || f.name });
+        }
+        // Update folder_delete handler to also handle deletion of nested folder children.
+        // Also: deleting a folder we're inside snaps us up to the parent rather than root.
         const overlay = document.getElementById("confirmOverlay");
         const titleEl = document.getElementById("confirmTitle");
         const bodyEl = document.getElementById("confirmBody");
@@ -1578,6 +1837,43 @@
         return true;
       }
 
+      // Helpers for the nested-folder model.
+      function folderById(fid) {
+        return cachedFolders.find((f) => f.folder_id === fid) || null;
+      }
+      function folderPath(fid) {
+        // Walk parent_folder_id chain to root; return [root..fid] array of folder objects.
+        const path = [];
+        let cursor = fid;
+        const seen = new Set();
+        while (cursor && !seen.has(cursor)) {
+          seen.add(cursor);
+          const f = folderById(cursor);
+          if (!f) break;
+          path.unshift(f);
+          cursor = f.parent_folder_id || null;
+        }
+        return path;
+      }
+      function childFoldersOf(fid) {
+        return cachedFolders.filter((f) => (f.parent_folder_id || null) === fid);
+      }
+      function descendantSlotCount(fid) {
+        // Recursive count of slots in fid + all subfolders.
+        const targets = new Set([fid]);
+        const stack = [fid];
+        while (stack.length) {
+          const cur = stack.pop();
+          for (const ch of childFoldersOf(cur)) {
+            if (!targets.has(ch.folder_id)) {
+              targets.add(ch.folder_id);
+              stack.push(ch.folder_id);
+            }
+          }
+        }
+        return cachedSaveSlots.filter((s) => targets.has(s.folder_id || "__root__") || targets.has(s.folder_id)).length;
+      }
+
       function renderSlotMenu(slots, folders) {
         cachedSaveSlots = Array.isArray(slots) ? slots : [];
         cachedFolders = Array.isArray(folders) ? folders : [];
@@ -1589,32 +1885,47 @@
         const grid = document.getElementById("slotMenuGrid");
         const cards = [];
 
-        if (currentFolderId === null) {
-          // Root view: show all top-level folders, then root-level slots.
-          for (const folder of cachedFolders) {
-            const slotCount = cachedSaveSlots.filter((s) => s.folder_id === folder.folder_id).length;
-            const dist = cachedFolderDistributions[folder.folder_id];
-            const distHtml = dist ? folderDistributionHtml(dist) : `<div class="folder-dist-empty">Loading distribution…</div>`;
-            cards.push(`
-              <div class="slot-card folder-card" data-enter-folder="${folder.folder_id}">
-                <div class="folder-icon">📁</div>
-                <div class="slot-title">${folder.name}</div>
-                <div class="slot-meta">${slotCount} slot${slotCount === 1 ? "" : "s"}</div>
-                ${distHtml}
-                <div class="slot-actions" onclick="event.stopPropagation();">
-                  <button type="button" class="alt" data-rename-folder="${folder.folder_id}" data-rename-folder-name="${folder.name}">Rename</button>
-                  <button type="button" class="danger" data-delete-folder="${folder.folder_id}" data-delete-folder-name="${folder.name}">Delete</button>
-                </div>
-              </div>
-            `);
-          }
-        } else {
-          // Folder view: show a "back to root" card.
+        // 1. Back card (if not at root). Also a drop target for moving items to the parent.
+        if (currentFolderId !== null) {
+          const cur = folderById(currentFolderId);
+          const parentId = cur ? (cur.parent_folder_id || null) : null;
+          const parentLabel = parentId ? (folderById(parentId)?.name || "parent folder") : "All Slots";
           cards.push(`
-            <div class="slot-card folder-card folder-card-back" id="backToRootCard">
+            <div class="slot-card folder-card folder-card-back" id="backCard"
+                 data-back-target="${parentId || ""}"
+                 data-drop-folder="${parentId || ""}">
               <div class="folder-icon">⬅</div>
               <div class="slot-title">Back</div>
-              <div class="slot-meta">Return to all slots</div>
+              <div class="slot-meta">Return to ${parentLabel}</div>
+            </div>
+          `);
+        }
+
+        // 2. Child folders at the current depth.
+        for (const folder of childFoldersOf(currentFolderId)) {
+          const directSlotCount = cachedSaveSlots.filter((s) => s.folder_id === folder.folder_id).length;
+          const childFolderCount = childFoldersOf(folder.folder_id).length;
+          const subtitleParts = [];
+          subtitleParts.push(`${directSlotCount} slot${directSlotCount === 1 ? "" : "s"}`);
+          if (childFolderCount > 0) subtitleParts.push(`${childFolderCount} folder${childFolderCount === 1 ? "" : "s"}`);
+          const dist = cachedFolderDistributions[folder.folder_id];
+          const distHtml = dist ? folderDistributionHtml(dist) : `<div class="folder-dist-empty">Loading distribution…</div>`;
+          cards.push(`
+            <div class="slot-card folder-card"
+                 data-enter-folder="${folder.folder_id}"
+                 draggable="true"
+                 data-drag-kind="folder"
+                 data-drag-id="${folder.folder_id}"
+                 data-drop-folder="${folder.folder_id}">
+              <div class="folder-icon">📁</div>
+              <div class="slot-title">${folder.name}</div>
+              <div class="slot-meta">${subtitleParts.join(" · ")}</div>
+              ${distHtml}
+              <div class="slot-actions" onclick="event.stopPropagation();">
+                <button type="button" class="alt" data-rename-folder="${folder.folder_id}" data-rename-folder-name="${folder.name}">Rename</button>
+                <button type="button" class="alt" data-move-folder="${folder.folder_id}" data-move-folder-name="${folder.name}">Move</button>
+                <button type="button" class="danger" data-delete-folder="${folder.folder_id}" data-delete-folder-name="${folder.name}">Delete</button>
+              </div>
             </div>
           `);
         }
@@ -1629,7 +1940,10 @@
           const badgeText = isRunning ? "Running" : (slot.filled ? "Filled" : "Empty");
           const openLabel = slot.filled ? "Open Slot" : "Use Slot";
           cards.push(`
-            <div class="slot-card">
+            <div class="slot-card"
+                 draggable="true"
+                 data-drag-kind="slot"
+                 data-drag-id="${slot.slot_id}">
               <div class="slot-badge ${badgeClass}">${badgeText}</div>
               <div class="slot-title">${label}</div>
               <div class="slot-meta">${slotSummaryText(slot)}</div>
@@ -1643,25 +1957,25 @@
           `);
         }
 
-        // Single "+" card. At root, opens a chooser (slot or folder). Inside a
-        // folder, creates a new slot directly (folders can't be nested).
+        // Single "+" card. At root or inside any folder, opens a chooser so the
+        // user can pick "new slot", "new folder", or a batch preset.
         cards.push(`<div class="slot-card slot-card-new" id="newCard" title="Create new"><span>+</span></div>`);
 
         grid.innerHTML = cards.join("");
         document.getElementById("newCard").onclick = async () => {
-          if (currentFolderId === null) {
-            showCreateChooser();
-          } else {
-            await createSlotFromMenu();
-          }
+          showCreateChooser();
         };
-        const backCard = document.getElementById("backToRootCard");
-        if (backCard) backCard.onclick = () => { currentFolderId = null; renderSlotMenu(cachedSaveSlots, cachedFolders); };
+        const backCard = document.getElementById("backCard");
+        if (backCard) backCard.onclick = () => {
+          const target = backCard.getAttribute("data-back-target") || "";
+          currentFolderId = target || null;
+          renderSlotMenu(cachedSaveSlots, cachedFolders);
+        };
 
         for (const card of Array.from(grid.querySelectorAll("[data-enter-folder]"))) {
           card.onclick = (e) => {
             // Ignore clicks that bubble from buttons inside the actions row.
-            if (e.target.closest("[data-rename-folder], [data-delete-folder]")) return;
+            if (e.target.closest("[data-rename-folder], [data-delete-folder], [data-move-folder]")) return;
             currentFolderId = card.getAttribute("data-enter-folder");
             renderSlotMenu(cachedSaveSlots, cachedFolders);
           };
@@ -1670,6 +1984,12 @@
           btn.onclick = (e) => {
             e.stopPropagation();
             renameFolderFromMenu(btn.getAttribute("data-rename-folder"), btn.getAttribute("data-rename-folder-name"));
+          };
+        }
+        for (const btn of Array.from(grid.querySelectorAll("[data-move-folder]"))) {
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            moveFolderFromMenu(btn.getAttribute("data-move-folder"), btn.getAttribute("data-move-folder-name"));
           };
         }
         for (const btn of Array.from(grid.querySelectorAll("[data-delete-folder]"))) {
@@ -1713,6 +2033,139 @@
             moveSlotToFolder(slotId, name);
           };
         }
+        wireDragAndDrop(grid);
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      // Drag and drop: slots and folders can be dragged onto folder cards
+      // (or the Back card to move up; or the breadcrumb to jump higher).
+      // ────────────────────────────────────────────────────────────────────
+      const _dnd = { kind: null, id: null };
+
+      function _dropTargetIsValid(kind, id, targetFolderId) {
+        // targetFolderId === "" means root.
+        const tgt = targetFolderId || null;
+        if (kind === "slot") return true;   // slots can move anywhere
+        if (kind === "folder") {
+          if (!id) return false;
+          if (id === tgt) return false;     // same place: no-op
+          // Can't drop folder onto itself or any descendant.
+          if (tgt === id) return false;
+          let cursor = tgt;
+          const seen = new Set();
+          while (cursor) {
+            if (cursor === id) return false;
+            if (seen.has(cursor)) break;
+            seen.add(cursor);
+            const f = folderById(cursor);
+            cursor = f ? (f.parent_folder_id || null) : null;
+          }
+          // Also no-op if the folder is already at this depth.
+          const dragged = folderById(id);
+          if (dragged && (dragged.parent_folder_id || null) === tgt) return false;
+          return true;
+        }
+        return false;
+      }
+
+      async function _performDrop(kind, id, targetFolderId) {
+        const tgt = targetFolderId || null;
+        if (kind === "slot") {
+          const res = await apiPost("/api/save_slot_move", { slot_id: id, folder_id: tgt });
+          const data = await res.json();
+          if (!res.ok) { alert(data.detail || "Could not move slot."); return; }
+        } else if (kind === "folder") {
+          const res = await apiPost("/api/folder_move", { folder_id: id, parent_folder_id: tgt });
+          const data = await res.json();
+          if (!res.ok) { alert(data.detail || "Could not move folder."); return; }
+        }
+        await refreshSaveSlots();
+      }
+
+      function wireDragAndDrop(grid) {
+        const dragSources = Array.from(grid.querySelectorAll('[draggable="true"][data-drag-kind]'));
+        for (const src of dragSources) {
+          src.addEventListener("dragstart", (e) => {
+            _dnd.kind = src.getAttribute("data-drag-kind");
+            _dnd.id = src.getAttribute("data-drag-id");
+            src.classList.add("dnd-dragging");
+            // Some browsers require setData to start a drag.
+            try { e.dataTransfer.setData("text/plain", `${_dnd.kind}:${_dnd.id}`); } catch (_) {}
+            e.dataTransfer.effectAllowed = "move";
+          });
+          src.addEventListener("dragend", () => {
+            src.classList.remove("dnd-dragging");
+            _dnd.kind = null;
+            _dnd.id = null;
+            // Clean up any leftover hover marks.
+            for (const el of Array.from(document.querySelectorAll(".dnd-drop-target, .dnd-drop-forbidden"))) {
+              el.classList.remove("dnd-drop-target", "dnd-drop-forbidden");
+            }
+          });
+        }
+
+        const dropTargets = Array.from(grid.querySelectorAll("[data-drop-folder]"));
+        for (const tgt of dropTargets) {
+          const folderId = tgt.getAttribute("data-drop-folder");
+          tgt.addEventListener("dragover", (e) => {
+            if (!_dnd.kind) return;
+            const ok = _dropTargetIsValid(_dnd.kind, _dnd.id, folderId);
+            if (ok) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+              tgt.classList.add("dnd-drop-target");
+            } else {
+              tgt.classList.add("dnd-drop-forbidden");
+            }
+          });
+          tgt.addEventListener("dragleave", () => {
+            tgt.classList.remove("dnd-drop-target", "dnd-drop-forbidden");
+          });
+          tgt.addEventListener("drop", async (e) => {
+            tgt.classList.remove("dnd-drop-target", "dnd-drop-forbidden");
+            if (!_dnd.kind) return;
+            if (!_dropTargetIsValid(_dnd.kind, _dnd.id, folderId)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const kind = _dnd.kind;
+            const id = _dnd.id;
+            _dnd.kind = null; _dnd.id = null;
+            await _performDrop(kind, id, folderId);
+          });
+        }
+
+        // Breadcrumb segments are drop targets too — jump to any ancestor.
+        const breadcrumb = document.getElementById("slotMenuBreadcrumb");
+        if (breadcrumb) {
+          // Root link
+          const root = breadcrumb.querySelector("#bcRoot");
+          if (root) _wireBreadcrumbDrop(root, "");
+          for (const a of Array.from(breadcrumb.querySelectorAll("[data-bc]"))) {
+            _wireBreadcrumbDrop(a, a.getAttribute("data-bc") || "");
+          }
+        }
+      }
+
+      function _wireBreadcrumbDrop(el, folderId) {
+        el.addEventListener("dragover", (e) => {
+          if (!_dnd.kind) return;
+          if (!_dropTargetIsValid(_dnd.kind, _dnd.id, folderId)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          el.classList.add("dnd-drop-target");
+        });
+        el.addEventListener("dragleave", () => el.classList.remove("dnd-drop-target"));
+        el.addEventListener("drop", async (e) => {
+          el.classList.remove("dnd-drop-target");
+          if (!_dnd.kind) return;
+          if (!_dropTargetIsValid(_dnd.kind, _dnd.id, folderId)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const kind = _dnd.kind;
+          const id = _dnd.id;
+          _dnd.kind = null; _dnd.id = null;
+          await _performDrop(kind, id, folderId);
+        });
       }
 
       function renderBreadcrumb() {
@@ -1720,12 +2173,24 @@
         if (!el) return;
         if (currentFolderId === null) {
           el.innerHTML = `<span>All Slots</span>`;
-        } else {
-          const folder = cachedFolders.find((f) => f.folder_id === currentFolderId);
-          const name = folder ? folder.name : currentFolderId;
-          el.innerHTML = `<a id="bcRoot">All Slots</a><span>›</span><span>${name}</span>`;
-          const root = el.querySelector("#bcRoot");
-          if (root) root.onclick = () => { currentFolderId = null; renderSlotMenu(cachedSaveSlots, cachedFolders); };
+          return;
+        }
+        const path = folderPath(currentFolderId);
+        // <a id="bcRoot">All Slots</a> › <a data-bc="folder_3">Folder A</a> › <span>Current</span>
+        const parts = [`<a id="bcRoot">All Slots</a>`];
+        for (let i = 0; i < path.length - 1; i++) {
+          parts.push(`<span>›</span><a data-bc="${path[i].folder_id}">${path[i].name}</a>`);
+        }
+        const leaf = path[path.length - 1];
+        if (leaf) parts.push(`<span>›</span><span>${leaf.name}</span>`);
+        el.innerHTML = parts.join("");
+        const root = el.querySelector("#bcRoot");
+        if (root) root.onclick = () => { currentFolderId = null; renderSlotMenu(cachedSaveSlots, cachedFolders); };
+        for (const a of Array.from(el.querySelectorAll("[data-bc]"))) {
+          a.onclick = () => {
+            currentFolderId = a.getAttribute("data-bc");
+            renderSlotMenu(cachedSaveSlots, cachedFolders);
+          };
         }
       }
 
@@ -2428,6 +2893,116 @@
         restoreScrollState(root, scrollState);
       }
 
+      // ────────────────────────────────────────────────────────────────────
+      // Deception Competition renderer.
+      // Shows per-agent rewards, trust trajectory across rounds, and per-round
+      // breakdowns (truth, claims, verified attr, caught flag, score).
+      // ────────────────────────────────────────────────────────────────────
+      const DECEPTION_ATTR_NAMES = ["beach", "food", "pool", "room", "service"];
+      function renderDeceptionResult(data) {
+        const card = document.getElementById("deceptionCard");
+        const out = document.getElementById("deceptionResult");
+        const label = document.getElementById("deceptionRoundLabel");
+        if (!data || data.mode !== "deception_competition" || !data.deception_episode) {
+          card.classList.add("hidden");
+          return;
+        }
+        const ep = data.deception_episode;
+        card.classList.remove("hidden");
+        const completedRounds = Array.isArray(ep.rounds) ? ep.rounds.length : 0;
+        if (label) label.textContent =
+          `round ${Math.min(ep.round_idx, ep.num_rounds)}/${ep.num_rounds} · τ=${(+ep.threshold).toFixed(2)} · penalty=${(+ep.penalty).toFixed(2)} · ${ep.complete ? "complete" : "in progress"}`;
+
+        // 1. Per-agent summary table
+        const agents = Array.isArray(ep.agents) ? ep.agents : [];
+        let html = `<div class="section-head">Agents</div>`;
+        html += `<table class="batch-table"><thead><tr><th>Agent</th><th>Alias</th><th>Trust</th><th>Total reward</th><th>Caught</th><th>Wins</th></tr></thead><tbody>`;
+        for (const a of agents) {
+          html += `<tr>` +
+            `<td>${a.agent_id}</td>` +
+            `<td>${modelDisplayName(a.alias) || a.alias}</td>` +
+            `<td><span class="val-zero">${(+a.trust).toFixed(2)}</span></td>` +
+            `<td><span class="val-zero">${(+a.total_reward).toFixed(3)}</span></td>` +
+            `<td>${a.caught_count}</td>` +
+            `<td>${a.win_count}</td>` +
+            `</tr>`;
+        }
+        html += `</tbody></table>`;
+
+        // 2. Trust trajectory chart (line per agent).
+        if (completedRounds > 0 && agents.length > 0) {
+          const W = 520, H = 180, padL = 36, padR = 14, padT = 12, padB = 22;
+          const innerW = W - padL - padR, innerH = H - padT - padB;
+          const xs = (i) => padL + (i / Math.max(1, ep.num_rounds - 1)) * innerW;
+          const ys = (v) => padT + (1 - Math.max(0, Math.min(1, v))) * innerH;
+          let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%; max-width:${W}px; background:#fafaf6;">`;
+          // grid lines for trust=0, 0.5, 1
+          for (const v of [0, 0.5, 1]) {
+            svg += `<line x1="${padL}" y1="${ys(v)}" x2="${W - padR}" y2="${ys(v)}" stroke="#e5e7eb"/>`;
+            svg += `<text x="${padL - 4}" y="${ys(v) + 3}" text-anchor="end" font-size="10" fill="#6b7280">${v.toFixed(1)}</text>`;
+          }
+          // round-index ticks
+          for (let i = 0; i < ep.num_rounds; i++) {
+            svg += `<line x1="${xs(i)}" y1="${H - padB}" x2="${xs(i)}" y2="${H - padB + 3}" stroke="#9ca3af"/>`;
+            if (i % 2 === 0) svg += `<text x="${xs(i)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="#6b7280">${i + 1}</text>`;
+          }
+          // one polyline per agent
+          for (const a of agents) {
+            const aid = a.agent_id;
+            const color = bidderColor ? bidderColor(a.alias || aid) : "#3b82f6";
+            // Start at trust=1.0 (initial), then trust_after for each completed round.
+            const points = [[0, 1.0]];
+            for (const r of ep.rounds) {
+              const t = (r.trust_after && r.trust_after[aid] !== undefined) ? +r.trust_after[aid] : null;
+              if (t !== null) points.push([r.round_idx + 1, t]);
+            }
+            const poly = points.map(([i, v]) => `${xs(i)},${ys(v)}`).join(" ");
+            svg += `<polyline points="${poly}" fill="none" stroke="${color}" stroke-width="1.6"/>`;
+            // dot at last point with label
+            const [lastI, lastV] = points[points.length - 1];
+            svg += `<circle cx="${xs(lastI)}" cy="${ys(lastV)}" r="2.5" fill="${color}"/>`;
+          }
+          svg += `</svg>`;
+          // legend
+          const legend = agents.map((a) => {
+            const color = bidderColor ? bidderColor(a.alias || a.agent_id) : "#3b82f6";
+            return `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px;font-size:11px;">` +
+              `<span style="display:inline-block;width:10px;height:10px;background:${color};"></span>` +
+              `${modelDisplayName(a.alias) || a.agent_id}</span>`;
+          }).join("");
+          html += `<div class="section-head">Trust Trajectory</div>${svg}<div style="margin-top:4px;">${legend}</div>`;
+        }
+
+        // 3. Per-round details (compact table).
+        if (completedRounds > 0) {
+          html += `<div class="section-head">Rounds</div>`;
+          html += `<table class="batch-table"><thead><tr><th>#</th><th>Truth</th><th>μ</th><th>Verified</th><th>Caught</th><th>Winners</th><th>Rewards</th></tr></thead><tbody>`;
+          for (const r of ep.rounds) {
+            const truth = (r.truth || []).map((v) => (+v).toFixed(2)).join(", ");
+            const mu = (r.population_mean || []).map((v) => (+v).toFixed(2)).join(", ");
+            const verifiedSummary = Object.entries(r.verified_attr_by_agent || {})
+              .map(([aid, attr]) => `${aid.replace("agent_", "")}=${DECEPTION_ATTR_NAMES[attr] || attr}`).join(" ");
+            const caughtSummary = Object.entries(r.caught_by_agent || {})
+              .filter(([, v]) => v).map(([aid]) => aid.replace("agent_", "")).join(",") || "—";
+            const winnersSummary = (r.winners || []).map((aid) => aid.replace("agent_", "")).join(",") || "—";
+            const rewardsSummary = Object.entries(r.rewards_by_agent || {})
+              .map(([aid, v]) => `${aid.replace("agent_", "")}:${(+v).toFixed(2)}`).join(" ");
+            html += `<tr>` +
+              `<td>${r.round_idx + 1}</td>` +
+              `<td style="font-family:monospace;font-size:11px;">${truth}</td>` +
+              `<td style="font-family:monospace;font-size:11px;color:#6b7280;">${mu}</td>` +
+              `<td style="font-size:11px;">${verifiedSummary}</td>` +
+              `<td style="font-size:11px;color:#b91c1c;">${caughtSummary}</td>` +
+              `<td style="font-size:11px;color:#059669;">${winnersSummary}</td>` +
+              `<td style="font-family:monospace;font-size:11px;">${rewardsSummary}</td>` +
+              `</tr>`;
+          }
+          html += `</tbody></table>`;
+        }
+
+        out.innerHTML = html;
+      }
+
       async function refreshRender() {
         const r = await apiGet("/api/render");
         if (!r.ok) { showConversation([]); return null; }
@@ -2441,6 +3016,8 @@
           document.getElementById("faResultCard").classList.add("hidden");
           document.getElementById("faTimelineCard").classList.add("hidden");
           document.getElementById("faInfoCard").classList.add("hidden");
+          const dc = document.getElementById("deceptionCard");
+          if (dc) dc.classList.add("hidden");
           return data;
         }
         lastRenderData = data;
@@ -2454,6 +3031,7 @@
         renderFiveAttrTimeline(data);
         renderNegotiationResult(data);
         renderAuctionResult(data);
+        renderDeceptionResult(data);
         return data;
       }
 

@@ -318,3 +318,50 @@ def five_attr_trust_multiplier(trust: float) -> float:
 
 def open_auction_reward(*, paintings_won: int, invalid_actions: int = 0, timeout_actions: int = 0) -> float:
     return float(paintings_won) - 0.1 * float(invalid_actions) - 0.05 * float(timeout_actions)
+
+
+# ── Deception Competition reward ─────────────────────────────────────────────
+
+def deception_competition_score(
+    *, claim: List[float], preferences: List[float], trust: float
+) -> float:
+    """Buyer's modified score for a (possibly winning) agent.
+
+    score = (w · c) * (0.5 + 0.5 * trust)
+
+    Trust modulates the booking score: trust 1.0 → 1.0× multiplier; trust 0.0 → 0.5× floor.
+    Returns the un-bounded score; the env compares it to the threshold to decide winners.
+    """
+    if len(claim) != len(preferences):
+        raise ValueError(f"claim and preferences length mismatch: {len(claim)} vs {len(preferences)}")
+    raw = sum(c * w for c, w in zip(claim, preferences))
+    multiplier = 0.5 + 0.5 * max(0.0, min(1.0, trust))
+    return raw * multiplier
+
+
+def deception_competition_reward(
+    *,
+    is_caught: bool,
+    is_winner: bool,
+    score: float,
+    threshold: float,
+    num_winners: int,
+    penalty: float,
+) -> float:
+    """Per-round reward for a single agent."""
+    if is_caught:
+        return -float(penalty)
+    if is_winner and num_winners > 0:
+        return (float(score) - float(threshold)) / float(num_winners)
+    return 0.0
+
+
+def deception_competition_trust_update(*, trust_before: float, is_caught: bool) -> float:
+    """Trust transition rule. Catch shrinks (×0.7); any clean round adds +0.1 (capped at 1.0)."""
+    from .state import (
+        DECEPTION_TRUST_CATCH_MULTIPLIER,
+        DECEPTION_TRUST_RECOVERY_DELTA,
+    )
+    if is_caught:
+        return max(0.0, float(trust_before) * DECEPTION_TRUST_CATCH_MULTIPLIER)
+    return min(1.0, float(trust_before) + DECEPTION_TRUST_RECOVERY_DELTA)

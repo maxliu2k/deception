@@ -6,7 +6,24 @@ app/
 commands.txt
 verify_tts.py
 olympics/
-simulation/.runtime/
+## simulation/.runtime/ — track research data, ignore volatile state.
+##
+## TRACKED (research artifacts, written once per auction/episode):
+##   save_slots.json                          — folder + slot catalog (needed for UI to load anything)
+##   save_slots/save_slot_*/runtime_meta.json — slot metadata (mode, phase, done flag)
+##   save_slots/save_slot_*/auction_exports/  — bid logs, csv, xlsx, metadata.json
+##   save_slots/save_slot_*/deception_episode/ — episode_log.json + metadata.json
+##   save_slots/save_slot_*/auction_usage.jsonl — token usage logs (research data)
+##
+## IGNORED (volatile, churn on every UI action — would dirty git constantly):
+##   save_slots/save_slot_*/runtime.pkl       — Python pickle, rewrites on each step
+##   save_slots/save_slot_*/step_worker.log   — verbose LLM debug output
+##   save_slots/save_slot_*/step_payload.json — last request payload
+##   mega_batch/                              — negotiation batch scratch space
+simulation/.runtime/save_slots/*/runtime.pkl
+simulation/.runtime/save_slots/*/step_worker.log
+simulation/.runtime/save_slots/*/step_payload.json
+simulation/.runtime/mega_batch/
 simulation/training_logs/
 **/__pycache__/
 *.pyc
