@@ -284,24 +284,23 @@ class RepeatedGameState:
     history: List[RoundOutcome] = field(default_factory=list)
 
 
-# ── Five-attribute boolean game ──────────────────────────────────────────────
+# Five-attribute continuous-score game
 
 @dataclass
 class FiveAttrResortState:
     resort_id: str
-    attrs: List[bool]   # 5 booleans in ATTR_NAMES order
-    price: int
+    attrs: List[float]   # 5 scores in ATTR_NAMES order, each 0.0..1.0
+    price: int = 0
     margin: float = 0.35
 
 
 @dataclass
 class FiveAttrCustomerState:
     pref: List[float]   # 5 preference weights (sum ? 1.0)
-    budget: int
+    budget: int = 0
     known_index: int = 0     # assigned by env during reset
-    known_value: bool = False  # true value of known_index, assigned by env
+    known_value: float = 0.0  # true score of known_index, assigned by env
     beliefs: List[float] = field(default_factory=lambda: [0.5] * 5)
-    trust: float = 0.6
 
 
 @dataclass
@@ -309,30 +308,39 @@ class FiveAttrAgentState:
     commission_rate: float
     welfare_weight: float    # 0 = pure commission, 1 = pure customer advocate
     known_indices: List[int] = field(default_factory=list)   # assigned by env
-    known_values: List[bool] = field(default_factory=list)   # true values, by env
+    known_values: List[float] = field(default_factory=list)   # true scores, by env
     selected_models: List[str] = field(default_factory=list)
     beliefs: List[float] = field(default_factory=lambda: [0.5] * 5)
-    trust: float = 0.6
 
 
 @dataclass
 class FiveAttrResortDeclaration:
     resort_id: str
-    declared_attrs: List[bool]   # 5 booleans sent to agent
+    declared_attrs: List[float]   # 5 scores sent to agent
     message_text: str = ""
 
 
 @dataclass
 class FiveAttrAgentReport:
     resort_id: str
-    reported_attrs: List[bool]   # 5 booleans sent to customer
+    reported_attrs: List[Optional[float]]   # 0.0..1.0 score, or None for omission
     message_text: str = ""
 
 
 @dataclass
 class FiveAttrCustomerDecision:
-    decision: str   # "book" | "reject" | "verify"
+    decision: str   # five_attr uses "book" | "reject"
     message_text: str = ""
+    requested_decision: str = ""
+    booking_confidence: float = 0.0
+    booking_evidence_score: float = 0.0
+    booking_gate_reason: str = ""
+    booking_gate_overrode: bool = False
+    disclosure_fraction: float = 0.0
+    verified_fraction: float = 0.0
+    perceived_quality: float = 0.0
+    quality_threshold: float = 0.0
+    quality_gate_reason: str = ""
 
     @property
     def action(self) -> str:
@@ -342,14 +350,13 @@ class FiveAttrCustomerDecision:
 @dataclass
 class FiveAttrRoundState:
     round_idx: int
-    declared_attrs: List[bool]
-    reported_attrs: List[bool]
+    declared_attrs: List[Optional[float]]
+    reported_attrs: List[Optional[float]]
     customer_action: str
     revealed_indices: List[int] = field(default_factory=list)
-    revealed_values: List[bool] = field(default_factory=list)
+    revealed_values: List[float] = field(default_factory=list)
     booked: bool = False
     customer_beliefs: List[float] = field(default_factory=list)
-    customer_trust: float = 0.0
     rewards: Dict[str, float] = field(default_factory=dict)
     deception_metrics: Dict[str, float] = field(default_factory=dict)
 
@@ -360,9 +367,12 @@ class FiveAttrMemoryState:
     max_rounds: int = 5
     verified_indices: List[int] = field(default_factory=list)
     belief_history: List[List[float]] = field(default_factory=list)
-    trust_history: List[float] = field(default_factory=list)
     round_history: List[FiveAttrRoundState] = field(default_factory=list)
+    agent_report_history: List[List[Optional[float]]] = field(default_factory=list)
     verification_count: int = 0
+    deceiver_utterance_count: int = 0
+    booking_gate_override_count: int = 0
+    harmful_false_claim_shift: float = 0.0
 
 
 @dataclass

@@ -35,9 +35,19 @@
       .msg { border: 1px solid #e8dcc8; background: #fff; border-radius: 10px; padding: 8px 10px; }
       .who { font-weight: 700; margin-bottom: 4px; }
       .meta { color: #6b7280; font-size: 11px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .06em; }
+      .vector-title { color: #6b7280; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 5px; }
+      .vector-list { display: flex; gap: 6px; flex-wrap: wrap; }
+      .vector-chip { border: 1px solid #d6c5a8; background: #fffaf2; border-radius: 7px; padding: 4px 7px; font-family: Consolas, monospace; font-size: 12px; }
+      .vector-chip strong { color: #9a3412; }
       .stack { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: auto; padding-right: 2px; }
       .stack > .card { flex: 0 0 auto; overflow: hidden; }
       .conversation-card { flex: 1 1 260px; min-height: 180px; }
+      .debug-details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .debug-details > summary::-webkit-details-marker { display: none; }
+      .debug-details > summary::after { content: "Show"; color: #475569; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+      .debug-details[open] > summary::after { content: "Hide"; }
+      .debug-details:not([open]) { min-height: 0; flex-basis: auto; }
+      .removed-ui { display: none !important; }
       .hint { color: #6b7280; font-size: 12px; }
       .hidden { display: none; }
       /* ── Batch results table ─────────────────────────── */
@@ -125,7 +135,7 @@
     </header>
     <div id="slotMenu" class="menu-screen">
       <div class="menu-intro">
-        Pick where to work. `Transient` is a scratch session, while the four save slots persist until you delete them. Filled slots survive reloads and can keep background work running.
+        Pick a save slot to work in. Filled slots survive reloads and can keep background work running until you delete or force-clear them.
       </div>
       <div id="slotMenuGrid" class="menu-grid"></div>
     </div>
@@ -134,13 +144,13 @@
       <div class="card">
         <div class="label">Configuration</div>
         <div class="row">
-          <div class="label">Models by Role</div>
+          <div class="label">Selected Models</div>
           <div id="modelBox" class="models"></div>
         </div>
         <div class="row">
           <div class="label">Mode</div>
           <select id="mode" class="field">
-            <option value="five_attr" selected>five_attr — boolean partial info</option>
+            <option value="five_attr" selected>five_attr — score-vector partial info</option>
             <option value="open_painting_auction">open_painting_auction</option>
             <option value="buyer_seller_negotiation">buyer_seller_negotiation</option>
             <option value="simple_resort_deception">simple_resort_deception</option>
@@ -163,7 +173,6 @@
         <div class="row">
           <div class="label">Save Slot</div>
           <select id="saveSlot" class="field">
-            <option value="">Transient (auto-updating)</option>
             <option value="save_slot_1">Save Slot 1</option>
             <option value="save_slot_2">Save Slot 2</option>
             <option value="save_slot_3">Save Slot 3</option>
@@ -173,45 +182,52 @@
             <button id="deleteSlotBtn" class="alt" type="button">Delete Slot</button>
             <button id="forceClearSlotBtn" class="alt" type="button">Force Clear Slot</button>
           </div>
-          <div class="hint" id="saveSlotHint" style="margin-top:6px;">Transient mode updates with reloads. Filled save slots persist until you delete or force-clear them.</div>
+          <div class="hint" id="saveSlotHint" style="margin-top:6px;">Filled save slots persist until you delete or force-clear them.</div>
         </div>
         <div class="row" style="display:flex; gap:8px;">
           <button id="resetBtn">Reset</button>
-          <button id="stepBtn" class="alt">Step Episode</button>
+          <button id="stepBtn" class="alt removed-ui">Step Episode</button>
         </div>
         <div class="row" style="display:flex; gap:8px;">
-          <button id="batchBtn" class="alt" style="flex:1;">Run 10 Episodes</button>
+          <button id="batchBtn" class="alt removed-ui" style="flex:1;">Run 10 Episodes</button>
           <button id="megaBatchBtn" class="alt" style="flex:1;">Run Mega-Batch</button>
         </div>
-        <div class="row" style="display:flex; gap:8px;">
+        <div class="row" id="fiveAttrMegaEpisodesRow">
+          <label for="fiveAttrMegaEpisodes">Five-attr episodes per matchup</label>
+          <input id="fiveAttrMegaEpisodes" class="field" type="number" min="1" max="600" step="10" value="10" />
+          <div class="hint">For training, set this to 50 for a pilot, 100 for a medium run, or 600 for the full mimic dataset.</div>
+        </div>
+        <div class="row removed-ui" style="display:flex; gap:8px;">
           <button id="randomizeSeedsBtn" class="alt" style="flex:1;">Randomize Batch Seeds</button>
           <button id="restoreSeedsBtn" class="alt" style="flex:1;">Restore [0-9]</button>
         </div>
-        <div class="row">
+        <div class="row removed-ui">
           <div class="hint" id="batchSeedsLabel">Batch seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]</div>
         </div>
         <div class="row">
           <div class="hint hidden" id="selectedModelsDebug"></div>
         </div>
-        <div class="row">
+        <div class="row removed-ui">
           <button id="toggleAdvancedBtn" class="alt">Policy Overrides</button>
         </div>
-        <div id="advancedPanel" class="row hidden">
+        <div id="advancedPanel" class="row hidden removed-ui">
           <!-- five_attr policies -->
           <div id="policies-five_attr">
-            <div class="label" style="margin-bottom:4px;">five_attr Policies</div>
-            <select id="fa-resortPolicy">
-              <option value="strategic" selected>Resort: strategic (lie unverified-false only)</option>
-              <option value="truthful">Resort: always truthful</option>
-              <option value="lie_unverified">Resort: lie all unverified (claim True)</option>
+            <div class="label" style="margin-bottom:4px;">five_attr Experiment Controls</div>
+            <select id="fa-agentPromptStyle">
+              <option value="default">Agent prompt: default</option>
+              <option value="utilitarian" selected>Agent prompt: utilitarian payoff maximizer</option>
+              <option value="deceptive">Agent prompt: deceptive</option>
+              <option value="truthful">Agent prompt: truthful</option>
             </select>
             <select id="fa-agentPolicy" style="margin-top:6px;">
               <option value="correct_known" selected>Agent: correct known lies</option>
+              <option value="game_optimal_ex_ante">Agent: game-optimal ex-ante baseline</option>
               <option value="relay">Agent: relay (pass through)</option>
-              <option value="commission_max">Agent: commission max (claim True)</option>
+              <option value="commission_max">Agent: deceptive max (claim True)</option>
             </select>
             <select id="fa-customerPolicy" style="margin-top:6px;">
-              <option value="skeptical" selected>Customer: skeptical (check known fact)</option>
+              <option value="deterministic_gate" selected>Customer: deterministic gate</option>
               <option value="naive">Customer: naive (trust report)</option>
             </select>
           </div>
@@ -276,23 +292,18 @@
             </select>
           </div>
         </div>
-        <!-- five_attr info panel (visible after reset) -->
-        <div id="faInfoCard" class="row hidden">
-          <div class="label">Game Setup</div>
-          <div id="faInfo" style="font-size:13px; margin-top:6px;"></div>
-        </div>
       </div>
 
       <!-- RIGHT: output -->
       <div class="stack">
-        <div id="turnProgressCard" class="card">
-          <div class="label">Turn Progress</div>
+        <details id="turnProgressCard" class="card debug-details removed-ui" open>
+          <summary><span class="label">Turn Progress</span></summary>
           <div id="turnOut" class="turns"><div class="hint">Click Reset, then run the simulation.</div></div>
-        </div>
-        <div class="card pane-card conversation-card">
-          <div class="label">Conversation</div>
+        </details>
+        <details id="conversationCard" class="card pane-card conversation-card debug-details removed-ui" open>
+          <summary><span id="conversationTitle" class="label">Conversation</span></summary>
           <div id="chatOut" class="chat"><div class="hint">No messages yet.</div></div>
-        </div>
+        </details>
         <!-- five_attr result (shown when mode=five_attr and done) -->
         <div id="faResultCard" class="card hidden">
           <div class="label">Five-Attr Result</div>
@@ -313,6 +324,7 @@
               <button id="exportAuctionCsvBtn" class="alt" type="button">Export CSV</button>
               <button id="exportAuctionXlsxBtn" class="alt" type="button">Export XLSX</button>
               <button id="exportAuctionLogBtn" class="alt" type="button">Export Bid Log</button>
+              <button id="exportAuctionGraphPngBtn" class="alt" type="button">Export Graph PNG</button>
             </div>
           </div>
           <div id="auctionResult"></div>
@@ -338,6 +350,9 @@
               <button id="exportMegaBatchBtn" class="alt" type="button">Export Mega TXT</button>
               <button id="exportMegaBatchCsvBtn" class="alt" type="button">Export CSV</button>
               <button id="exportMegaBatchXlsxBtn" class="alt" type="button">Export XLSX</button>
+              <button id="exportMimicAgentCsvBtn" class="alt" type="button">Agent Mimic CSV</button>
+              <button id="exportMimicCustomerCsvBtn" class="alt" type="button">Customer Mimic CSV</button>
+              <button id="exportMegaGraphPngBtn" class="alt" type="button">Export Graph PNG</button>
               <span id="megaBatchSpinner" class="batch-spinner hidden"></span>
             </div>
           </div>
@@ -349,7 +364,9 @@
 
     <script>
       const MODEL_POOL = ["4o", "5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM", "Mathematical", "Truthful"];
-      const DEFAULT_PICK = ["5.4", "5.4", "5.4"];
+      const DEFAULT_FIVE_MODEL_PICK = ["5.4", "Opus", "Pro", "Grok", "Llama"];
+      const DEFAULT_PICK = DEFAULT_FIVE_MODEL_PICK.slice(0, 3);
+      const SHOW_MEGA_VECTOR_EXCHANGE_DETAILS = true;
       const SCENARIOS_BY_MODE = {
         five_attr: [
           ["control", "control — all True, no incentive to lie"],
@@ -360,6 +377,8 @@
           ["honest_resort_vs_deceptive_resort", "honest_resort_vs_deceptive_resort"],
           ["high_verification_customer", "high_verification_customer"],
           ["low_trust_environment", "low_trust_environment"],
+          ["near_threshold_good", "near_threshold_good - truthful quality 0.56"],
+          ["near_threshold_bad", "near_threshold_bad - truthful quality 0.52"],
           ["", "random"],
         ],
         open_painting_auction: [
@@ -398,33 +417,34 @@
       let batchPoller = null;
       let megaBatchPoller = null;
       let currentBatchSeeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+      let currentFiveAttrMegaBatchSeeds = Array.from({ length: 10 }, (_, index) => index);
 
       function roleLabelsForMode(mode) {
         if (mode === "open_painting_auction") {
           return [
             ["bidder1", "Bidder 1", "5.4"],
-            ["bidder2", "Bidder 2", "Sonnet"],
-            ["bidder3", "Bidder 3", "Flash"],
-            ["bidder4", "Bidder 4", "Llama"],
-            ["bidder5", "Bidder 5", "Mathematical"],
+            ["bidder2", "Bidder 2", "Opus"],
+            ["bidder3", "Bidder 3", "Pro"],
+            ["bidder4", "Bidder 4", "Grok"],
+            ["bidder5", "Bidder 5", "Llama"],
           ];
         }
         if (mode === "buyer_seller_negotiation") {
           return [
-            ["customer", "Buyer", "5.4"],
-            ["agent", "Seller", "Sonnet"],
-            ["neg3", "Model Slot 3", "Flash"],
-            ["neg4", "Model Slot 4", "Llama"],
-            ["neg5", "Model Slot 5", "Mathematical"],
+            ["customer", "Model Slot 1", "5.4"],
+            ["agent", "Model Slot 2", "Opus"],
+            ["neg3", "Model Slot 3", "Pro"],
+            ["neg4", "Model Slot 4", "Grok"],
+            ["neg5", "Model Slot 5", "Llama"],
           ];
         }
         if (mode === "five_attr") {
           return [
-            ["customer", "Buyer", "5.4"],
-            ["agent", "Agent", "Sonnet"],
-            ["five3", "Model Slot 3", "Flash"],
-            ["five4", "Model Slot 4", "Llama"],
-            ["five5", "Model Slot 5", "Truthful"],
+            ["customer", "Model Slot 1", "5.4"],
+            ["agent", "Model Slot 2", "Opus"],
+            ["five3", "Model Slot 3", "Pro"],
+            ["five4", "Model Slot 4", "Grok"],
+            ["five5", "Model Slot 5", "Llama"],
           ];
         }
         return [
@@ -441,7 +461,7 @@
       function normalizedSelectedModelsForMode(mode, models) {
         const out = migrateLegacyDefaultModels(mode, Array.isArray(models) ? models : []);
         if (mode === "five_attr") {
-          const defaults = ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+          const defaults = DEFAULT_FIVE_MODEL_PICK;
           const cleaned = Array.isArray(out) ? out.filter((m) => MODEL_POOL.includes(m)) : [];
           if (cleaned.length === 3 && cleaned[0] === "Haiku" && cleaned[1] === "Sonnet" && cleaned[2] === "Pro") {
             return [...defaults];
@@ -449,10 +469,10 @@
           if (
             cleaned.length >= 5 &&
             cleaned[0] === "5.4" &&
-            cleaned[1] === "Opus" &&
-            cleaned[2] === "Pro" &&
-            cleaned[3] === "Grok" &&
-            (cleaned[4] === "Mathematical" || cleaned[4] === "Llama")
+            cleaned[1] === "Sonnet" &&
+            cleaned[2] === "Flash" &&
+            cleaned[3] === "Llama" &&
+            (cleaned[4] === "Mathematical" || cleaned[4] === "Truthful")
           ) {
             return [...defaults];
           }
@@ -469,14 +489,6 @@
       function normalizeDisplayedModelName(mode, name, index = null) {
         const raw = String(name || "").trim();
         if (!raw) return raw;
-        if (mode === "five_attr") {
-          if (raw === "Haiku") return "5.4";
-          if (raw === "Mathematical" && index === 4) return "Truthful";
-        } else if (mode === "buyer_seller_negotiation" || mode === "open_painting_auction") {
-          if (raw === "Opus") return "Sonnet";
-          if (raw === "Pro") return "Flash";
-          if (raw === "Grok") return "Llama";
-        }
         return raw;
       }
 
@@ -489,7 +501,18 @@
       }
 
       function updateBatchSeedsLabel() {
-        document.getElementById("batchSeedsLabel").textContent = `Batch seeds: [${currentBatchSeeds.join(", ")}]`;
+        const countInput = document.getElementById("fiveAttrMegaEpisodes");
+        const fiveAttrCount = countInput ? Math.max(1, Math.min(600, Number(countInput.value || 10))) : currentFiveAttrMegaBatchSeeds.length;
+        document.getElementById("batchSeedsLabel").textContent = `Batch seeds: [${currentBatchSeeds.join(", ")}] | five_attr mega episodes per matchup: ${fiveAttrCount}`;
+      }
+
+      function fiveAttrMegaEpisodeCount() {
+        const input = document.getElementById("fiveAttrMegaEpisodes");
+        return Math.max(1, Math.min(600, Math.floor(Number(input?.value || 10))));
+      }
+
+      function fiveAttrMegaSeeds() {
+        return Array.from({ length: fiveAttrMegaEpisodeCount() }, (_, index) => index);
       }
 
       function renderSelectedModelsDebug() {
@@ -570,22 +593,36 @@
           }
           const priorDefaultShape =
             out[0] === "5.4" &&
+            out[1] === "Sonnet" &&
+            out[2] === "Flash" &&
+            out[3] === "Llama" &&
+            out[4] === "Mathematical";
+          if (priorDefaultShape) {
+            return [...DEFAULT_FIVE_MODEL_PICK];
+          }
+          const priorRequestedShape =
+            out[0] === "5.4" &&
             out[1] === "Opus" &&
             out[2] === "Pro" &&
             out[3] === "Grok" &&
             out[4] === "Mathematical";
-          if (priorDefaultShape) {
-            out[1] = "Sonnet";
-            out[2] = "Flash";
-            out[3] = "Llama";
+          if (priorRequestedShape) {
+            return [...DEFAULT_FIVE_MODEL_PICK];
           }
         }
         if (mode === "five_attr") {
           if (out.length === 3 && out[0] === "Haiku" && out[1] === "Sonnet" && out[2] === "Pro") {
-            return ["5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+            return [...DEFAULT_FIVE_MODEL_PICK];
           }
-          if (out.length >= 5 && out[4] === "Mathematical") {
-            out[4] = "Truthful";
+          if (
+            out.length >= 5 &&
+            out[0] === "5.4" &&
+            out[1] === "Sonnet" &&
+            out[2] === "Flash" &&
+            out[3] === "Llama" &&
+            out[4] === "Truthful"
+          ) {
+            return [...DEFAULT_FIVE_MODEL_PICK];
           }
         }
         return out;
@@ -620,7 +657,9 @@
         const randomizeSeedsBtn = document.getElementById("randomizeSeedsBtn");
         const restoreSeedsBtn = document.getElementById("restoreSeedsBtn");
         const batchSeedsLabel = document.getElementById("batchSeedsLabel");
+        const fiveAttrMegaEpisodesRow = document.getElementById("fiveAttrMegaEpisodesRow");
         const conversationCard = document.querySelector(".conversation-card");
+        const conversationTitle = document.getElementById("conversationTitle");
         const turnProgressCard = document.getElementById("turnProgressCard");
         const hideConversation = auctionMode || negotiationMode;
 
@@ -633,14 +672,17 @@
         const showMegaBatch = negotiationMode || fiveAttrMode;
         megaBatchBtn.classList.toggle("hidden", !showMegaBatch);
         megaBatchBtn.style.display = showMegaBatch ? "" : "none";
+        setMimicExportVisibility(fiveAttrMode);
         batchBtn.classList.toggle("hidden", auctionMode);
         randomizeSeedsBtn.classList.toggle("hidden", auctionMode);
         restoreSeedsBtn.classList.toggle("hidden", auctionMode);
         batchSeedsLabel.classList.toggle("hidden", auctionMode);
+        if (fiveAttrMegaEpisodesRow) fiveAttrMegaEpisodesRow.classList.toggle("hidden", !fiveAttrMode);
         if (conversationCard) {
           conversationCard.classList.toggle("hidden", hideConversation);
           conversationCard.style.display = hideConversation ? "none" : "";
         }
+        if (conversationTitle) conversationTitle.textContent = fiveAttrMode ? "Vector Exchanges" : "Conversation";
         if (turnProgressCard) {
           turnProgressCard.classList.toggle("hidden", negotiationMode);
           turnProgressCard.style.display = negotiationMode ? "none" : "";
@@ -648,35 +690,48 @@
         renderSelectedModelsDebug();
       }
 
-      const SESSION_STORAGE_KEY = "simulation_live_session_id";
-      const SAVE_SLOT_STORAGE_KEY = "simulation_save_slot_id";
-
-      function simulationSessionId() {
-        try {
-          const existing = window.sessionStorage?.getItem(SESSION_STORAGE_KEY);
-          if (existing) return existing;
-          const created = (window.crypto?.randomUUID?.() || `session_${Date.now()}_${Math.random().toString(16).slice(2)}`)
-            .replace(/[^a-zA-Z0-9_-]+/g, "")
-            .slice(0, 64);
-          window.sessionStorage?.setItem(SESSION_STORAGE_KEY, created);
-          return created;
-        } catch (_error) {
-          return `session_${Date.now()}_${Math.random().toString(16).slice(2)}`.replace(/[^a-zA-Z0-9_-]+/g, "").slice(0, 64);
-        }
+      function setMimicExportVisibility(show) {
+        const mimicAgentBtn = document.getElementById("exportMimicAgentCsvBtn");
+        const mimicCustomerBtn = document.getElementById("exportMimicCustomerCsvBtn");
+        if (mimicAgentBtn) mimicAgentBtn.classList.toggle("hidden", !show);
+        if (mimicCustomerBtn) mimicCustomerBtn.classList.toggle("hidden", !show);
       }
+
+      const SAVE_SLOT_STORAGE_KEY = "simulation_save_slot_id";
+      const LAST_OPENED_SESSION_STORAGE_KEY = "simulation_last_opened_session";
+      const DEFAULT_SAVE_SLOT_ID = "save_slot_1";
 
       function activeSaveSlot() {
         try {
-          return window.localStorage?.getItem(SAVE_SLOT_STORAGE_KEY) || "";
+          const stored = window.localStorage?.getItem(SAVE_SLOT_STORAGE_KEY) || "";
+          return /^save_slot_[1-4]$/.test(stored) ? stored : DEFAULT_SAVE_SLOT_ID;
         } catch (_error) {
-          return "";
+          return DEFAULT_SAVE_SLOT_ID;
         }
       }
 
       function setActiveSaveSlot(slotId) {
+        const safeSlotId = /^save_slot_[1-4]$/.test(slotId || "") ? slotId : DEFAULT_SAVE_SLOT_ID;
         try {
-          if (slotId) window.localStorage?.setItem(SAVE_SLOT_STORAGE_KEY, slotId);
-          else window.localStorage?.removeItem(SAVE_SLOT_STORAGE_KEY);
+          window.localStorage?.setItem(SAVE_SLOT_STORAGE_KEY, safeSlotId);
+        } catch (_error) {
+        }
+      }
+
+      function lastOpenedSession() {
+        try {
+          const stored = window.localStorage?.getItem(LAST_OPENED_SESSION_STORAGE_KEY);
+          if (!stored) return null;
+          return /^save_slot_[1-4]$/.test(stored) ? stored : DEFAULT_SAVE_SLOT_ID;
+        } catch (_error) {
+          return null;
+        }
+      }
+
+      function setLastOpenedSession(slotId) {
+        const safeSlotId = /^save_slot_[1-4]$/.test(slotId || "") ? slotId : DEFAULT_SAVE_SLOT_ID;
+        try {
+          window.localStorage?.setItem(LAST_OPENED_SESSION_STORAGE_KEY, safeSlotId);
         } catch (_error) {
         }
       }
@@ -691,8 +746,42 @@
         document.getElementById("appWrap").classList.remove("hidden");
       }
 
+      function clearRunPanels() {
+        if (stepPoller) { clearInterval(stepPoller); stepPoller = null; }
+        if (batchPoller) { clearInterval(batchPoller); batchPoller = null; }
+        if (megaBatchPoller) { clearInterval(megaBatchPoller); megaBatchPoller = null; }
+        showConversation([]);
+        showTurns([]);
+        for (const id of ["negotiationCard", "auctionCard", "faResultCard", "faTimelineCard", "batchCard", "megaBatchCard"]) {
+          const el = document.getElementById(id);
+          if (el) el.classList.add("hidden");
+        }
+        for (const id of ["batchSpinner", "megaBatchSpinner"]) {
+          const el = document.getElementById(id);
+          if (el) el.classList.add("hidden");
+        }
+        const batchCurrent = document.getElementById("batchCurrentEpisode");
+        if (batchCurrent) batchCurrent.innerHTML = `<div class="hint">No batch episode running.</div>`;
+        const megaCurrent = document.getElementById("megaBatchCurrentEpisode");
+        if (megaCurrent) megaCurrent.innerHTML = `<div class="hint">No mega-batch episode running.</div>`;
+        const batchOut = document.getElementById("batchOut");
+        if (batchOut) batchOut.innerHTML = "";
+        const megaOut = document.getElementById("megaBatchOut");
+        if (megaOut) megaOut.innerHTML = "";
+        const progress = document.getElementById("megaBatchProgress");
+        if (progress) progress.textContent = "";
+        lastRenderData = null;
+      }
+
+      function setDebugPanelsCollapsed(collapsed) {
+        for (const id of ["turnProgressCard", "conversationCard"]) {
+          const el = document.getElementById(id);
+          if (el && typeof el.open === "boolean") el.open = !collapsed;
+        }
+      }
+
       function activeSessionId() {
-        return activeSaveSlot() || simulationSessionId();
+        return activeSaveSlot();
       }
 
       function withSession(path) {
@@ -779,14 +868,14 @@
       }
 
       async function openSessionFromMenu(slotId) {
-        setActiveSaveSlot(slotId || "");
-        document.getElementById("saveSlot").value = slotId || "";
+        const nextSlot = slotId || DEFAULT_SAVE_SLOT_ID;
+        setActiveSaveSlot(nextSlot);
+        setLastOpenedSession(nextSlot);
+        document.getElementById("saveSlot").value = nextSlot;
+        clearRunPanels();
         await refreshSaveSlots();
         showAppShell();
-        const data = await refreshRender();
-        if (data && data.empty) {
-          await resetSimulation();
-        }
+        await refreshRender();
         await resumeActiveJobs();
       }
 
@@ -798,8 +887,9 @@
           return;
         }
         if (activeSaveSlot() === slotId) {
-          setActiveSaveSlot("");
-          document.getElementById("saveSlot").value = "";
+          setActiveSaveSlot(slotId);
+          setLastOpenedSession(slotId);
+          document.getElementById("saveSlot").value = slotId;
         }
         await refreshSaveSlots();
       }
@@ -812,8 +902,9 @@
           return false;
         }
         if (activeSaveSlot() === slotId) {
-          setActiveSaveSlot("");
-          document.getElementById("saveSlot").value = "";
+          setActiveSaveSlot(slotId);
+          setLastOpenedSession(slotId);
+          document.getElementById("saveSlot").value = slotId;
         }
         await refreshSaveSlots();
         return true;
@@ -821,18 +912,7 @@
 
       function renderSlotMenu(slots) {
         const grid = document.getElementById("slotMenuGrid");
-        const active = activeSaveSlot();
         const cards = [];
-        cards.push(`
-          <div class="slot-card">
-            <div class="slot-badge ${active ? "empty" : "filled"}">${active ? "Scratch Session" : "Current Scratch Session"}</div>
-            <div class="slot-title">Transient</div>
-            <div class="slot-meta">A scratch session for quick work. It now survives reloads too, but it is still the lightweight place to experiment.</div>
-            <div class="slot-actions">
-              <button type="button" data-open-slot="">Open</button>
-            </div>
-          </div>
-        `);
         for (const slot of slots) {
           const label = (slot.slot_id || "").replace("save_slot_", "Save Slot ");
           const isRunning = !!(slot.step_running || slot.mega_batch_running);
@@ -900,7 +980,9 @@
             option.textContent = `${base} - ${parts.join(" · ")}`;
           }
           if (!active) {
-            hint.textContent = "Transient mode updates with reloads. Filled save slots persist until you delete them.";
+            setActiveSaveSlot(DEFAULT_SAVE_SLOT_ID);
+            select.value = DEFAULT_SAVE_SLOT_ID;
+            hint.textContent = `${DEFAULT_SAVE_SLOT_ID.replace("save_slot_", "Save Slot ")} selected.`;
             return;
           }
           const slot = slots.find((it) => it.slot_id === active);
@@ -916,7 +998,7 @@
         } catch (_error) {
           hint.textContent = active
             ? `${active.replace("save_slot_", "Save Slot ")} selected.`
-            : "Transient mode updates with reloads. Filled save slots persist until you delete them.";
+            : `${DEFAULT_SAVE_SLOT_ID.replace("save_slot_", "Save Slot ")} selected.`;
           renderSlotMenu([]);
         }
       }
@@ -937,11 +1019,37 @@
           row.innerHTML = `
             <div class="who">${it.speaker || "Model"}</div>
             <div class="meta">${[it.channel, it.recipient ? `→ ${it.recipient}` : ""].filter(Boolean).join("  ")}</div>
-            <div>${(it.text || "").replace(/</g, "&lt;")}</div>
+            <div>${conversationBodyHtml(it)}</div>
           `;
           root.appendChild(row);
         }
         restoreScrollState(root, scrollState);
+      }
+
+      function conversationBodyHtml(item) {
+        let payload = null;
+        if (Array.isArray(item?.vector)) {
+          payload = {
+            vector_kind: item.vector_kind || "vector",
+            labels: Array.isArray(item.vector_labels) ? item.vector_labels : [],
+            values: item.vector,
+          };
+        } else {
+          try {
+            payload = JSON.parse(String(item?.text || ""));
+          } catch (_error) {
+            payload = null;
+          }
+        }
+        if (!payload || typeof payload !== "object") return escHtml(item?.text || "");
+        const values = Array.isArray(payload.values) ? payload.values : [];
+        const labels = Array.isArray(payload.labels) ? payload.labels : [];
+        if (!values.length) return escHtml(item?.text || "");
+        const chips = values.map((value, index) => {
+          const label = labels[index] ?? (Array.isArray(payload.indices) ? payload.indices[index] : index);
+          return `<span class="vector-chip">${escHtml(label)}=<strong>${escHtml(value)}</strong></span>`;
+        }).join("");
+        return `<div class="vector-title">${escHtml(payload.vector_kind || "vector")}</div><div class="vector-list">${chips}</div>`;
       }
 
       function showTurns(items) {
@@ -981,6 +1089,56 @@
         restoreScrollState(root, scrollState);
       }
 
+      function showBatchTurnProgress(status, kind) {
+        const root = document.getElementById("turnOut");
+        const turnCard = document.getElementById("turnProgressCard");
+        if (turnCard) {
+          turnCard.classList.remove("hidden");
+          turnCard.style.display = "";
+          if (typeof turnCard.open === "boolean") turnCard.open = true;
+        }
+        if (!root) return;
+        const mode = status.mode || currentMode || "buyer_seller_negotiation";
+        const currentEpisode = Number(status.current_episode || 0);
+        const currentSeed = status.current_seed;
+        const buyerModel = normalizeDisplayedModelName(mode, status.current_buyer_model || (status.current_models || [])[0] || "-", 0);
+        const sellerModel = normalizeDisplayedModelName(mode, status.current_seller_model || (status.current_models || [])[1] || "-", 1);
+        const rightRoleLabel = mode === "five_attr" ? "Agent" : "Seller";
+        const prefix = kind === "mega"
+          ? `Matchup ${Number(status.current_matchup || 0)}/${Number(status.total_matchups || 0)}`
+          : `Episode ${currentEpisode}/${Number(status.total_episodes || 0)}`;
+        const turns = Array.isArray(status.current_turns) ? status.current_turns : [];
+        const conversation = Array.isArray(status.current_conversation) ? status.current_conversation : [];
+        const progressLine = [
+          prefix,
+          currentEpisode ? `Episode ${currentEpisode}` : "",
+          currentSeed !== null && currentSeed !== undefined ? `Seed ${currentSeed}` : "",
+          `Buyer ${buyerModel}`,
+          `${rightRoleLabel} ${sellerModel}`,
+        ].filter(Boolean).join(" | ");
+        const statusLine = status.running
+          ? "Running"
+          : status.done
+          ? "Done"
+          : "Not running";
+        const turnHtml = turns.length
+          ? turns.map((it) => `
+              <div class="turn-card ${it.status || "pending"}">
+                <div><strong>${escHtml(it.speaker || "Model")}</strong> <span class="small">${escHtml(it.label || "")}</span></div>
+                <div class="small">${escHtml(it.status || "pending")}</div>
+              </div>
+            `).join("")
+          : `<div class="hint">Waiting for model call status...</div>`;
+        root.innerHTML = `
+          <div class="turn-card ${status.running ? "active" : "done"}">
+            <div><strong>${escHtml(kind === "mega" ? "Mega-Batch Progress" : "Batch Progress")}</strong> <span class="small">${escHtml(statusLine)}</span></div>
+            <div class="small">${escHtml(progressLine)}</div>
+            <div class="small">${conversation.length ? `${conversation.length} vector/message rows captured for current episode` : "No current transcript yet"}</div>
+          </div>
+          ${turnHtml}
+        `;
+      }
+
       function applyServerConfiguration(data) {
         if (!data || !data.mode) return;
         const modeEl = document.getElementById("mode");
@@ -998,7 +1156,26 @@
 
       // ── five_attr result renderer ──────────────────────────────────────────
       function boolBadge(v) {
+        if (v === null || v === undefined) return `<span class="bool-no">- Omitted</span>`;
         return v ? `<span class="bool-yes">✓ True</span>` : `<span class="bool-no">✗ False</span>`;
+      }
+
+      function scoreVal(v) {
+        const n = Number(v);
+        return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
+      }
+
+      function scoreBadge(v) {
+        const n = scoreVal(v);
+        if (n === null) return `<span class="bool-no">- Omitted</span>`;
+        const cls = n >= 0.55 ? "bool-yes" : "bool-no";
+        return `<span class="${cls}">${n.toFixed(1)}</span>`;
+      }
+
+      function scoreMismatch(a, b) {
+        const left = scoreVal(a);
+        const right = scoreVal(b);
+        return left !== null && right !== null && Math.abs(left - right) > 0.05;
       }
 
       function rewardClass(v) {
@@ -1028,6 +1205,7 @@
         const booked = result.booked;
         const dm = result.deception_metrics || {};
         const continueEpisode = derived.continue_episode;
+        const terminalReason = derived.terminal_reason || (continueEpisode ? "continue" : booked ? "book" : "reject");
         const roundIdx = derived.round_idx ?? data.round_idx ?? 0;
         const maxRounds = derived.max_rounds ?? data.max_rounds ?? 1;
 
@@ -1037,7 +1215,7 @@
         html += `<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
           <span class="knowledge-pill badge-agent">Round ${roundIdx} / ${maxRounds}</span>
           <span class="knowledge-pill badge-customer">Trust ${Number(derived.trust ?? data.customer?.trust ?? 0).toFixed(2)}</span>
-          <span class="knowledge-pill ${derived.verification_count ? "badge-customer" : "badge-agent"}">Verifications ${derived.verification_count ?? 0}</span>
+          <span class="knowledge-pill badge-agent">Outcome ${escHtml(terminalReason)}</span>
         </div>`;
 
         // Attribute table
@@ -1048,7 +1226,7 @@
               <th>Truth</th>
               <th>Resort declared</th>
               <th>Agent reported</th>
-              <th>Verified by</th>
+              <th>Known by</th>
             </tr>
           </thead><tbody>`;
 
@@ -1061,16 +1239,16 @@
           const isAgentKnown = agentKnown.has(i);
 
           // Resort declared cell
-          let declCell = boolBadge(d);
-          if (d !== t) {
+          let declCell = scoreBadge(d);
+          if (scoreMismatch(d, t)) {
             if (isVerified) declCell += `<span class="lie-caught">⚠ caught lie</span>`;
             else            declCell += `<span class="lie-hidden">~ undetected</span>`;
           }
 
           // Agent reported cell
-          let repCell = boolBadge(r);
-          if (r !== t && isCustKnown) repCell += `<span class="lie-caught">⚠ caught lie</span>`;
-          else if (r !== d && !isCustKnown) repCell += `<span class="lie-hidden">~ corrected/changed</span>`;
+          let repCell = scoreBadge(r);
+          if (scoreMismatch(r, t) && isCustKnown) repCell += `<span class="lie-caught">⚠ caught lie</span>`;
+          else if (scoreMismatch(r, d) && !isCustKnown) repCell += `<span class="lie-hidden">~ corrected/changed</span>`;
 
           // Who verifies this index
           const verifiers = [];
@@ -1079,7 +1257,7 @@
 
           html += `<tr>
             <td><strong>${names[i]}</strong></td>
-            <td>${boolBadge(t)}</td>
+            <td>${scoreBadge(t)}</td>
             <td>${declCell}</td>
             <td>${repCell}</td>
             <td>${verifiers.join(" ") || "<span style='color:#9ca3af;font-size:11px;'>—</span>"}</td>
@@ -1109,6 +1287,63 @@
         }
         html += `</div>`;
 
+        const payoffComponents = derived.payoff_components || {};
+        const customerPayoff = payoffComponents.customer || {};
+        const agentPayoff = payoffComponents.agent || {};
+        const payoffMatrix = payoffComponents.payoff_matrix || {};
+        const mixedNash = payoffComponents.mixed_nash_benchmark || {};
+        const utility = payoffComponents.utility_components || {};
+        const componentRows = [
+          ["FAIRGAME matrix benchmark", customerPayoff.matrix_payoff, agentPayoff.matrix_payoff],
+          ["Role-specific utility", customerPayoff.payoff, agentPayoff.payoff],
+        ];
+        const componentValue = (value) => {
+          if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
+          return Number(value).toFixed(2);
+        };
+        const matrixCell = (row, column) => {
+          const entry = payoffMatrix?.[row]?.[column] || {};
+          return `(${componentValue(entry.customer)}, ${componentValue(entry.agent)})`;
+        };
+        html += `<div class="section-head" style="margin-top:14px;">FAIRGAME-Inspired Strategy Profile</div>
+          <div style="font-size:13px; display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:4px;">
+            <div>Observed profile: <strong>${escHtml(payoffComponents.observed_profile || payoffComponents.profile || "-")}</strong></div>
+            <div>Matrix profile: <strong>${escHtml(payoffComponents.profile || "-")}</strong></div>
+            <div>Mixed-Nash distance: <strong>${componentValue(payoffComponents.equilibrium_distance)}</strong></div>
+            <div>Agent strategy: <strong>${escHtml(payoffComponents.agent_strategy || "-")}</strong></div>
+            <div>Report style: <strong>${escHtml(payoffComponents.report_style || "-")}</strong></div>
+            <div>Customer strategy: <strong>${escHtml(payoffComponents.customer_strategy || "-")}</strong></div>
+            <div>Customer quality utility: <strong>${componentValue(utility.customer_quality_utility)}</strong></div>
+            <div>Customer deception harm: <strong>${componentValue(utility.customer_undetected_deception_harm)}</strong></div>
+            <div>Agent booking reward: <strong>${componentValue(utility.agent_booking_reward)}</strong></div>
+            <div>Agent deception bonus: <strong>${componentValue(utility.agent_undetected_deception_bonus)}</strong></div>
+            <div>Agent false-claim penalty: <strong>${componentValue(utility.agent_detected_false_claim_penalty)}</strong></div>
+            <div>Agent omission penalty: <strong>${componentValue(utility.agent_detected_omission_penalty)}</strong></div>
+          </div>
+          <div style="font-size:12px; color:#6b7280; margin-top:6px;">
+            Mixed benchmark: agent honest ${componentValue(Number(mixedNash.agent_honest_probability || 0) * 100)}%;
+            customer books ${componentValue(Number(mixedNash.customer_book_probability || 0) * 100)}%.
+          </div>`;
+        html += `<div class="section-head" style="margin-top:14px;">Payoff Matrix (Customer, Agent)</div>
+          <table class="attr-table">
+            <thead><tr><th>Agent strategy</th><th>Book</th><th>Challenge</th><th>Continue</th></tr></thead>
+            <tbody>
+              <tr><td>Honest</td><td>${matrixCell("honest", "book")}</td><td>${matrixCell("honest", "challenge")}</td><td>${matrixCell("honest", "continue")}</td></tr>
+              <tr><td>Deceive</td><td>${matrixCell("deceive", "book")}</td><td>${matrixCell("deceive", "challenge")}</td><td>${matrixCell("deceive", "continue")}</td></tr>
+            </tbody>
+          </table>`;
+        html += `<div class="section-head" style="margin-top:14px;">Numeric Payoff Vector</div>`;
+        html += `<table class="attr-table">
+          <thead><tr><th>Component</th><th>Customer</th><th>Agent</th></tr></thead>
+          <tbody>${componentRows.map(([label, customerValue, agentValue]) => `
+            <tr>
+              <td>${label}</td>
+              <td>${componentValue(customerValue)}</td>
+              <td>${componentValue(agentValue)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>`;
+
         // Welfare
         const tw = derived.total_welfare;
         if (tw !== undefined) {
@@ -1124,12 +1359,11 @@
         if (!data || data.mode !== "five_attr") { card.classList.add("hidden"); return; }
         const memory = data.five_attr_memory || {};
         const rounds = Array.isArray(memory.round_history) ? memory.round_history : [];
-        const trustTrajectory = Array.isArray(memory.trust_history) ? memory.trust_history : [];
         if (!rounds.length) { card.classList.add("hidden"); return; }
         card.classList.remove("hidden");
         let html = `<table class="attr-table">
           <thead><tr>
-            <th>Round</th><th>Action</th><th>Booked</th><th>Trust</th><th>Revealed</th><th>Customer</th><th>Agent</th><th>Resort</th>
+            <th>Round</th><th>Action</th><th>Profile</th><th>Booked</th><th>Revealed</th><th>Customer</th><th>Agent</th><th>Resort</th>
           </tr></thead><tbody>`;
         for (const row of rounds) {
           const revealed = (row.revealed_indices || []).map((idx, i) => {
@@ -1140,8 +1374,8 @@
           html += `<tr>
             <td>${row.round_idx}</td>
             <td>${row.customer_action}</td>
+            <td>${escHtml(row.deception_metrics?.strategy_profile || "-")}</td>
             <td>${row.booked ? "Yes" : "-"}</td>
-            <td>${Number(row.customer_trust ?? trustTrajectory[row.round_idx] ?? 0).toFixed(2)}</td>
             <td>${revealed || "<span style='color:#9ca3af;'>-</span>"}</td>
             <td>${fmtVal(row.rewards?.customer)}</td>
             <td>${fmtVal(row.rewards?.agent)}</td>
@@ -1150,46 +1384,7 @@
         }
         html += `</tbody></table>`;
 
-        const latestBeliefs = data.customer?.beliefs || [];
-        if (latestBeliefs.length) {
-          const names = data.attr_names || ["pool","quiet","food","beach","value"];
-          html += `<div class="section-head">Current Beliefs</div><div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px;">`;
-          latestBeliefs.forEach((v, i) => {
-            html += `<div class="reward-box"><div class="label">${names[i]}</div><div class="rval zero">${(Number(v) * 100).toFixed(0)}%</div></div>`;
-          });
-          html += `</div>`;
-        }
         root.innerHTML = html;
-      }
-
-      function renderFiveAttrSetup(data) {
-        const infoCard = document.getElementById("faInfoCard");
-        const infoDiv  = document.getElementById("faInfo");
-        if (!data || data.mode !== "five_attr") { infoCard.classList.add("hidden"); return; }
-
-        const customer = data.customer;
-        const agent    = data.agent;
-        const names    = data.attr_names || ["pool","quiet","food","beach","value"];
-
-        if (!customer || !agent) { infoCard.classList.add("hidden"); return; }
-        infoCard.classList.remove("hidden");
-
-        const custKnown = names[customer.known_index];
-        const custVal   = customer.known_value;
-        const agentKnown = (agent.known_indices || []).map((i, j) => `${names[i]}=${agent.known_values[j]}`);
-        const pref = customer.pref ? customer.pref.map((p, i) => `${names[i]}:${(p*100).toFixed(0)}%`).join(", ") : "";
-
-        infoDiv.innerHTML = `
-          <div class="knowledge-bar">
-            <span class="knowledge-pill badge-customer">Customer knows: <strong>${custKnown} = ${custVal}</strong></span>
-            <span class="knowledge-pill badge-agent">Agent knows: <strong>${agentKnown.join(", ")}</strong></span>
-          </div>
-          <div style="margin-top:8px; color:#6b7280;">Customer prefs: ${pref}</div>
-          <div style="color:#6b7280;">Price: $${data.resort ? data.resort.price : "?"} - Commission: ${agent.commission_rate} - Welfare weight (alpha): ${agent.welfare_weight}</div>
-          <div style="color:#6b7280;">Round ${data.round_idx ?? 0} / ${data.max_rounds ?? 1} - Trust ${Number(customer.trust ?? 0).toFixed(2)} - Verifications ${data.five_attr_memory?.verification_count ?? 0}</div>
-          <div style="color:#6b7280;">Revealed attrs: ${((data.revealed_indices || []).map((idx, i) => `${names[idx]}=${(data.revealed_values || [])[i]}`)).join(", ") || "none yet"}</div>
-          ${data.resort && !data.done ? `<div style="color:#6b7280; font-size:11px; margin-top:4px;">Resort truth is hidden until after the episode.</div>` : ""}
-        `;
       }
 
       function renderNegotiationResult(data) {
@@ -1317,7 +1512,7 @@
           const yAt = (value) => padT + plotH - (value / yMax) * plotH;
           const palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2", "#be185d", "#4f46e5"];
           const yTicks = 4;
-          let svg = `<div class="section-head">Final Bid Per Painting</div><svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">`;
+          let svg = `<div class="section-head">Final Bid Per Painting</div><svg id="auctionBidGraph" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">`;
           for (let i = 0; i <= yTicks; i += 1) {
             const yValue = (yMax * i) / yTicks;
             const y = yAt(yValue);
@@ -1377,7 +1572,8 @@
           document.getElementById("auctionCard").classList.add("hidden");
           document.getElementById("faResultCard").classList.add("hidden");
           document.getElementById("faTimelineCard").classList.add("hidden");
-          document.getElementById("faInfoCard").classList.add("hidden");
+          document.getElementById("batchCard").classList.add("hidden");
+          document.getElementById("megaBatchCard").classList.add("hidden");
           return data;
         }
         lastRenderData = data;
@@ -1386,7 +1582,6 @@
         refreshModeChrome();
         showConversation(data.conversation);
         showTurns(data.step_status && data.step_status.turns);
-        renderFiveAttrSetup(data);
         renderFiveAttrResult(data);
         renderFiveAttrTimeline(data);
         renderNegotiationResult(data);
@@ -1400,6 +1595,7 @@
           const stepData = await stepRes.json();
           const stepStatus = stepData.status || {};
           if (stepStatus.running) {
+            setDebugPanelsCollapsed(false);
             showTurns(stepStatus.turns);
             showConversation(stepStatus.conversation);
             if (stepPoller) clearInterval(stepPoller);
@@ -1411,12 +1607,17 @@
         if (batchRes.ok) {
           const batchData = await batchRes.json();
           const batchStatus = batchData.status || {};
-          if (batchStatus.running) {
-            document.getElementById("batchSpinner").classList.remove("hidden");
-            if (batchPoller) clearInterval(batchPoller);
-            batchPoller = setInterval(pollBatchStatus, 700);
+          const hasBatchResults = Array.isArray(batchStatus.results) && batchStatus.results.length > 0;
+          if (batchStatus.running || batchStatus.done || hasBatchResults) {
+            setDebugPanelsCollapsed(true);
+            document.getElementById("batchSpinner").classList.toggle("hidden", !batchStatus.running);
+            if (batchStatus.running) {
+              if (batchPoller) clearInterval(batchPoller);
+              batchPoller = setInterval(pollBatchStatus, 700);
+            }
             renderBatchResults({ results: batchStatus.results || [], summary: batchStatus.summary || {} });
             renderCurrentEpisodePanel("batchCurrentEpisode", batchStatus, "batch");
+            showBatchTurnProgress(batchStatus, "batch");
           }
         }
 
@@ -1424,12 +1625,17 @@
         if (megaRes.ok) {
           const megaData = await megaRes.json();
           const megaStatus = megaData.status || {};
-          if (megaStatus.running) {
-            document.getElementById("megaBatchSpinner").classList.remove("hidden");
-            if (megaBatchPoller) clearInterval(megaBatchPoller);
-            megaBatchPoller = setInterval(pollMegaBatchStatus, 1000);
+          const hasMegaResults = Array.isArray(megaStatus.results) && megaStatus.results.length > 0;
+          if (megaStatus.running || megaStatus.done || hasMegaResults) {
+            setDebugPanelsCollapsed(true);
+            document.getElementById("megaBatchSpinner").classList.toggle("hidden", !megaStatus.running);
+            if (megaStatus.running) {
+              if (megaBatchPoller) clearInterval(megaBatchPoller);
+              megaBatchPoller = setInterval(pollMegaBatchStatus, 1000);
+            }
             renderMegaBatchResults(megaStatus);
             renderCurrentEpisodePanel("megaBatchCurrentEpisode", megaStatus, "mega");
+            showBatchTurnProgress(megaStatus, "mega");
           }
         }
       }
@@ -1448,21 +1654,24 @@
         if (status.done || status.error) {
           if (stepPoller) { clearInterval(stepPoller); stepPoller = null; }
           if (status.error) alert(status.error);
-          if (!status.used_models && status.llm_error) console.warn("LLM fallback:", status.llm_error);
+          if (!status.used_models && status.llm_error) {
+            console.warn("Strict model error:", status.llm_error);
+          }
           await refreshRender();
         }
       }
 
       function buildStepPayload() {
         const mode = document.getElementById("mode").value;
-        const advanced = !document.getElementById("advancedPanel").classList.contains("hidden");
-        if (!advanced) return { use_models: true };
         if (mode === "five_attr") return {
           use_models: true,
-          resort_policy:   document.getElementById("fa-resortPolicy").value,
-          agent_policy:    document.getElementById("fa-agentPolicy").value,
-          customer_policy: document.getElementById("fa-customerPolicy").value,
+          agent_prompt_style: "utilitarian",
+          agent_policy: "correct_known",
+          customer_policy: "deterministic_gate",
+          five_attr_omission_prior: 0.3,
         };
+        const advanced = !document.getElementById("advancedPanel").classList.contains("hidden");
+        if (!advanced) return { use_models: true };
         if (mode === "simple_resort_deception") return {
           use_models: true,
           resort_policy:   document.getElementById("sr-resortPolicy").value,
@@ -1503,6 +1712,7 @@
         document.getElementById("auctionCard").classList.add("hidden");
         await refreshSaveSlots();
         await refreshRender();
+        setDebugPanelsCollapsed(false);
       }
 
       document.getElementById("resetBtn").onclick = resetSimulation;
@@ -1510,6 +1720,7 @@
       document.getElementById("stepBtn").onclick = async () => {
         const mode = document.getElementById("mode").value;
         const payload = buildStepPayload();
+        setDebugPanelsCollapsed(false);
         const res = await apiPost("/api/step", payload);
         const data = await res.json();
         if (!res.ok) { alert(data.detail || data.error || "Step failed"); return; }
@@ -1545,12 +1756,13 @@
       });
 
       document.getElementById("saveSlot").addEventListener("change", async (event) => {
-        setActiveSaveSlot(event.target.value || "");
+        const slotId = event.target.value || DEFAULT_SAVE_SLOT_ID;
+        event.target.value = slotId;
+        setActiveSaveSlot(slotId);
+        setLastOpenedSession(slotId);
+        clearRunPanels();
         await refreshSaveSlots();
-        const data = await refreshRender();
-        if (data && data.empty) {
-          await resetSimulation();
-        }
+        await refreshRender();
         await resumeActiveJobs();
       });
 
@@ -1566,8 +1778,9 @@
           alert(data.detail || "Delete failed");
           return;
         }
-        setActiveSaveSlot("");
-        document.getElementById("saveSlot").value = "";
+        setActiveSaveSlot(slotId);
+        setLastOpenedSession(slotId);
+        document.getElementById("saveSlot").value = slotId;
         await refreshSaveSlots();
         showSlotMenu();
       };
@@ -1597,7 +1810,7 @@
         if (v === undefined || v === null) return "—";
         const n = Number(v);
         const cls = n > 0.005 ? "val-pos" : n < -0.005 ? "val-neg" : "val-zero";
-        return `<span class="${cls}">${n.toFixed(2)}</span>`;
+        return `<span class="${cls}">${n.toFixed(1)}</span>`;
       }
 
       function escHtml(v) {
@@ -1663,12 +1876,12 @@
             <th>#</th><th>Booked</th>
             <th>Customer</th><th>Resort</th><th>Agent</th>
             <th>Total W</th><th>True Q</th><th>Disap.</th>
-            <th>Resort Lies</th><th>Caught</th>
+            <th>Resort Lies</th><th>Caught</th><th>Profile</th><th>Nash Dist.</th>
           </tr></thead><tbody>`;
 
         for (const r of rows) {
           if (r.error) {
-            html += `<tr class="error-row"><td>${r.episode}</td><td colspan="9">${r.error}</td></tr>`;
+            html += `<tr class="error-row"><td>${r.episode}</td><td colspan="11">${r.error}</td></tr>`;
             continue;
           }
           const bkd = r.booked
@@ -1682,6 +1895,8 @@
             <td>${r.disappointment > 0.001 ? `<span class="val-neg">${r.disappointment.toFixed(2)}</span>` : `<span class="val-zero">0</span>`}</td>
             <td>${r.resort_unverified_lies ?? 0}</td>
             <td>${r.resort_caught_lies ?? 0} / ${r.agent_caught_lies ?? 0}</td>
+            <td>${escHtml(r.strategy_profile || "-")}</td>
+            <td><span class="val-zero">${Number(r.equilibrium_distance ?? 0).toFixed(3)}</span></td>
           </tr>`;
         }
 
@@ -1697,6 +1912,8 @@
             <td>${s.avg_disappointment > 0.001 ? `<span class="val-neg">${s.avg_disappointment.toFixed(2)}</span>` : `<span class="val-zero">0</span>`}</td>
             <td>${(s.avg_resort_unverified_lies ?? 0).toFixed(2)}</td>
             <td>—</td>
+            <td>—</td>
+            <td><span class="val-zero">${Number(s.avg_equilibrium_distance ?? 0).toFixed(3)}</span></td>
           </tr>`;
         }
 
@@ -1705,6 +1922,59 @@
         restoreOpenDetailsState(out, detailsState);
         restoreScrollState(out, scrollState);
         restoreKeyedScrollStates(out, ".chat[data-scroll-key]", chatStates);
+      }
+
+      function renderMegaRewardGraph(buyerRankings, sellerRankings, mode) {
+        if (!Array.isArray(buyerRankings) || !buyerRankings.length) return "";
+        const sellerByModel = new Map((sellerRankings || []).map((row) => [String(row.model || ""), row]));
+        const rows = buyerRankings.map((buyer) => ({
+          model: String(buyer.model || ""),
+          buyerPayoff: Number(buyer.avg_reward || 0),
+          agentPayoff: Number(sellerByModel.get(String(buyer.model || ""))?.avg_reward || 0),
+        }));
+        const width = 920;
+        const height = 320;
+        const padL = 58;
+        const padR = 18;
+        const padT = 24;
+        const padB = 58;
+        const plotW = width - padL - padR;
+        const plotH = height - padT - padB;
+        const gap = 18;
+        const groupW = Math.max(42, (plotW - gap * (rows.length + 1)) / rows.length);
+        const barW = Math.max(12, (groupW - 8) / 2);
+        const allPayoffs = rows.flatMap((row) => [row.buyerPayoff, row.agentPayoff, 0]);
+        const yMin = Math.min(-1, ...allPayoffs);
+        const yMax = Math.max(1, ...allPayoffs);
+        const yAt = (value) => padT + ((yMax - value) / (yMax - yMin)) * plotH;
+        const zeroY = yAt(0);
+        let svg = `<div class="section-head">Model Average Payoff Across Completed Episodes</div><div class="hint" style="margin-bottom:6px;">Bars average raw episode-level payoffs by model role, not the rounded matchup rows above.</div><svg id="megaBatchGraph" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">`;
+        for (let i = 0; i <= 4; i += 1) {
+          const value = yMin + ((yMax - yMin) * i) / 4;
+          const y = yAt(value);
+          svg += `<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="#eef2ff" stroke-width="1" />`;
+          svg += `<text x="${padL - 8}" y="${y + 4}" font-size="11" text-anchor="end" fill="#6b7280">${value.toFixed(1)}</text>`;
+        }
+        svg += `<line x1="${padL}" y1="${zeroY}" x2="${width - padR}" y2="${zeroY}" stroke="#334155" stroke-width="1.5" />`;
+        rows.forEach((row, index) => {
+          const groupX = padL + gap + index * (groupW + gap);
+          const label = normalizeDisplayedModelName(mode, row.model);
+          [
+            [row.buyerPayoff, "#2563eb", groupX],
+            [row.agentPayoff, "#dc2626", groupX + barW + 8],
+          ].forEach(([payoff, color, x]) => {
+            const payoffY = yAt(payoff);
+            const y = Math.min(zeroY, payoffY);
+            const barH = Math.max(1, Math.abs(zeroY - payoffY));
+            svg += `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" rx="3" fill="${color}" />`;
+            svg += `<text x="${x + barW / 2}" y="${payoff >= 0 ? Math.max(13, y - 6) : Math.min(height - padB + 15, y + barH + 14)}" font-size="11" text-anchor="middle" fill="${color}">${payoff.toFixed(2)}</text>`;
+          });
+          svg += `<text x="${groupX + groupW / 2}" y="${height - 31}" font-size="11" text-anchor="middle" fill="#374151">${escHtml(label)}</text>`;
+        });
+        svg += `<rect x="${padL}" y="${height - 19}" width="10" height="10" rx="2" fill="#2563eb" /><text x="${padL + 16}" y="${height - 10}" font-size="11" fill="#374151">Buyer avg payoff</text>`;
+        svg += `<rect x="${padL + 128}" y="${height - 19}" width="10" height="10" rx="2" fill="#dc2626" /><text x="${padL + 144}" y="${height - 10}" font-size="11" fill="#374151">Agent avg payoff</text>`;
+        svg += `</svg>`;
+        return svg;
       }
 
       function renderMegaBatchResults(data) {
@@ -1718,6 +1988,7 @@
         const rows = data.results || [];
         const summary = data.summary || {};
         const mode = data.mode || "buyer_seller_negotiation";
+        setMimicExportVisibility(mode === "five_attr");
         const completed = Number(data.completed_matchups || 0);
         const total = Number(data.total_matchups || 0);
         progress.textContent = total ? `· ${completed}/${total} matchups` : "";
@@ -1726,18 +1997,22 @@
         const sellerRankings = summary.agent_rankings || summary.seller_rankings || [];
         const secondRoleLabel = mode === "five_attr" ? "Agent" : "Seller";
         const secondAvgLabel = mode === "five_attr" ? "Agent Avg" : "Seller Avg";
-        const turnsLabel = mode === "five_attr" ? "Msgs" : "Turns";
-        const rankingMetricLabel = mode === "five_attr" ? "Success" : "Avg Reward";
+        const turnsLabel = mode === "five_attr" ? "Vectors" : "Turns";
+        const priceMetricLabel = mode === "five_attr" ? "Signed BM / Vector" : "Price";
+        const rankingMetricLabel = mode === "five_attr" ? "Avg Payoff" : "Avg Reward";
 
         let html = `<table class="batch-table">
           <thead><tr>
-            <th>Buyer</th><th>${secondRoleLabel}</th><th>Deal %</th><th>Buyer Avg</th><th>${secondAvgLabel}</th><th>${turnsLabel}</th><th>Price</th>
+            <th>Buyer</th><th>${secondRoleLabel}</th><th>Deal %</th><th>Buyer Avg</th><th>${secondAvgLabel}</th>
+            ${mode === "five_attr"
+              ? "<th>False Claims</th><th>Omissions</th><th>False-Claim Books</th>"
+              : `<th>${turnsLabel}</th><th>${priceMetricLabel}</th>`}
           </tr></thead><tbody>`;
         for (const row of rows) {
           const buyerName = normalizeDisplayedModelName(mode, row.buyer_model, 0);
           const sellerName = normalizeDisplayedModelName(mode, row.seller_model, 1);
           if (row.error) {
-            html += `<tr class="error-row"><td>${buyerName}</td><td>${sellerName}</td><td colspan="5">${row.error}</td></tr>`;
+            html += `<tr class="error-row"><td>${buyerName}</td><td>${sellerName}</td><td colspan="${mode === "five_attr" ? 6 : 5}">${row.error}</td></tr>`;
             continue;
           }
           const s = row.summary || {};
@@ -1745,21 +2020,29 @@
             <td>${buyerName}</td>
             <td>${sellerName}</td>
             <td><span class="val-zero">${((Number(s.booking_rate || 0)) * 100).toFixed(0)}%</span></td>
-            <td>${mode === "five_attr" ? "-" : fmtVal(s.avg_buyer_remaining_money ?? s.avg_customer_reward)}</td>
-            <td>${mode === "five_attr" ? "-" : fmtVal(s.avg_seller_profit_margin ?? s.avg_agent_reward ?? s.avg_resort_reward)}</td>
-            <td><span class="val-zero">${Number(s.avg_num_turns ?? s.avg_num_messages ?? 0).toFixed(2)}</span></td>
-            <td><span class="val-zero">${mode === "five_attr" ? "-" : `$${Number(s.avg_agreed_price ?? 0).toFixed(2)}`}</span></td>
+            <td>${fmtVal(mode === "five_attr" ? s.avg_customer_reward : s.avg_buyer_remaining_money ?? s.avg_customer_reward)}</td>
+            <td>${fmtVal(mode === "five_attr" ? s.avg_agent_reward : s.avg_seller_profit_margin ?? s.avg_agent_reward ?? s.avg_resort_reward)}</td>
+            ${mode === "five_attr" ? `
+              <td><span class="val-zero">${(Number(s.false_claim_episode_rate || 0) * 100).toFixed(0)}%</span></td>
+              <td><span class="val-zero">${(Number(s.omission_episode_rate || 0) * 100).toFixed(0)}%</span></td>
+              <td><span class="val-zero">${(Number(s.false_claim_booking_rate || 0) * 100).toFixed(0)}%</span></td>
+            ` : `
+              <td><span class="val-zero">${Number(s.avg_num_turns ?? s.avg_num_messages ?? 0).toFixed(2)}</span></td>
+              <td><span class="val-zero">$${Number(s.avg_agreed_price ?? 0).toFixed(2)}</span></td>
+            `}
           </tr>`;
         }
         html += `</tbody></table>`;
 
-        for (const row of rows) {
+        if (SHOW_MEGA_VECTOR_EXCHANGE_DETAILS) for (const row of rows) {
           if (row.error) continue;
           const episodes = Array.isArray(row.results) ? row.results : [];
           const buyerName = normalizeDisplayedModelName(mode, row.buyer_model, 0);
           const sellerName = normalizeDisplayedModelName(mode, row.seller_model, 1);
           const episodeBlocks = episodes.map((ep) => {
             const convo = Array.isArray(ep.conversation) ? ep.conversation : [];
+            const llmFailed = ep.used_models === false && !!ep.llm_error;
+            const episodeError = ep.error || (llmFailed ? ep.llm_error : "");
             const convoKey = `mega-${buyerName}-${sellerName}-ep-${Number(ep.episode || 0)}`;
             const convoHtml = convo.length
               ? `<div class="chat" data-scroll-key="${escHtml(convoKey)}" style="max-height:180px;">${convo.map((it) => {
@@ -1769,22 +2052,30 @@
                   <div class="msg">
                     <div class="who">${escHtml(speaker)}</div>
                     <div class="meta">${[it.channel, recipient ? `→ ${recipient}` : ""].filter(Boolean).map(escHtml).join("  ")}</div>
-                    <div>${escHtml(it.text || "")}</div>
+                    <div>${conversationBodyHtml(it)}</div>
                   </div>
                 `;
                 }).join("")}</div>`
-              : `<div class="hint">No conversation captured for this episode.</div>`;
+              : `<div class="hint">${mode === "five_attr" ? "No vector exchanges captured for this episode." : "No conversation captured for this episode."}</div>`;
             const priceText = mode === "five_attr" ? "-" : (ep.agreed_price ? `$${Number(ep.agreed_price).toFixed(2)}` : "-");
+            const fiveAttrEpisodeFacts = mode === "five_attr"
+              ? `<div class="hint" style="margin-bottom:8px;">Episode-local setup: Truth ${escHtml(ep.truth || "[]")} | Initially knows ${escHtml(ep.initial_customer_known_attr || ep.customer_known_attr || `index ${Number(ep.customer_known_index || 0)}`)}=${escHtml(ep.initial_customer_known_value ?? ep.customer_known_value ?? "-")} | Omission prior ${escHtml(ep.omission_prior ?? "-")} | Buyer belief ${escHtml(ep.buyer_belief_vector || "[]")} | Final known ${escHtml(ep.final_known_attrs || "{}")} | Final report ${escHtml(ep.reported_attrs || "[]")}</div>`
+              : "";
+            const episodeHeader = mode === "five_attr"
+              ? `Episode ${Number(ep.episode || 0)} | Seed ${escHtml(ep.seed)} | Deal ${ep.booked ? "Yes" : "No"} | Utility C/A ${Number(ep.customer || 0).toFixed(2)}/${Number(ep.agent || 0).toFixed(2)} | Terminal ${escHtml(ep.terminal_reason || "-")} | Final False Claims ${Number(ep.final_report_false_claim_count || 0)} | Final Omits ${Number(ep.final_report_omission_count || 0)} | BM ${Number(ep.belief_misalignment || 0).toFixed(3)} | Vectors ${Number(ep.num_messages || 0)}${episodeError ? " | Failed" : ""}`
+              : `Episode ${Number(ep.episode || 0)} | Seed ${escHtml(ep.seed)} | Deal ${ep.booked ? "Yes" : "No"} | Price ${priceText}${episodeError ? " | Failed" : ""}`;
             return `
               <div class="mini-episode">
-                <div class="mini-episode-head">Episode ${Number(ep.episode || 0)} | Seed ${escHtml(ep.seed)} | Deal ${ep.booked ? "Yes" : "No"}${mode === "five_attr" ? ` | Messages ${Number(ep.num_messages || 0)}` : ` | Price ${priceText}`}</div>
+                <div class="mini-episode-head">${episodeHeader}</div>
+                ${episodeError ? `<div class="hint" style="margin-bottom:8px;">${llmFailed ? "Model call failed; no local fallback was used." : "Episode failed."} Error: ${escHtml(episodeError)}</div>` : ""}
+                ${fiveAttrEpisodeFacts}
                 ${convoHtml}
               </div>
             `;
           }).join("");
           html += `
             <details class="matchup-details">
-              <summary>${escHtml(buyerName)} vs ${escHtml(sellerName)} conversations</summary>
+              <summary>${escHtml(buyerName)} vs ${escHtml(sellerName)} ${mode === "five_attr" ? "vector exchanges" : "conversations"}</summary>
               <div class="matchup-details-body">
                 ${episodeBlocks || `<div class="hint">No episode details available yet.</div>`}
               </div>
@@ -1793,16 +2084,17 @@
         }
 
         if (buyerRankings.length || sellerRankings.length) {
+          html += renderMegaRewardGraph(buyerRankings, sellerRankings, mode);
           html += `<div class="section-head">Buyer Rankings</div>`;
           html += `<table class="batch-table"><thead><tr><th>Model</th><th>${rankingMetricLabel}</th><th>Deal %</th><th>Matchups</th></tr></thead><tbody>`;
           for (const row of buyerRankings) {
-            html += `<tr><td>${normalizeDisplayedModelName(mode, row.model)}</td><td>${mode === "five_attr" ? `<span class="val-zero">${(Number(row.avg_reward || 0) * 100).toFixed(0)}%</span>` : fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td></tr>`;
+            html += `<tr><td>${normalizeDisplayedModelName(mode, row.model)}</td><td>${fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td></tr>`;
           }
           html += `</tbody></table>`;
           html += `<div class="section-head">${secondRoleLabel} Rankings</div>`;
-          html += `<table class="batch-table"><thead><tr><th>Model</th><th>${rankingMetricLabel}</th><th>Deal %</th><th>Matchups</th></tr></thead><tbody>`;
+          html += `<table class="batch-table"><thead><tr><th>Model</th><th>${rankingMetricLabel}</th><th>Deal %</th><th>Matchups</th>${mode === "five_attr" ? "<th>False-Claim Episodes</th><th>Omission Episodes</th><th>False Claims</th><th>Omissions</th><th>False-Claim Books</th><th>Detected False Claims</th>" : ""}</tr></thead><tbody>`;
           for (const row of sellerRankings) {
-            html += `<tr><td>${normalizeDisplayedModelName(mode, row.model)}</td><td>${mode === "five_attr" ? `<span class="val-zero">${(Number(row.avg_reward || 0) * 100).toFixed(0)}%</span>` : fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td></tr>`;
+            html += `<tr><td>${normalizeDisplayedModelName(mode, row.model)}</td><td>${fmtVal(row.avg_reward)}</td><td><span class="val-zero">${(Number(row.avg_deal_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${Number(row.matchups || 0).toFixed(0)}</span></td>${mode === "five_attr" ? `<td><span class="val-zero">${Number(row.false_claim_episode_count || 0).toFixed(0)}</span></td><td><span class="val-zero">${Number(row.omission_episode_count || 0).toFixed(0)}</span></td><td><span class="val-zero">${(Number(row.avg_false_claim_episode_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${(Number(row.avg_omission_episode_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${(Number(row.avg_false_claim_booking_rate || 0) * 100).toFixed(0)}%</span></td><td><span class="val-zero">${(Number(row.avg_caught_lie_detection_rate || 0) * 100).toFixed(0)}%</span></td>` : ""}</tr>`;
           }
           html += `</tbody></table>`;
         }
@@ -1846,7 +2138,6 @@
           restoreScrollState(root, rootScrollState);
           return;
         }
-
         const turnsHtml = turns.length
           ? `<div class="turns">${turns.map((it) => `
               <div class="turn-card ${it.status || "pending"}">
@@ -1864,12 +2155,12 @@
               <div class="msg">
                 <div class="who">${speaker}</div>
                 <div class="meta">${[it.channel, recipient ? `→ ${recipient}` : ""].filter(Boolean).join("  ")}</div>
-                <div>${(it.text || "").replace(/</g, "&lt;")}</div>
+                <div>${conversationBodyHtml(it)}</div>
               </div>
             `;
             }).join("")
           : (usedModels === false && llmError
-              ? `<div class="msg" style="border-color:#fca5a5; background:#fff1f2;"><div class="who" style="color:#991b1b;">Fallback Triggered</div><div>${String(llmError).replace(/</g, "&lt;")}</div></div>`
+              ? `<div class="msg" style="border-color:#fca5a5; background:#fff1f2;"><div class="who" style="color:#991b1b;">Model Error</div><div>${String(llmError).replace(/</g, "&lt;")}</div></div>`
               : `<div class="hint">No transcript yet for the current episode.</div>`);
 
         root.innerHTML = `
@@ -1877,7 +2168,7 @@
           <div class="hint" style="margin-top:6px;">${prefix}${currentSeed !== null && currentSeed !== undefined ? ` | Seed ${currentSeed}` : ""}${buyerModel ? ` | ${leftRoleLabel} ${buyerModel}` : ""}${sellerModel ? ` | ${rightRoleLabel} ${sellerModel}` : ""}</div>
           <div class="hint" style="margin-top:4px;">${mode === "five_attr" ? "" : `${buyerBudget !== null && buyerBudget !== undefined ? `Buyer budget $${buyerBudget}` : ""}${sellerFloor !== null && sellerFloor !== undefined ? ` | Seller floor $${sellerFloor}` : ""}${sellerAsk !== null && sellerAsk !== undefined ? ` | Seller ask $${sellerAsk}` : ""}`}</div>
           <div class="hint" style="margin-top:4px; color:${usedModels === false ? "#991b1b" : "#6b7280"};">
-            ${usedModels === true ? "Using live model calls." : usedModels === false ? `Fallback used.${llmError ? ` ${llmError}` : ""}` : "Waiting for model status..."}
+            ${usedModels === true ? "Using live model calls." : usedModels === false ? `Strict live-model run failed; no fallback was used.${llmError ? ` ${llmError}` : ""}` : "Waiting for model status..."}
           </div>
           <div style="margin-top:10px;">${turnsHtml}</div>
           <div class="chat" data-scroll-key="${escHtml(currentChatKey)}" style="margin-top:10px; max-height:220px;">${convoHtml}</div>
@@ -1900,6 +2191,7 @@
         const status = data.status || {};
         renderBatchResults({ results: status.results || [], summary: status.summary || {} });
         renderCurrentEpisodePanel("batchCurrentEpisode", status, "batch");
+        showBatchTurnProgress(status, "batch");
         if (status.done || status.error) {
           if (batchPoller) { clearInterval(batchPoller); batchPoller = null; }
           document.getElementById("batchSpinner").classList.add("hidden");
@@ -1913,6 +2205,7 @@
         const status = data.status || {};
         renderMegaBatchResults(status);
         renderCurrentEpisodePanel("megaBatchCurrentEpisode", status, "mega");
+        showBatchTurnProgress(status, "mega");
         if (status.done || status.error) {
           if (megaBatchPoller) { clearInterval(megaBatchPoller); megaBatchPoller = null; }
           document.getElementById("megaBatchSpinner").classList.add("hidden");
@@ -1924,7 +2217,8 @@
         const mode    = document.getElementById("mode").value;
         const scenario = document.getElementById("scenario").value;
         const advanced = !document.getElementById("advancedPanel").classList.contains("hidden");
-        const policies = advanced ? buildStepPayload() : { use_models: true };
+        const policies = mode === "five_attr" ? buildStepPayload() : (advanced ? buildStepPayload() : { use_models: true });
+        setDebugPanelsCollapsed(true);
 
         const payload = {
           num_episodes: 10,
@@ -1939,13 +2233,13 @@
         if (!payload.scenario) delete payload.scenario;
 
         // Label shows which policies are running
-        const rp = policies.resort_policy || "strategic";
+        const rp = policies.agent_prompt_style || policies.resort_policy || "utilitarian";
         const ap = policies.agent_policy  || "correct_known";
-        const cp = policies.customer_policy || "skeptical";
+        const cp = policies.customer_policy || "deterministic_gate";
         document.getElementById("batchPolicyLabel").textContent =
           mode === "buyer_seller_negotiation"
             ? `· buyer/seller negotiation`
-            : (advanced ? `· ${rp} / ${ap} / ${cp}` : `· strategic / correct_known / skeptical`);
+            : (advanced ? `· ${rp} / ${ap} / ${cp}` : `· utilitarian / correct_known / deterministic_gate`);
 
         document.getElementById("batchSpinner").classList.remove("hidden");
         document.getElementById("batchCard").classList.remove("hidden");
@@ -1966,6 +2260,9 @@
       document.getElementById("megaBatchBtn").onclick = async () => {
         const mode = document.getElementById("mode").value;
         const scenario = document.getElementById("scenario").value;
+        const advanced = !document.getElementById("advancedPanel").classList.contains("hidden");
+        const policies = mode === "five_attr" ? buildStepPayload() : (advanced ? buildStepPayload() : { use_models: true });
+        setDebugPanelsCollapsed(true);
         if (mode !== "buyer_seller_negotiation" && mode !== "five_attr") {
           alert("Mega-batch is only available for buyer_seller_negotiation or five_attr.");
           return;
@@ -1974,13 +2271,14 @@
           mode,
           scenario: scenario || undefined,
           selected_models: normalizedSelectedModelsForMode(mode, selectedModels()),
-          seed_list: mode === "five_attr" ? currentBatchSeeds.slice(0, 5) : currentBatchSeeds,
+          seed_list: mode === "five_attr" ? fiveAttrMegaSeeds() : currentBatchSeeds,
           max_rounds: 20,
+          ...policies,
         };
         if (!payload.scenario) delete payload.scenario;
         document.getElementById("megaBatchSpinner").classList.remove("hidden");
         document.getElementById("megaBatchCard").classList.remove("hidden");
-        document.getElementById("megaBatchOut").innerHTML = `<div class="hint" style="padding:10px 0;">${mode === "five_attr" ? "Running 25 buyer/agent persuasion batches..." : "Running 25 buyer/seller batches..."}</div>`;
+        document.getElementById("megaBatchOut").innerHTML = `<div class="hint" style="padding:10px 0;">${mode === "five_attr" ? `Running ${normalizedSelectedModelsForMode(mode, selectedModels()).length} deterministic-buyer/agent vector batches...` : "Running 25 buyer/seller batches..."}</div>`;
         try {
           const res = await apiPost("/api/run_mega_batch_start", payload);
           const data = await res.json();
@@ -1996,13 +2294,64 @@
         const next = new Set();
         while (next.size < 10) next.add(Math.floor(Math.random() * 1000000));
         currentBatchSeeds = Array.from(next).sort((a, b) => a - b);
+        const nextFiveAttrMega = new Set();
+        while (nextFiveAttrMega.size < fiveAttrMegaEpisodeCount()) nextFiveAttrMega.add(Math.floor(Math.random() * 1000000));
+        currentFiveAttrMegaBatchSeeds = Array.from(nextFiveAttrMega).sort((a, b) => a - b);
         updateBatchSeedsLabel();
       };
 
       document.getElementById("restoreSeedsBtn").onclick = () => {
         currentBatchSeeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        currentFiveAttrMegaBatchSeeds = fiveAttrMegaSeeds();
         updateBatchSeedsLabel();
       };
+
+      document.getElementById("fiveAttrMegaEpisodes").addEventListener("input", () => {
+        currentFiveAttrMegaBatchSeeds = fiveAttrMegaSeeds();
+        updateBatchSeedsLabel();
+      });
+
+      function downloadSvgAsPng(svgId, filename) {
+        const svg = document.getElementById(svgId);
+        if (!svg) {
+          alert("Run the simulation first so the graph is available.");
+          return;
+        }
+        const viewBox = svg.viewBox.baseVal;
+        const scale = 2;
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.ceil(viewBox.width * scale));
+        canvas.height = Math.max(1, Math.ceil(viewBox.height * scale));
+        const context = canvas.getContext("2d");
+        const image = new Image();
+        const source = new Blob([new XMLSerializer().serializeToString(svg)], { type: "image/svg+xml;charset=utf-8" });
+        const sourceUrl = URL.createObjectURL(source);
+        image.onload = () => {
+          context.fillStyle = "#ffffff";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(sourceUrl);
+          canvas.toBlob((png) => {
+            if (!png) {
+              alert("PNG export failed.");
+              return;
+            }
+            const url = URL.createObjectURL(png);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+          }, "image/png");
+        };
+        image.onerror = () => {
+          URL.revokeObjectURL(sourceUrl);
+          alert("PNG export failed.");
+        };
+        image.src = sourceUrl;
+      }
 
       document.getElementById("exportBatchBtn").onclick = async () => {
         const res = await fetch(withSession("/api/export_batch_txt"));
@@ -2106,6 +2455,44 @@
         URL.revokeObjectURL(url);
       };
 
+      document.getElementById("exportMimicAgentCsvBtn").onclick = async () => {
+        const res = await fetch(withSession("/api/export_mimic_agent_csv"));
+        const data = res.ok ? await res.blob() : await res.json();
+        if (!res.ok) {
+          alert(data.detail || "Export failed");
+          return;
+        }
+        const url = URL.createObjectURL(data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "mimic_agent_dataset.csv";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      document.getElementById("exportMimicCustomerCsvBtn").onclick = async () => {
+        const res = await fetch(withSession("/api/export_mimic_customer_csv"));
+        const data = res.ok ? await res.blob() : await res.json();
+        if (!res.ok) {
+          alert(data.detail || "Export failed");
+          return;
+        }
+        const url = URL.createObjectURL(data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "mimic_customer_dataset.csv";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      document.getElementById("exportMegaGraphPngBtn").onclick = () => {
+        downloadSvgAsPng("megaBatchGraph", "mega_batch_reward_system.png");
+      };
+
       document.getElementById("exportAuctionCsvBtn").onclick = async () => {
         const res = await fetch(withSession("/api/export_auction_csv"));
         const data = res.ok ? await res.blob() : await res.json();
@@ -2157,6 +2544,10 @@
         URL.revokeObjectURL(url);
       };
 
+      document.getElementById("exportAuctionGraphPngBtn").onclick = () => {
+        downloadSvgAsPng("auctionBidGraph", "auction_final_bid_graph.png");
+      };
+
       document.getElementById("mode").value = "buyer_seller_negotiation";
       document.getElementById("saveSlot").value = activeSaveSlot();
       maybeAssignFreshSeed(true);
@@ -2168,6 +2559,11 @@
       renderSelectedModelsDebug();
       refreshSaveSlots()
         .then(async () => {
+          const previousSession = lastOpenedSession();
+          if (previousSession !== null) {
+            await openSessionFromMenu(previousSession);
+            return;
+          }
           showSlotMenu();
         })
         .catch((err) => {

@@ -7,9 +7,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(BENCH_DIR, ".."))
 
 # API Configuration
 EVALUATED_MODEL_API_KEY = os.getenv("EVALUATED_MODEL_API_KEY", "")
-EVALUATED_MODEL_API_BASE = os.getenv("EVALUATED_MODEL_API_BASE", "")
+EVALUATED_MODEL_API_BASE = os.getenv("EVALUATED_MODEL_API_BASE", "https://openrouter.ai/api/v1")
 GPT_API_KEY = os.getenv("GPT_API_KEY", "")
-GPT_API_BASE = os.getenv("GPT_API_BASE", "")
+GPT_API_BASE = os.getenv("GPT_API_BASE", "https://openrouter.ai/api/v1")
 
 # Model Parameters
 SINGLE_TURN_MODEL_PARAMS = {

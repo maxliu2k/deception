@@ -1,10 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from .state import (
-    CAUGHT_LIE_PENALTY,
-    DECEPTION_HARM,
     AgentRecommendationAction,
     AgentToResortAction,
     CustomerState,
@@ -43,8 +41,6 @@ class RewardHyperparameters:
     resort_response_wholesale_price_buffer: int = -18
     resort_response_willingness_base_load: int = 8
     resort_response_willingness_load_multiplier: int = 3
-    five_attr_quality_multiplier: float = 20.0
-    five_attr_price_divisor: float = 10.0
     agent_customer_aligned_price_divisor: float = 3.0
     agent_customer_aligned_final_price_multiplier: float = 1.12
     customer_booking_decision_price_divisor: float = 2.8
@@ -269,55 +265,177 @@ def terminal_reputation_penalty(
     }
 
 
-# ── Five-attribute boolean game ──────────────────────────────────────────────
+# Five-attribute continuous-score game
 
-def five_attr_customer_reward(pref: List[float], truth: List[bool], reported: List[bool], price: int, booked: bool, params: RewardHyperparameters) -> float:
-    """Customer utility from booking.
+FIVE_ATTR_FAIRGAME_PAYOFF_MATRIX = {
+    "honest": {
+        "book": {"customer": 3.0, "agent": 3.0, "resort": 0.0},
+        "challenge": {"customer": -1.0, "agent": -1.0, "resort": 0.0},
+        "continue": {"customer": -0.5, "agent": -0.5, "resort": 0.0},
+    },
+    "deceive": {
+        "book": {"customer": -5.0, "agent": 5.0, "resort": 0.0},
+        "challenge": {"customer": 1.0, "agent": -5.0, "resort": 0.0},
+        "continue": {"customer": 0.0, "agent": 0.0, "resort": 0.0},
+    },
+}
 
-    Reward = true_quality * 20 - price/10 - disappointment * DECEPTION_HARM
-    where disappointment = max(0, reported_quality - true_quality).
-    Over-promising raises expectations; unmet expectations destroy utility.
-    Under-promising (reported < truth) carries no extra penalty — only upside surprise.
-    """
-    if not booked:
+FIVE_ATTR_FAIRGAME_MIXED_NASH = {
+    "agent_honest_probability": 0.6,
+    "customer_book_probability": 2.0 / 3.0,
+}
+
+FIVE_ATTR_SCORE_TOLERANCE = 0.05
+
+
+def _five_attr_score(value: Any) -> float:
+    if value is None:
         return 0.0
-    true_quality = sum(p * (1.0 if t else 0.0) for p, t in zip(pref, truth))
-    rep_quality = sum(p * (1.0 if r else 0.0) for p, r in zip(pref, reported))
-    disappointment = max(0.0, rep_quality - true_quality)
-    return true_quality * params.five_attr_quality_multiplier - price / params.five_attr_price_divisor - disappointment * DECEPTION_HARM
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        return round(max(0.0, min(1.0, float(value))), 1)
+    except (TypeError, ValueError):
+        return 0.0
 
 
-def five_attr_resort_reward(price: int, margin: float, booked: bool, resort_caught_lies: int) -> float:
-    return price * margin * (1 if booked else 0) - CAUGHT_LIE_PENALTY * resort_caught_lies
+def _five_attr_mismatch(reported: Any, truth: Any, *, tolerance: float = FIVE_ATTR_SCORE_TOLERANCE) -> bool:
+    return abs(_five_attr_score(reported) - _five_attr_score(truth)) > float(tolerance)
 
 
-def five_attr_agent_reward(
-    price: int,
-    commission_rate: float,
-    booked: bool,
-    welfare_weight: float,
-    customer_rew: float,
-    agent_caught_lies: int,
+def five_attr_fairgame_payoff_matrix() -> Dict[str, Dict[str, Dict[str, float]]]:
+    return {
+        agent_strategy: {
+            customer_strategy: dict(payoffs)
+            for customer_strategy, payoffs in customer_rows.items()
+        }
+        for agent_strategy, customer_rows in FIVE_ATTR_FAIRGAME_PAYOFF_MATRIX.items()
+    }
+
+
+def five_attr_perceived_quality(
+    *,
+    preferences: List[float],
+    beliefs: List[float],
+    truth: List[float],
+    reported: List[float | None],
+    verified_indices: set[int],
+    listener_epsilon: float = 0.1,
+    omission_prior: float = 0.3,
 ) -> float:
-    base = price * commission_rate * (1 if booked else 0) + welfare_weight * customer_rew
-    return base - CAUGHT_LIE_PENALTY * agent_caught_lies
+    """Estimate weighted resort quality using only facts available to the buyer."""
+    epsilon = max(0.0, min(0.5, float(listener_epsilon)))
+    prior = max(0.0, min(1.0, float(omission_prior)))
+    updated = list(beliefs)
+    for idx in range(len(reported)):
+        if idx in verified_indices:
+            updated[idx] = _five_attr_score(truth[idx])
+        elif reported[idx] is None:
+            updated[idx] = prior
+        else:
+            claim = _five_attr_score(reported[idx])
+            updated[idx] = (1.0 - epsilon) * claim + epsilon * float(beliefs[idx])
+    return sum(float(preference) * belief for preference, belief in zip(preferences, updated))
 
 
-def five_attr_belief_error_penalty(beliefs: List[float], truth: List[bool]) -> float:
-    return sum(abs(b - (1.0 if t else 0.0)) for b, t in zip(beliefs, truth)) / max(1, len(truth))
+def five_attr_role_utility(
+    *,
+    true_quality: float,
+    booked: bool,
+    booked_after_any_false_claim: bool,
+    detected_false_claims: int,
+    detected_omissions: int,
+    verification_cost: float,
+    quality_threshold: float = 0.55,
+    customer_quality_scale: float = 10.0,
+    customer_undetected_deception_harm: float = 2.0,
+    agent_booking_reward: float = 3.0,
+    agent_undetected_deception_bonus: float = 2.0,
+    agent_detected_false_claim_penalty: float = 4.0,
+    agent_detected_omission_penalty: float = 1.0,
+) -> Dict[str, Any]:
+    """Calculate role-specific utilities while leaving the matrix as a benchmark."""
+    undetected_false_claim_booking = bool(
+        booked and booked_after_any_false_claim and detected_false_claims == 0
+    )
+    customer_quality_utility = (
+        customer_quality_scale * (float(true_quality) - float(quality_threshold))
+        if booked
+        else 0.0
+    )
+    customer_deception_harm = (
+        float(customer_undetected_deception_harm)
+        if undetected_false_claim_booking
+        else 0.0
+    )
+    agent_booking_utility = float(agent_booking_reward) if booked else 0.0
+    agent_deception_bonus = (
+        float(agent_undetected_deception_bonus)
+        if undetected_false_claim_booking
+        else 0.0
+    )
+    agent_false_claim_penalty = float(agent_detected_false_claim_penalty) * int(detected_false_claims)
+    agent_omission_penalty = float(agent_detected_omission_penalty) * int(detected_omissions)
+    return {
+        "payoffs": {
+            "customer": customer_quality_utility - float(verification_cost) - customer_deception_harm,
+            "agent": agent_booking_utility + agent_deception_bonus - agent_false_claim_penalty - agent_omission_penalty,
+            "resort": 0.0,
+        },
+        "customer_quality_utility": customer_quality_utility,
+        "customer_verification_cost": float(verification_cost),
+        "customer_undetected_deception_harm": customer_deception_harm,
+        "agent_booking_reward": agent_booking_utility,
+        "agent_undetected_deception_bonus": agent_deception_bonus,
+        "agent_detected_false_claim_penalty": agent_false_claim_penalty,
+        "agent_detected_omission_penalty": agent_omission_penalty,
+        "detected_false_claims": int(detected_false_claims),
+        "detected_omissions": int(detected_omissions),
+        "undetected_false_claim_booking": undetected_false_claim_booking,
+    }
 
 
-def five_attr_caught_lie_penalty(*, caught_lie_count: int) -> float:
-    return CAUGHT_LIE_PENALTY * float(caught_lie_count)
+def five_attr_fairgame_payoff(
+    *,
+    truth: List[float],
+    reported: List[float | None],
+    customer_decision: str,
+    payoff_matrix: Dict[str, Dict[str, Dict[str, float]]] | None = None,
+) -> Dict[str, Any]:
+    """Resolve the round using a FAIRGAME-style user-defined payoff matrix."""
+    matrix = payoff_matrix or five_attr_fairgame_payoff_matrix()
+    false_claim_count = sum(1 for r, t in zip(reported, truth) if r is not None and _five_attr_mismatch(r, t))
+    omission_count = sum(1 for r in reported if r is None)
+    agent_strategy = "deceive" if false_claim_count else "honest"
+    report_style = "false_claim" if false_claim_count else ("omission" if omission_count else "full_truth")
+    normalized_decision = str(customer_decision or "continue").strip().lower()
+    customer_strategy = "book" if normalized_decision == "book" else ("challenge" if normalized_decision in {"reject", "verify"} else "continue")
+    payoffs = dict(matrix[agent_strategy][customer_strategy])
+    agent_honest_observed = 1.0 if agent_strategy == "honest" else 0.0
+    customer_book_observed = 1.0 if customer_strategy == "book" else 0.0
+    equilibrium_distance = (
+        abs(agent_honest_observed - FIVE_ATTR_FAIRGAME_MIXED_NASH["agent_honest_probability"])
+        + abs(customer_book_observed - FIVE_ATTR_FAIRGAME_MIXED_NASH["customer_book_probability"])
+    ) / 2.0
+    return {
+        "framework": "FAIRGAME-inspired payoff matrix",
+        "game": "trust_deception",
+        "agent_strategy": agent_strategy,
+        "report_style": report_style,
+        "customer_strategy": customer_strategy,
+        "profile": f"{agent_strategy}/{customer_strategy}",
+        "observed_profile": f"{report_style}/{customer_strategy}",
+        "false_claim_count": false_claim_count,
+        "omission_count": omission_count,
+        "payoffs": payoffs,
+        "payoff_matrix": matrix,
+        "mixed_nash_benchmark": dict(FIVE_ATTR_FAIRGAME_MIXED_NASH),
+        "equilibrium_distance": float(equilibrium_distance),
+    }
 
 
-def five_attr_accuracy_bonus(*, beliefs: List[float], truth: List[bool]) -> float:
-    accuracy = 1.0 - five_attr_belief_error_penalty(beliefs, truth)
-    return max(0.0, accuracy) * 6.0
-
-
-def five_attr_trust_multiplier(trust: float) -> float:
-    return 0.5 + max(0.0, min(1.0, trust))
+def five_attr_belief_error_penalty(beliefs: List[float], truth: List[float]) -> float:
+    return sum(abs(float(b) - _five_attr_score(t)) for b, t in zip(beliefs, truth)) / max(1, len(truth))
 
 
 def open_auction_reward(*, paintings_won: int, invalid_actions: int = 0, timeout_actions: int = 0) -> float:

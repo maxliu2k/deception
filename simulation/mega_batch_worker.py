@@ -11,14 +11,18 @@ from typing import Any, Dict
 from .env import TravelGameEnv
 from .server import (
     DEFAULT_BATCH_SEEDS,
+    DEFAULT_FIVE_ATTR_MEGA_BATCH_SEEDS,
     FIXED_MAX_ROUNDS,
     MEGA_BATCH_MODELS,
     _mega_batch_models,
     _bind_session,
     _execute_batch,
+    _latest_model_status,
+    _llm_status_notice,
     _mega_batch_export_path,
     _mega_batch_status_path,
     _runtime,
+    _summarize_batch_results,
     _summarize_mega_batch,
     _worker_session_id,
     _write_json_atomic,
@@ -31,20 +35,37 @@ def _write_status(status_path: Path, status: Dict[str, Any]) -> None:
     _write_json_atomic(status_path, status)
 
 
+def _strict_matchup_failure_summary() -> Dict[str, Any]:
+    return {
+        "attempted_episodes": 1,
+        "failed_episodes": 1,
+        "valid_episodes": 0,
+        "failure_rate": 1.0,
+        "n": 0,
+        "booking_rate": 0.0,
+        "avg_customer_reward": 0.0,
+        "avg_resort_reward": 0.0,
+        "avg_agent_reward": 0.0,
+        "avg_total_welfare": 0.0,
+    }
+
+
 async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path) -> None:
     token = _bind_session(session_id)
     status_path = _mega_batch_status_path(session_id)
     export_path = _mega_batch_export_path(session_id)
     mode = str(payload.get("mode") or "buyer_seller_negotiation")
     scenario = payload.get("scenario") or None
-    seed_list = payload.get("seed_list") or list(DEFAULT_BATCH_SEEDS)
-    if mode == "five_attr":
-        seed_list = list(seed_list)[:5]
+    default_seeds = DEFAULT_FIVE_ATTR_MEGA_BATCH_SEEDS if mode == "five_attr" else DEFAULT_BATCH_SEEDS
+    seed_list = payload.get("seed_list") or list(default_seeds)
     max_rounds = int(payload.get("max_rounds") or FIXED_MAX_ROUNDS)
     use_models = bool(payload.get("use_models", True))
     mega_models = _mega_batch_models(payload, mode)
     total_matchups = len(mega_models) * len(mega_models)
+    started_at = time.time()
     status: Dict[str, Any] = {
+        "run_id": str(payload.get("run_id") or f"mega_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"),
+        "started_at": started_at,
         "running": True,
         "done": False,
         "error": None,
@@ -89,6 +110,9 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                     "seed_list": list(seed_list),
                     "max_rounds": max_rounds,
                     "use_models": use_models,
+                    "agent_prompt_style": str(payload.get("agent_prompt_style") or "utilitarian"),
+                    "agent_policy": str(payload.get("agent_policy") or "correct_known"),
+                    "customer_policy": str(payload.get("customer_policy") or "skeptical"),
                 }
                 status["current_matchup"] = matchup_index
                 status["current_episode"] = 0
@@ -123,10 +147,23 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                         _write_status(status_path, status)
 
                     def on_progress(completed: int, results: list[Dict[str, Any]]) -> None:
+                        partial_rows = list(matchup_rows)
+                        if results:
+                            partial_rows.append(
+                                {
+                                    "matchup_index": matchup_index,
+                                    "buyer_model": buyer_model,
+                                    "seller_model": seller_model,
+                                    "summary": _summarize_batch_results(list(results), mode),
+                                    "results": list(results),
+                                    "partial": True,
+                                }
+                            )
+                        status["results"] = partial_rows
+                        status["summary"] = _summarize_mega_batch(partial_rows, mode=mode, models=mega_models)
                         if results:
                             latest = results[-1]
-                            status["current_used_models"] = latest.get("used_models")
-                            status["current_llm_error"] = latest.get("llm_error")
+                            status["current_used_models"], status["current_llm_error"] = _latest_model_status(latest)
                             status["current_conversation"] = list(latest.get("conversation") or [])
                             worker_runtime = _runtime(_worker_session_id("batch"))
                             status["current_turns"] = list(worker_runtime.step_status.get("turns", [])) if isinstance(worker_runtime.step_status, dict) else []
@@ -136,7 +173,7 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                                         "speaker": "System",
                                         "recipient": "",
                                         "channel": "negotiation",
-                                        "text": f"LLM fallback triggered: {status['current_llm_error']}",
+                                        "text": _llm_status_notice(mode, status["current_llm_error"]),
                                     }
                                 ]
                         _write_status(status_path, status)
@@ -149,8 +186,7 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                     )
                     if results:
                         latest = results[-1]
-                        status["current_used_models"] = latest.get("used_models")
-                        status["current_llm_error"] = latest.get("llm_error")
+                        status["current_used_models"], status["current_llm_error"] = _latest_model_status(latest)
                         status["current_conversation"] = list(latest.get("conversation") or status.get("current_conversation") or [])
                         worker_runtime = _runtime(_worker_session_id("batch"))
                         status["current_turns"] = list(worker_runtime.step_status.get("turns", [])) if isinstance(worker_runtime.step_status, dict) else list(status.get("current_turns") or [])
@@ -160,7 +196,7 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                                     "speaker": "System",
                                     "recipient": "",
                                     "channel": "negotiation",
-                                    "text": f"LLM fallback triggered: {status['current_llm_error']}",
+                                    "text": _llm_status_notice(mode, status["current_llm_error"]),
                                 }
                             ]
                     matchup_rows.append(
@@ -182,16 +218,20 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
                             )
                         )
                 except Exception as exc:
-                    matchup_rows.append(
-                        {
-                            "matchup_index": matchup_index,
-                            "buyer_model": buyer_model,
-                            "seller_model": seller_model,
-                            "summary": {},
-                            "results": [],
-                            "error": str(exc),
-                        }
-                    )
+                    error_row = {
+                        "matchup_index": matchup_index,
+                        "buyer_model": buyer_model,
+                        "seller_model": seller_model,
+                        "summary": _strict_matchup_failure_summary(),
+                        "results": [],
+                        "error": str(exc),
+                    }
+                    matchup_rows.append(error_row)
+                    status["results"] = list(matchup_rows)
+                    status["completed_matchups"] = max(0, matchup_index - 1)
+                    status["summary"] = _summarize_mega_batch(matchup_rows, mode=mode, models=mega_models)
+                    _write_status(status_path, status)
+                    raise RuntimeError(f"Strict live-model failure in matchup {matchup_index}; stopping mega-batch. {exc}") from exc
                 status["results"] = list(matchup_rows)
                 status["completed_matchups"] = matchup_index
                 status["summary"] = _summarize_mega_batch(matchup_rows, mode=mode, models=mega_models)
@@ -199,14 +239,21 @@ async def _run_worker(*, session_id: str, payload: Dict[str, Any], job_dir: Path
 
         if export_sections:
             seed_text = ", ".join(str(seed) for seed in seed_list)
+            attempted_episodes = sum(int((row.get("summary") or {}).get("attempted_episodes", 0)) for row in matchup_rows)
+            failed_episodes = sum(int((row.get("summary") or {}).get("failed_episodes", 0)) for row in matchup_rows)
+            matchup_failures = sum(1 for row in matchup_rows if row.get("error"))
+            successful_matchups = sum(1 for row in matchup_rows if not row.get("error"))
             export_text = (
                 "\n".join(
                     [
                         "Mega-Batch Export",
+                        f"Run ID: {status.get('run_id', '')}",
                         f"Mode: {mode}",
                         f"Models: {', '.join(mega_models)}",
                         f"Seeds: [{seed_text}]",
-                        f"Matchups completed: {len(matchup_rows)}/{total_matchups}",
+                        f"Matchups completed: {successful_matchups}/{total_matchups}",
+                        f"Episodes: attempted={attempted_episodes} valid={attempted_episodes - failed_episodes} failed={failed_episodes}",
+                        f"Matchup failures: {matchup_failures}",
                     ]
                 )
                 + "\n\n"

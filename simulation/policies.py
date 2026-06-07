@@ -477,7 +477,24 @@ def customer_complaint_action(memory: CustomerMemoryState, *, disappointment: fl
     )
 
 
-# ── Five-attribute boolean game policies ─────────────────────────────────────
+# Five-attribute continuous-score game policies
+
+FIVE_ATTR_SCORE_TOLERANCE = 0.05
+
+
+def _five_attr_score(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        return round(max(0.0, min(1.0, float(value))), 1)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _five_attr_mismatch(left, right) -> bool:
+    return abs(_five_attr_score(left) - _five_attr_score(right)) > FIVE_ATTR_SCORE_TOLERANCE
 
 def five_attr_resort_truthful(resort: FiveAttrResortState) -> FiveAttrResortDeclaration:
     return FiveAttrResortDeclaration(
@@ -488,8 +505,8 @@ def five_attr_resort_truthful(resort: FiveAttrResortState) -> FiveAttrResortDecl
 
 
 def five_attr_resort_lie_unverified(resort: FiveAttrResortState) -> FiveAttrResortDeclaration:
-    """Claim True on all attributes (resort does not know which are verified)."""
-    declared = [True] * 5
+    """Claim maximum score on all attributes (resort does not know which are verified)."""
+    declared = [1.0] * 5
     return FiveAttrResortDeclaration(
         resort_id=resort.resort_id,
         declared_attrs=declared,
@@ -498,11 +515,11 @@ def five_attr_resort_lie_unverified(resort: FiveAttrResortState) -> FiveAttrReso
 
 
 def five_attr_resort_strategic(resort: FiveAttrResortState) -> FiveAttrResortDeclaration:
-    """Lie only on False attributes (claim True); accept risk of being caught on verified ones."""
-    declared = [True] * 5  # claim True on everything False; leave True attrs honest
+    """Inflate weak attributes to maximum score; accept risk of being caught on verified ones."""
+    declared = [1.0] * 5
     for i in range(5):
-        if resort.attrs[i]:
-            declared[i] = True
+        if _five_attr_score(resort.attrs[i]) >= 0.95:
+            declared[i] = _five_attr_score(resort.attrs[i])
     return FiveAttrResortDeclaration(
         resort_id=resort.resort_id,
         declared_attrs=declared,
@@ -518,8 +535,8 @@ def five_attr_agent_relay(
         resort_id=resort_decl.resort_id,
         reported_attrs=list(resort_decl.declared_attrs),
         message_text=(
-            "Here is what the resort is claiming.\n"
-            "I am relaying their statement rather than independently confirming each point.\n"
+            "Based on the latest brief, this resort lines up well with what buyers usually want.\n"
+            "The strongest fit points appear to be the following.\n"
             f"Claimed attributes: {dict(zip(ATTR_NAMES, resort_decl.declared_attrs))}"
         ),
     )
@@ -537,30 +554,23 @@ def five_attr_agent_correct_known(
         resort_id=resort_decl.resort_id,
         reported_attrs=reported,
         message_text=(
-            f"I can confirm {dict(zip([ATTR_NAMES[i] for i in agent.known_indices], agent.known_values))}.\n"
-            "For the remaining attributes, I cannot independently verify every claim.\n"
-            f"Overall report: {dict(zip(ATTR_NAMES, reported))}"
+        f"As the manager, I personally verify that we have: {dict(zip(ATTR_NAMES, reported))}.\n"
+        "I stand by these details as 100% accurate based on my daily inspections."
         ),
     )
 
 
-def five_attr_agent_commission_max(
-    resort_decl: FiveAttrResortDeclaration,
-) -> FiveAttrAgentReport:
-    """Claim True on all attributes — maximum sales pressure.
-
-    The agent does NOT know which attribute the customer privately knows, so it
-    accepts the risk of being caught on that index. Expected penalty ≈ 15 × P(known attr is False).
-    """
-    reported = [True] * 5
+def five_attr_agent_commission_max(resort_decl: FiveAttrResortDeclaration) -> FiveAttrAgentReport:
+    # This forces the agent to claim every single attribute is near-perfect.
+    reported = [1.0] * 5
     return FiveAttrAgentReport(
         resort_id=resort_decl.resort_id,
         reported_attrs=reported,
         message_text=(
-            "This resort looks strong across the board.\n"
-            "I can only personally confirm a limited subset of facts, so some positives remain the resort's claim.\n"
-            f"My recommendation is based on: {dict(zip(ATTR_NAMES, reported))}"
-        ),
+            "From how this property is positioned, it presents as a very strong match across the board.\n"
+            "I would be comfortable describing it as covering all of your main priorities.\n"
+            "If you want a clean yes-or-no recommendation, this is the easy yes."
+        )
     )
 
 
@@ -569,9 +579,9 @@ def five_attr_customer_naive(
     customer: FiveAttrCustomerState,
 ) -> FiveAttrCustomerDecision:
     """Book if the agent's report looks good based on preferences alone."""
-    score = sum(p * (1.0 if r else 0.0) for p, r in zip(customer.pref, agent_report.reported_attrs))
+    score = sum(p * (_five_attr_score(r) if r is not None else 0.0) for p, r in zip(customer.pref, agent_report.reported_attrs))
     decision = "book" if score >= 0.5 else "reject"
-    return CustomerDecisionAction(decision=decision, message_text=f"Score {score:.2f}: I will {decision}.")
+    return FiveAttrCustomerDecision(decision=decision, message_text=f"Score {score:.2f}: I will {decision}.")
 
 
 def five_attr_customer_skeptical(
@@ -579,14 +589,15 @@ def five_attr_customer_skeptical(
     customer: FiveAttrCustomerState,
 ) -> FiveAttrCustomerDecision:
     """Book only if the agent's report is consistent with the customer's known truth."""
-    known_matches = agent_report.reported_attrs[customer.known_index] == customer.known_value
+    known_report = agent_report.reported_attrs[customer.known_index]
+    known_matches = known_report is None or not _five_attr_mismatch(known_report, customer.known_value)
     if not known_matches:
         return FiveAttrCustomerDecision(decision="verify", message_text="The report conflicts with what I know, so I want verification.")
-    score = sum(p * (1.0 if r else 0.0) for p, r in zip(customer.pref, agent_report.reported_attrs))
+    score = sum(p * (_five_attr_score(r) if r is not None else 0.0) for p, r in zip(customer.pref, agent_report.reported_attrs))
     if customer.trust < 0.35 and 0.35 <= score < 0.65:
         return FiveAttrCustomerDecision(decision="verify", message_text="I’m too unsure to book immediately. I want to verify more.")
     decision = "book" if score >= 0.5 else "reject"
-    return CustomerDecisionAction(decision=decision, message_text=f"Consistent report, score {score:.2f}: I will {decision}.")
+    return FiveAttrCustomerDecision(decision=decision, message_text=f"Consistent report, score {score:.2f}: I will {decision}.")
 
 
 def _auction_pace_budget(remaining_budget: int, paintings_remaining: int) -> float:

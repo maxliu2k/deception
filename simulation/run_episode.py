@@ -28,7 +28,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--scenario", type=str, default="A", choices=["A", "B", "C"])
-    parser.add_argument("--models", type=str, default="4o,Sonnet,Pro", help="Exactly 3 of: 4o,5.4,Flash,Pro,Haiku,Sonnet,Opus,Grok,Kimi,DeepSeek,Llama,GLM")
+    parser.add_argument("--models", type=str, default="5.4,Opus,Pro", help="Exactly 3 of: 4o,5.4,Flash,Pro,Haiku,Sonnet,Opus,Grok,Kimi,DeepSeek,Llama,GLM")
     args = parser.parse_args()
 
     selected_models = [x.strip() for x in args.models.split(",") if x.strip()]
