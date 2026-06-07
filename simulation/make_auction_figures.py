@@ -21,12 +21,12 @@ OUT.mkdir(parents=True, exist_ok=True)
 plt.rcParams.update({"font.family": "serif", "font.size": 8, "axes.linewidth": 0.6})
 
 ORDER = ["Llama", "Pro", "Opus", "GPT", "Grok"]
-STYLE = {
-    "GPT":   ("#0072B2", "o"),
-    "Opus":  ("#E69F00", "s"),
-    "Pro":   ("#009E73", "^"),
-    "Grok":  ("#000000", "D"),
-    "Llama": ("#CC79A7", "v"),
+STYLE = {                       # deeper/more-saturated so alpha overplotting reads as density
+    "GPT":   ("#08519C", "o"),  # deep blue
+    "Opus":  ("#D26E00", "s"),  # deep orange
+    "Pro":   ("#1A7A3D", "^"),  # deep green
+    "Grok":  ("#000000", "D"),  # black
+    "Llama": ("#A8327D", "v"),  # deep magenta
 }
 
 
@@ -69,7 +69,7 @@ ylim = (0, int(np.ceil(ymax / 1000.0)) * 1000 + 300)
 # full-width thin banner: two panels side by side
 fig, axes = plt.subplots(1, 2, sharey=True, figsize=(7.16, 1.8))
 draw(axes[0], real, ylim, alpha=1.0)
-draw(axes[1], mimic, ylim, alpha=0.4)
+draw(axes[1], mimic, ylim, alpha=0.5)
 axes[0].set_ylabel("Winning bid")
 for ax, lab in zip(axes, ["(a) Real LLMs", "(b) Mimics"]):
     ax.annotate(lab, xy=(0.03, 0.87), xycoords="axes fraction",
