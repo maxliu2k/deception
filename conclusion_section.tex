@@ -2,14 +2,15 @@
 % CONCLUSION (paper-wide). Auction + mimic-methodology parts are filled;
 % negotiation and deception takeaways are PLACEHOLDERS to fill from those
 % sections' final results. No em dashes (en dashes in ranges are fine).
-% Note: overlaps with the auction "Synthesis" subsubsection -- keep that
-% one short, or fold it up into this section, to avoid saying it twice.
+% Note: auction recap here is high-altitude on purpose; the detailed version
+% (V, accuracy, the transfer numbers) lives in the auction "Synthesis"
+% subsubsection. "compare not train" lesson is stated once, in the methodology paragraph.
 % =====================================================================
 
 \section{Conclusion}
 We evaluated five frontier language models across three strategic environments under incomplete information: a buyer--seller negotiation, a five-bidder sequential auction, and a five-attribute deception game. A consistent thread runs through all three: each model brings a distinct, stable, and human-legible behavioral signature to the game, yet those signatures reflect a small repertoire of simple heuristics rather than deep adaptive reasoning. % CONFIRM this framing once the negotiation and deception results are final. If either environment shows genuine strategic depth, soften the second clause to "legible per-model signatures" and drop the "simple heuristics" claim.
 
-The auction makes the point most sharply. The LLMs converge on a one-dimensional fair-share reservation-price strategy, with two consequences. First, the models are \emph{distillable}: small neural mimics reproduce their self-play behavior at the outcome level (Cram\'er's $V = 0.041$) and the decision level ($88$--$93\%$ per-decision accuracy). Second, the strategy is \emph{beatable}: a trivial minimum-bidder, a budget-aware heuristic, and a PPO-trained policy each win a larger share than the LLMs, and win rate is non-monotonic in policy sophistication. Re-running every policy against the real LLMs confirms the ranking broadly transfers, but the RL policy, alone trained against the mimics, surrenders its top position to the behavior-agnostic heuristics: optimizing against the surrogate does not carry to the source. The mimics' fidelity is therefore bounded to the regime they were trained on.
+The auction makes the point most sharply: the LLMs reduce to a one-dimensional fair-share reservation-price strategy that is both \emph{distillable}, in that small networks reproduce their play, and \emph{beatable}, in that trivial, budget-aware, and learned policies all outscore them, non-monotonically in nominal sophistication. Against the real models the ranking broadly transfers, with one exception: the policy trained on the mimics loses its lead to the fixed ones.
 
 % PLACEHOLDER -- negotiation takeaway (1-2 sentences). e.g. which models secure
 % the highest buyer- and seller-side utility, how the analytical/Bayesian

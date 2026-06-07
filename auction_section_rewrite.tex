@@ -139,12 +139,12 @@ Pro     & 667 & $0.91 \pm 0.03$ & 1.55 \\
 \end{tabular}
 \end{table}
 
-\begin{figure}[htbp]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{auction_bids}
-\caption{Winning bid per painting, by winning bidder, for (a)~the ten real-LLM auctions and (b)~the thirty mimic auctions (shared axes; dashed line = per-painting mean). Both escalate toward the final lots as bidders deploy reserved budget, but the mimics compress the end-game spike: the mean P11--P12 bid is $3.8\times$ the P1--P10 average for the real LLMs versus $2.4\times$ for the mimics, reflecting the rare large jump bids the mimics do not reproduce.}
+\includegraphics[width=\textwidth]{auction_bids}
+\caption{Winning bid per painting, by winning bidder: (a)~ten real-LLM and (b)~thirty mimic auctions (shared axes; dashed = per-painting mean). Both escalate at the end, but the mimics compress the spike ($3.8\times$ vs $2.4\times$ for the P11--P12 mean over P1--P10), missing the rare jump bids.}
 \label{fig:auction_bids}
-\end{figure}
+\end{figure*}
 
 \subsubsection{Baseline Comparison}
 Each baseline played 50 auctions against four rotating mimics (600 paintings each); with five bidders the fair share is $20\%$. Table~\ref{tab:math_results} reports win rates. Two findings stand out. First, performance is \emph{non-monotonic} in nominal sophistication: the Trivial min-bidder ($29.7\%$) substantially outperforms the principled Fair-Share budgeter ($19.5\%$, below fair share). The mechanism is visible in the cap: early in the auction Fair-Share bids only up to $1.05\,B^i_t/n_t \approx \$875$, below the price at which early lots actually clear ($\sim$\$1{,}200; Fig.~\ref{fig:auction_bids}(a)), so it concedes the many cheap early paintings and hoards budget for the few expensive late lots. Since every painting counts equally, winning many cheap lots beats winning a few costly ones, and Trivial, bounded only by solvency, takes the early majority (Fig.~\ref{fig:math_wins_by_position}). Indeed, neither Fair-Share nor Reactive beats an ordinary LLM: in each of their batches Llama, the strongest model, wins a larger share of the lots it contests than the math policy (Fair-Share batch, $30.6\%$ vs.\ $19.5\%$; Reactive batch, $26.7\%$ vs.\ $23.8\%$), and the ordering repeats against the real LLMs ($29.2\%$ for Llama vs.\ $18.3\%$ and $25.0\%$). Their nominal sophistication buys nothing over the LLMs they aim to outclass; among the math policies, only the opponent-aware Market-Clearing and the learned RL clearly beat Trivial's $29.7\%$ floor.
@@ -168,12 +168,12 @@ RL               & \textbf{33.5\%} & 36.7\% \\
 \end{tabular}
 \end{table}
 
-\begin{figure}[htbp]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{math_wins_by_position}
-\caption{Auctions won by painting position, per math policy (50 auctions each; one panel per policy, the other four shown faintly for context; dashed line = the $20\%$ fair share). The high-total policies win the cheap early lots and fade (Trivial, Market-Clearing, and RL are front-loaded), whereas Fair-Share is back-loaded: it concedes the early majority and wins only the expensive final lots. This is why its total is lowest despite its principled pacing, and why winning many cheap lots (Trivial) beats winning a few costly ones.}
+\includegraphics[width=\textwidth]{math_wins_by_position}
+\caption{Auctions won by painting position, per math policy (50 auctions; one panel each, others faint; dashed = $20\%$ fair share). Trivial, Market-Clearing, and RL front-load (winning the cheap early lots, then fading); Fair-Share is back-loaded, taking only the costly final lots, hence its lowest total.}
 \label{fig:math_wins_by_position}
-\end{figure}
+\end{figure*}
 
 \subsubsection{Synthesis}
 The three results cohere into one account. The LLMs converge on a simple, one-dimensional strategy: a fair-share reservation price that governs when to drop out. That simplicity is what makes them \emph{distillable} (small networks reproduce their play at $V = 0.041$ and $88$--$93\%$ per-decision accuracy) and what makes them \emph{beatable} (a trivial minimum-bidder, a budget-aware heuristic, and a learned policy all exceed their share). The methodological caution we carry forward is the boundary of that distillability: a policy \emph{trained} against the mimics fails to transfer while fixed policies do, so behavioral mimics are faithful enough to \emph{compare} strategies but not to \emph{train} a deployable one.

@@ -59,8 +59,8 @@ for fname, tier, c in WANT:
 
 plt.rcParams.update({"font.family": "serif", "font.size": 8, "axes.linewidth": 0.6})
 tiers = [t for _, t, _ in WANT]
-# single-column: stack the five panels vertically
-fig, axes = plt.subplots(5, 1, sharex=True, sharey=True, figsize=(3.4, 5.0))
+# full-width thin banner: five panels in a row
+fig, axes = plt.subplots(1, 5, sharey=True, figsize=(7.16, 1.8))
 x = np.arange(1, 13)
 for ax, focal in zip(axes, tiers):
     for t in tiers:                       # faint backdrop of all others
@@ -68,17 +68,16 @@ for ax, focal in zip(axes, tiers):
             continue
         ax.plot(x, curves[t][0], color="0.72", lw=0.8, alpha=0.6, zorder=1)
     y, c = curves[focal]                  # bold focal
-    ax.plot(x, y, color=c, lw=1.6, marker="o", ms=2.5, zorder=3)
+    ax.plot(x, y, color=c, lw=1.5, marker="o", ms=2.2, zorder=3)
     ax.axhline(20, ls="--", lw=0.6, color="0.55", zorder=0)
-    ax.annotate(focal, xy=(0.97, 0.82), xycoords="axes fraction", ha="right",
-                fontsize=7.5, fontweight="bold", color=c)
+    ax.set_title(focal, fontsize=7.5, color=c)
+    ax.set_xticks([1, 6, 12])
+    ax.set_xlim(0.5, 12.5)
+    ax.set_ylim(0, 108)
     ax.set_yticks([0, 50, 100])
-    ax.set_ylim(0, 112)
     ax.grid(color="0.94", lw=0.5)
-axes[-1].set_xticks(range(1, 13))
-axes[-1].set_xlim(0.5, 12.5)
-axes[-1].set_xlabel("Painting #")
-fig.supylabel("Auctions won (%)", fontsize=8)
+axes[0].set_ylabel("Auctions won (%)")
+fig.supxlabel("Painting #", fontsize=8, y=0.04)
 fig.tight_layout(pad=0.3)
 fig.savefig(OUT / "math_wins_by_position.pdf")
 fig.savefig(OUT / "math_wins_by_position.png", dpi=300)
