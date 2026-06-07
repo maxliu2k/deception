@@ -60,7 +60,7 @@ for fname, tier, c in WANT:
 plt.rcParams.update({"font.family": "serif", "font.size": 8, "axes.linewidth": 0.6})
 tiers = [t for _, t, _ in WANT]
 # full-width thin banner: five panels in a row
-fig, axes = plt.subplots(1, 5, sharey=True, figsize=(7.16, 1.8))
+fig, axes = plt.subplots(1, 5, sharey=True, figsize=(7.16, 1.45))
 x = np.arange(1, 13)
 for ax, focal in zip(axes, tiers):
     for t in tiers:                       # faint backdrop of all others
