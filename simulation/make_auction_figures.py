@@ -67,7 +67,7 @@ ymax = max(b for _, _, b in real + mimic)
 ylim = (0, int(np.ceil(ymax / 1000.0)) * 1000 + 300)
 
 # full-width thin banner: two panels side by side
-fig, axes = plt.subplots(1, 2, sharey=True, figsize=(7.16, 2.2))
+fig, axes = plt.subplots(1, 2, sharey=True, figsize=(7.16, 1.8))
 draw(axes[0], real, ylim, alpha=1.0)
 draw(axes[1], mimic, ylim, alpha=0.4)
 axes[0].set_ylabel("Winning bid")
