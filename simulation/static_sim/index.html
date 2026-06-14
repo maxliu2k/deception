@@ -1317,7 +1317,6 @@
             loadout: ["Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T1"],
             slotPrefix: "D-Math",
             threshold: 0.3,
-            penalty: 0.05,
             estimateNote: null,
           });
         };
@@ -1331,7 +1330,6 @@
             loadout: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"],
             slotPrefix: "D-LLM",
             threshold: 0.3,
-            penalty: 0.05,
             estimateNote: "Heads-up: 20 deception episodes × 5 LLMs × 12 rounds = 1,200 LLM calls (~$50). Continue?",
           });
         };
@@ -1542,7 +1540,7 @@
         });
       }
 
-      async function startDeceptionBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, threshold, penalty, estimateNote = null }) {
+      async function startDeceptionBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, threshold, estimateNote = null }) {
         showInput("Start Deception Batch",
           `Folder name (will hold ${count} deception episodes, 12 rounds each):`,
           defaultName,
@@ -1611,7 +1609,6 @@
                   seed: startSeed + idx,
                   truth_seed: truthSeedStart + idx,
                   threshold: threshold,
-                  penalty: penalty,
                   num_rounds: 12,
                 });
                 if (!resetRes.ok) {
@@ -2911,20 +2908,20 @@
         card.classList.remove("hidden");
         const completedRounds = Array.isArray(ep.rounds) ? ep.rounds.length : 0;
         if (label) label.textContent =
-          `round ${Math.min(ep.round_idx, ep.num_rounds)}/${ep.num_rounds} · τ=${(+ep.threshold).toFixed(2)} · penalty=${(+ep.penalty).toFixed(2)} · ${ep.complete ? "complete" : "in progress"}`;
+          `round ${Math.min(ep.round_idx, ep.num_rounds)}/${ep.num_rounds} · τ=${(+ep.threshold).toFixed(2)} · ${ep.complete ? "complete" : "in progress"}`;
 
         // 1. Per-agent summary table
         const agents = Array.isArray(ep.agents) ? ep.agents : [];
         let html = `<div class="section-head">Agents</div>`;
-        html += `<table class="batch-table"><thead><tr><th>Agent</th><th>Alias</th><th>Trust</th><th>Total reward</th><th>Caught</th><th>Wins</th></tr></thead><tbody>`;
+        html += `<table class="batch-table"><thead><tr><th>Agent</th><th>Alias</th><th>Trust</th><th>Total reward</th><th>Wins</th><th>Sum discrepancy</th></tr></thead><tbody>`;
         for (const a of agents) {
           html += `<tr>` +
             `<td>${a.agent_id}</td>` +
             `<td>${modelDisplayName(a.alias) || a.alias}</td>` +
             `<td><span class="val-zero">${(+a.trust).toFixed(2)}</span></td>` +
             `<td><span class="val-zero">${(+a.total_reward).toFixed(3)}</span></td>` +
-            `<td>${a.caught_count}</td>` +
             `<td>${a.win_count}</td>` +
+            `<td><span class="val-zero">${(+(a.sum_discrepancy_when_won || 0)).toFixed(3)}</span></td>` +
             `</tr>`;
         }
         html += `</tbody></table>`;
@@ -2976,23 +2973,18 @@
         // 3. Per-round details (compact table).
         if (completedRounds > 0) {
           html += `<div class="section-head">Rounds</div>`;
-          html += `<table class="batch-table"><thead><tr><th>#</th><th>Truth</th><th>μ</th><th>Verified</th><th>Caught</th><th>Winners</th><th>Rewards</th></tr></thead><tbody>`;
+          html += `<table class="batch-table"><thead><tr><th>#</th><th>Truth</th><th>Discrepancy</th><th>Winners</th><th>Rewards</th></tr></thead><tbody>`;
           for (const r of ep.rounds) {
             const truth = (r.truth || []).map((v) => (+v).toFixed(2)).join(", ");
-            const mu = (r.population_mean || []).map((v) => (+v).toFixed(2)).join(", ");
-            const verifiedSummary = Object.entries(r.verified_attr_by_agent || {})
-              .map(([aid, attr]) => `${aid.replace("agent_", "")}=${DECEPTION_ATTR_NAMES[attr] || attr}`).join(" ");
-            const caughtSummary = Object.entries(r.caught_by_agent || {})
-              .filter(([, v]) => v).map(([aid]) => aid.replace("agent_", "")).join(",") || "—";
+            const discSummary = Object.entries(r.discrepancy_by_agent || {})
+              .map(([aid, v]) => `${aid.replace("agent_", "")}:${(+v).toFixed(2)}`).join(" ");
             const winnersSummary = (r.winners || []).map((aid) => aid.replace("agent_", "")).join(",") || "—";
             const rewardsSummary = Object.entries(r.rewards_by_agent || {})
               .map(([aid, v]) => `${aid.replace("agent_", "")}:${(+v).toFixed(2)}`).join(" ");
             html += `<tr>` +
               `<td>${r.round_idx + 1}</td>` +
               `<td style="font-family:monospace;font-size:11px;">${truth}</td>` +
-              `<td style="font-family:monospace;font-size:11px;color:#6b7280;">${mu}</td>` +
-              `<td style="font-size:11px;">${verifiedSummary}</td>` +
-              `<td style="font-size:11px;color:#b91c1c;">${caughtSummary}</td>` +
+              `<td style="font-family:monospace;font-size:11px;color:#b91c1c;">${discSummary}</td>` +
               `<td style="font-size:11px;color:#059669;">${winnersSummary}</td>` +
               `<td style="font-family:monospace;font-size:11px;">${rewardsSummary}</td>` +
               `</tr>`;

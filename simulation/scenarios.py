@@ -213,7 +213,6 @@ def deception_competition_default(selected_models: List[str]) -> Dict:
         num_rounds=12,
         preferences=[0.25, 0.20, 0.20, 0.20, 0.15],
         threshold=0.4,
-        penalty=0.4,
         truth_seed=0,
         agent_states=agents,
         selected_models=[a.alias for a in agents],

@@ -32,8 +32,6 @@ from .state import (
     DECEPTION_INITIAL_TRUST,
     DECEPTION_NUM_AGENTS,
     DECEPTION_NUM_ATTRS,
-    DECEPTION_TRUST_CATCH_MULTIPLIER,
-    DECEPTION_TRUST_RECOVERY_DELTA,
     DECEPTION_TRUTH_PRECISION,
     DeceptionAgentState,
     DeceptionEpisodeState,
@@ -508,12 +506,11 @@ class TravelGameEnv:
             raise ValueError(f"Unknown deception_competition scenario '{scenario}'.")
         built = builder(self.config["selected_models"])
         episode: DeceptionEpisodeState = built["episode"]
-        # Apply per-config overrides (so callers can tune τ, penalty, num_rounds, etc.).
+        # Apply per-config overrides. Under Option R the only game knob is τ;
+        # legacy "penalty" / "tolerance" config keys are ignored if present.
         cfg = self.config
         if "threshold" in cfg:
             episode.threshold = float(cfg["threshold"])
-        if "penalty" in cfg:
-            episode.penalty = float(cfg["penalty"])
         if "num_rounds" in cfg and cfg["num_rounds"]:
             episode.num_rounds = int(cfg["num_rounds"])
         if "preferences" in cfg and cfg["preferences"]:
@@ -546,7 +543,6 @@ class TravelGameEnv:
             "num_rounds": episode.num_rounds,
             "preferences": list(episode.preferences),
             "threshold": episode.threshold,
-            "penalty": episode.penalty,
             "round_idx": episode.round_idx,
         }
 
@@ -584,77 +580,70 @@ class TravelGameEnv:
                 qc.append(round(fv, DECEPTION_TRUTH_PRECISION))
             cleaned_claims.append(qc)
 
-        # Compute population mean μ across the 5 agents per attribute.
+        # Informational μ (still recorded for analysis even though it doesn't drive verification).
         mu = [sum(cleaned_claims[i][a] for i in range(DECEPTION_NUM_AGENTS)) / DECEPTION_NUM_AGENTS
               for a in range(DECEPTION_NUM_ATTRS)]
+        # local_rng kept available for any future tie-break randomness; unused under R.
+        _ = local_rng
 
-        # Per-agent verification + score + caught flag.
-        verified_attr_by_agent: Dict[str, int] = {}
-        caught_by_agent: Dict[str, bool] = {}
+        from .reward import (
+            deception_competition_score,
+            deception_competition_discrepancy,
+            deception_competition_reward,
+            deception_competition_trust_from_history,
+        )
+
+        # Per-agent score + discrepancy (discrepancy computed for ALL, applied only to winners).
         score_by_agent: Dict[str, float] = {}
+        discrepancy_by_agent: Dict[str, float] = {}
         trust_before: Dict[str, float] = {}
         for i, agent in enumerate(episode.agent_states):
             c = cleaned_claims[i]
-            deviations = [c[a] - mu[a] for a in range(DECEPTION_NUM_ATTRS)]
-            max_dev = max(deviations)
-            tied_attrs = [a for a, d in enumerate(deviations) if d == max_dev]
-            # Random tie-break across tied attrs (deterministic via local_rng for reproducibility).
-            verified = local_rng.choice(tied_attrs) if len(tied_attrs) > 1 else tied_attrs[0]
-            caught = c[verified] != truth[verified]
-            from .reward import deception_competition_score
-            score = deception_competition_score(claim=c, preferences=episode.preferences, trust=agent.trust)
-            if caught:
-                score = float("-inf")
-            verified_attr_by_agent[agent.agent_id] = verified
-            caught_by_agent[agent.agent_id] = caught
-            score_by_agent[agent.agent_id] = score
             trust_before[agent.agent_id] = agent.trust
+            score_by_agent[agent.agent_id] = deception_competition_score(
+                claim=c, preferences=episode.preferences, trust=agent.trust
+            )
+            discrepancy_by_agent[agent.agent_id] = deception_competition_discrepancy(
+                claim=c, truth=truth, preferences=episode.preferences
+            )
 
-        # Determine winners (highest score among uncaught, above threshold).
-        uncaught = [(aid, s) for aid, s in score_by_agent.items() if s != float("-inf")]
-        if uncaught:
-            max_score = max(s for _, s in uncaught)
-            if max_score > episode.threshold:
-                winners = sorted([aid for aid, s in uncaught if s == max_score])
-            else:
-                winners = []
+        # Winners: highest score above threshold.
+        max_score = max(score_by_agent.values()) if score_by_agent else 0.0
+        if max_score > episode.threshold:
+            winners = sorted([aid for aid, s in score_by_agent.items() if s == max_score])
         else:
             winners = []
 
-        # Per-agent reward + trust update.
-        from .reward import deception_competition_reward, deception_competition_trust_update
+        # Reward + trust update. Only winners' trust history advances under R.
         rewards_by_agent: Dict[str, float] = {}
         trust_after: Dict[str, float] = {}
         for agent in episode.agent_states:
             aid = agent.agent_id
-            is_caught = caught_by_agent[aid]
             is_winner = aid in winners
             rewards_by_agent[aid] = deception_competition_reward(
-                is_caught=is_caught,
                 is_winner=is_winner,
-                score=score_by_agent[aid] if score_by_agent[aid] != float("-inf") else 0.0,
+                score=score_by_agent[aid],
                 threshold=episode.threshold,
                 num_winners=len(winners),
-                penalty=episode.penalty,
             )
-            new_trust = deception_competition_trust_update(trust_before=agent.trust, is_caught=is_caught)
-            agent.trust = new_trust
-            trust_after[aid] = new_trust
+            if is_winner:
+                agent.sum_discrepancy_when_won += discrepancy_by_agent[aid]
+                agent.win_count += 1
+                agent.trust = deception_competition_trust_from_history(
+                    sum_discrepancy_when_won=agent.sum_discrepancy_when_won,
+                    win_count=agent.win_count,
+                )
+            trust_after[aid] = agent.trust
             agent.total_reward += rewards_by_agent[aid]
             agent.last_claim = list(cleaned_claims[agent.agent_index])
-            if is_caught:
-                agent.caught_count += 1
-            if is_winner:
-                agent.win_count += 1
 
         record = DeceptionRoundRecord(
             round_idx=episode.round_idx,
             truth=list(truth),
             population_mean=list(mu),
             claims_by_agent={a.agent_id: list(cleaned_claims[a.agent_index]) for a in episode.agent_states},
-            verified_attr_by_agent=verified_attr_by_agent,
-            caught_by_agent=caught_by_agent,
-            score_by_agent={k: (None if v == float("-inf") else round(v, 4)) for k, v in score_by_agent.items()},
+            score_by_agent={k: round(v, 4) for k, v in score_by_agent.items()},
+            discrepancy_by_agent={k: round(v, 4) for k, v in discrepancy_by_agent.items()},
             winners=list(winners),
             rewards_by_agent={k: round(v, 4) for k, v in rewards_by_agent.items()},
             trust_before={k: round(v, 4) for k, v in trust_before.items()},
@@ -672,8 +661,8 @@ class TravelGameEnv:
                 booked_resort_id=None,
                 rewards=final_rewards,
                 derived={
-                    "total_catches": sum(a.caught_count for a in episode.agent_states),
                     "total_wins": sum(a.win_count for a in episode.agent_states),
+                    "sum_discrepancy": sum(a.sum_discrepancy_when_won for a in episode.agent_states),
                 },
                 deception_metrics={},
                 message_log=[],
@@ -792,7 +781,6 @@ class TravelGameEnv:
                     "round_idx": episode.round_idx if episode else 0,
                     "preferences": list(episode.preferences) if episode else [],
                     "threshold": episode.threshold if episode else 0.0,
-                    "penalty": episode.penalty if episode else 0.0,
                     "agents": [
                         {"agent_id": a.agent_id, "agent_index": a.agent_index, "alias": a.alias, "trust": a.trust}
                         for a in (episode.agent_states if episode else [])

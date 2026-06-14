@@ -320,17 +320,23 @@ def open_auction_reward(*, paintings_won: int, invalid_actions: int = 0, timeout
     return float(paintings_won) - 0.1 * float(invalid_actions) - 0.05 * float(timeout_actions)
 
 
-# ── Deception Competition reward ─────────────────────────────────────────────
+# ── Deception Competition reward (Option R: continuous trust degradation) ───
+#
+# No catch event, no penalty. The buyer scores each agent's pitch, books the
+# highest among those who clear the threshold, and post-booking experiences
+# the truth — which updates the booked agent's trust toward their long-run
+# average truthfulness. Losers' trust is untouched (the buyer never tested
+# them this round).
 
 def deception_competition_score(
     *, claim: List[float], preferences: List[float], trust: float
 ) -> float:
-    """Buyer's modified score for a (possibly winning) agent.
+    """Buyer's perceived booking score for an agent.
 
-    score = (w · c) * (0.5 + 0.5 * trust)
+    score = (w · c) × (0.5 + 0.5 × trust)
 
-    Trust modulates the booking score: trust 1.0 → 1.0× multiplier; trust 0.0 → 0.5× floor.
-    Returns the un-bounded score; the env compares it to the threshold to decide winners.
+    Trust 1.0 → 1.0× multiplier; trust 0.0 → 0.5× floor. Score is uncapped;
+    the env compares it to the threshold to decide winners.
     """
     if len(claim) != len(preferences):
         raise ValueError(f"claim and preferences length mismatch: {len(claim)} vs {len(preferences)}")
@@ -339,29 +345,51 @@ def deception_competition_score(
     return raw * multiplier
 
 
-def deception_competition_reward(
-    *,
-    is_caught: bool,
-    is_winner: bool,
-    score: float,
-    threshold: float,
-    num_winners: int,
-    penalty: float,
+def deception_competition_discrepancy(
+    *, claim: List[float], truth: List[float], preferences: List[float]
 ) -> float:
-    """Per-round reward for a single agent."""
-    if is_caught:
-        return -float(penalty)
+    """Weighted over-promise: max(0, w · (c − t)).
+
+    Always in [0, 1] because w sums to 1 and c, t ∈ [0, 1]. Under-promising
+    (c < t on an attribute) is ignored — the buyer is never disappointed by
+    under-promised attributes.
+    """
+    if not (len(claim) == len(truth) == len(preferences)):
+        raise ValueError("claim, truth, and preferences must have the same length")
+    raw = sum(w * (c - t) for c, t, w in zip(claim, truth, preferences))
+    return max(0.0, raw)
+
+
+def deception_competition_reward(
+    *, is_winner: bool, score: float, threshold: float, num_winners: int,
+) -> float:
+    """Per-round reward for a single agent.
+
+    Winners split 1.0 evenly: solo win = +1, 2-way tie = +0.5 each, etc.
+    Non-winners get 0. The score magnitude does NOT enter the reward — trust
+    matters only because it affects who wins (via the score multiplier), not
+    because it shrinks per-win payout.
+
+    Total episode reward = effective wins, bounded by num_rounds.
+    """
+    del score, threshold   # signature kept for compatibility; values unused
     if is_winner and num_winners > 0:
-        return (float(score) - float(threshold)) / float(num_winners)
+        return 1.0 / float(num_winners)
     return 0.0
 
 
-def deception_competition_trust_update(*, trust_before: float, is_caught: bool) -> float:
-    """Trust transition rule. Catch shrinks (×0.7); any clean round adds +0.1 (capped at 1.0)."""
-    from .state import (
-        DECEPTION_TRUST_CATCH_MULTIPLIER,
-        DECEPTION_TRUST_RECOVERY_DELTA,
-    )
-    if is_caught:
-        return max(0.0, float(trust_before) * DECEPTION_TRUST_CATCH_MULTIPLIER)
-    return min(1.0, float(trust_before) + DECEPTION_TRUST_RECOVERY_DELTA)
+def deception_competition_trust_from_history(
+    *, sum_discrepancy_when_won: float, win_count: int
+) -> float:
+    """Average-of-experiences trust.
+
+    trust = 1 - sum_discrepancy_when_won / max(1, win_count)
+
+    Never-won agents have trust = 1 (no data). Asymptotic recovery toward 1.0
+    as honest wins accumulate; one big lie can't permanently destroy trust
+    given enough subsequent honest wins.
+    """
+    if win_count <= 0:
+        return 1.0
+    avg_discrepancy = float(sum_discrepancy_when_won) / float(win_count)
+    return max(0.0, min(1.0, 1.0 - avg_discrepancy))

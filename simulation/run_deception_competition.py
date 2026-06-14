@@ -76,7 +76,6 @@ def run_one(
     slot_name: str,
     loadout: list[str],
     threshold: float,
-    penalty: float,
     num_rounds: int,
     preferences: list[float] | None,
     poll_interval_s: float,
@@ -94,7 +93,6 @@ def run_one(
         "seed": int(seed),
         "truth_seed": int(truth_seed),
         "threshold": float(threshold),
-        "penalty": float(penalty),
         "num_rounds": int(num_rounds),
         "save_slot": slot_id,
     }
@@ -145,9 +143,7 @@ def main() -> int:
     p.add_argument("--loadout", default=",".join(DEFAULT_LOADOUT),
                    help="Comma-separated list of 5 model aliases for the agent slots.")
     p.add_argument("--threshold", type=float, default=0.3,
-                   help="Buyer's booking threshold τ (tune via calibration sweep).")
-    p.add_argument("--penalty", type=float, default=0.05,
-                   help="Caught penalty magnitude (tune via calibration sweep).")
+                   help="Buyer's booking threshold τ — the only game knob under Option R.")
     p.add_argument("--num-rounds", type=int, default=12)
     p.add_argument("--preferences", default="",
                    help="Optional 5 comma-separated preference weights (must sum to 1). "
@@ -170,7 +166,7 @@ def main() -> int:
     folder_id = find_or_create_folder(args.base, args.folder)
     print(f"Folder '{args.folder}' = {folder_id}")
     print(f"Loadout: {loadout}")
-    print(f"Threshold = {args.threshold}, penalty = {args.penalty}, num_rounds = {args.num_rounds}")
+    print(f"Threshold = {args.threshold}, num_rounds = {args.num_rounds}")
     print(f"Running {args.count} episodes, {args.parallel} at a time")
 
     # Sample distinct random permutations of the agent slot order.
@@ -200,7 +196,6 @@ def main() -> int:
             slot_name=slot_name,
             loadout=slot_loadout,
             threshold=args.threshold,
-            penalty=args.penalty,
             num_rounds=args.num_rounds,
             preferences=preferences,
             poll_interval_s=args.poll_interval,
