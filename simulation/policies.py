@@ -918,12 +918,13 @@ def open_auction_policy_tier4_market_clearing(
 
 
 # ---------------------------------------------------------------------------
-# Deception Competition math-tier policies
+# Deception Competition math-tier policies — Option R (continuous trust)
 # ---------------------------------------------------------------------------
-# Pure functions: each takes (truth, preferences, threshold, penalty, own_trust)
-# and returns a 5-float claim vector, quantized to 2dp. They do NOT see
-# opponents' claims this round (simultaneous-move structure) but the policy can
-# reason about expected opponent strategies and the trust state.
+# Each policy takes (truth, preferences) + kwargs (threshold, own_trust,
+# opponents_trust, round_index, total_rounds) and returns a 5-float claim
+# quantized to 2dp. They do not see opponents' claims for this round
+# (simultaneous-move structure) but can reason about trust state and the
+# remaining-rounds horizon.
 # ---------------------------------------------------------------------------
 
 from typing import List as _DCList
@@ -938,12 +939,13 @@ def deception_policy_tier1_honest(
     preferences: _DCList[float],
     *,
     threshold: float,
-    penalty: float,
     own_trust: float,
     opponents_trust: _DCList[float] | None = None,
+    round_index: int = 0,
+    total_rounds: int = 12,
 ) -> _DCList[float]:
-    """T1 Honest: claim = truth, always. The unique safe-from-catch strategy."""
-    del preferences, threshold, penalty, own_trust, opponents_trust
+    """T1 Honest: claim = truth, always. Preserves trust = 1.0 indefinitely."""
+    del preferences, threshold, own_trust, opponents_trust, round_index, total_rounds
     return [_dc_quantize(t) for t in truth]
 
 
@@ -952,17 +954,16 @@ def deception_policy_tier2_uniform(
     preferences: _DCList[float],
     *,
     threshold: float,
-    penalty: float,
     own_trust: float,
     opponents_trust: _DCList[float] | None = None,
+    round_index: int = 0,
+    total_rounds: int = 12,
     delta: float = 0.2,
 ) -> _DCList[float]:
-    """T2 Uniform-inflate: claim = clip(t + delta). Lies on every attr → caught with high prob.
-
-    Control policy: by claiming higher on every attribute, the verifier's argmax can land on
-    any attr, and on that attr c != t → catch. Used to confirm the penalty + trust-decay mechanic.
-    """
-    del preferences, threshold, penalty, own_trust, opponents_trust
+    """T2 Uniform-inflate: claim = clip(t + 0.2). Discrepancy ≈ 0.2 per win →
+    long-run trust ≈ 0.8. Used as the broken-control baseline (always inflates,
+    accepts the steady trust hit)."""
+    del preferences, threshold, own_trust, opponents_trust, round_index, total_rounds
     return [_dc_quantize(t + delta) for t in truth]
 
 
@@ -971,68 +972,66 @@ def deception_policy_tier3_single_attr_lie(
     preferences: _DCList[float],
     *,
     threshold: float,
-    penalty: float,
     own_trust: float,
     opponents_trust: _DCList[float] | None = None,
+    round_index: int = 0,
+    total_rounds: int = 12,
 ) -> _DCList[float]:
-    """T3 Single-attr lie: claim 1.0 on the highest-weight attribute; honest on the rest.
-
-    Maximizes per-attribute gain but the verifier almost always spotlights the inflated
-    attribute when opponents play honest.
-    """
-    del threshold, penalty, own_trust, opponents_trust
+    """T3 Single-attr lie: inflate the attribute with the largest (1 - t[a]) × w[a]
+    (= largest headroom × weight). Discrepancy per win equals exactly that
+    product, so the long-run trust stays high while the score boost is meaningful."""
+    del threshold, own_trust, opponents_trust, round_index, total_rounds
     if len(preferences) != len(truth):
         raise ValueError("preferences and truth length mismatch")
-    target = max(range(len(preferences)), key=lambda i: preferences[i])
+    headroom_value = [(1.0 - truth[a]) * preferences[a] for a in range(len(truth))]
+    target = max(range(len(headroom_value)), key=lambda i: headroom_value[i])
     out = [_dc_quantize(t) for t in truth]
     out[target] = 1.0
     return out
 
 
-def deception_policy_tier4_symmetric_nash(
+def deception_policy_tier4_backloaded(
     truth: _DCList[float],
     preferences: _DCList[float],
     *,
     threshold: float,
-    penalty: float,
     own_trust: float,
     opponents_trust: _DCList[float] | None = None,
+    round_index: int = 0,
+    total_rounds: int = 12,
 ) -> _DCList[float]:
-    """T4 Symmetric-Nash: choose a subset S of attributes to lie on (claim 1.0) by maximizing
-    the expected reward assuming opponents play the same strategy.
+    """T4 Backloaded deceiver: greedy DP-style heuristic.
 
-    Under symmetric play, μ ≈ each agent's c, so all deviations are equal → verifier picks
-    uniformly at random over the 5 attributes. Catch probability for an agent lying on |S|
-    attrs is |S|/5. Score (when uncaught) is w · c where c[a] = 1 for a ∈ S, c[a] = t[a] else.
+    Reasoning: under Option R, trust = 1 − (sum past discrepancy) / (win count).
+    A lie now reduces trust for ALL future wins. The marginal cost of a lie of
+    magnitude d at round j, assuming you'd win on k = total_rounds − j remaining
+    rounds at average score s, is roughly:
+        future_cost ≈ k × s × 0.5 × (d / (win_count + 1))   (trust-multiplier loss)
 
-    Approximate EV per round, ignoring future-round trust dynamics (single-shot best-response):
-        win_prob  = max(0, 1 − |S|/5)
-        win_score = (w · c_S) * (0.5 + 0.5 * own_trust)
-        if win_score ≤ threshold: reward = 0
-        else: reward = (win_score - threshold) / 5         # 5-way symmetric tie when uncaught
-        EV = win_prob * reward + (|S|/5) * (-penalty)
+    For each candidate subset S of attributes to inflate (claim = 1, else truth),
+    compute:
+        gain  = w · (c − t) × (0.5 + 0.5 × own_trust)  / 5    [score gain split 5 ways]
+        cost  = remaining_rounds_factor × w · (c − t) × 0.5   [future trust degrade]
+        EV    = gain − cost
 
-    Pick the subset (of 32) that maximizes EV; tie-break toward smaller |S|.
+    Pick the EV-maximizing subset, tie-break toward smaller subset (less risky).
     """
-    del opponents_trust
+    del opponents_trust, threshold
     n = len(preferences)
+    rounds_remaining = max(1, int(total_rounds) - int(round_index))
+    multiplier_now = 0.5 + 0.5 * max(0.0, min(1.0, own_trust))
+    # rounds_remaining=12 → cost factor ~12*0.5 = 6.0; rounds_remaining=1 → 0.5.
+    future_cost_factor = max(0.0, (rounds_remaining - 1) * 0.5)
     best_claim = [_dc_quantize(t) for t in truth]
     best_ev = -math.inf
     best_size = n + 1
-    multiplier = 0.5 + 0.5 * max(0.0, min(1.0, own_trust))
-    # Iterate over all 2^n subsets of attributes to lie on (n=5 → 32 subsets).
     for mask in range(1 << n):
         c = [_dc_quantize(truth[a]) if not (mask & (1 << a)) else 1.0 for a in range(n)]
+        disc = max(0.0, sum(preferences[a] * (c[a] - truth[a]) for a in range(n)))  # weighted over-promise
+        gain_this_round = disc * multiplier_now / n   # 5-way split if everyone ties
+        future_cost = future_cost_factor * disc * 0.5
+        ev = gain_this_round - future_cost
         lie_count = bin(mask).count("1")
-        catch_prob = lie_count / n
-        win_score = sum(c[a] * preferences[a] for a in range(n)) * multiplier
-        if win_score > threshold:
-            per_winner_reward = (win_score - threshold) / n
-        else:
-            per_winner_reward = 0.0
-        # Under symmetric play with random tie-break, expected reward conditional on
-        # not being caught is per_winner_reward (5-way tie if everyone plays the same).
-        ev = (1.0 - catch_prob) * per_winner_reward - catch_prob * float(penalty)
         if ev > best_ev or (ev == best_ev and lie_count < best_size):
             best_ev = ev
             best_size = lie_count
@@ -1040,9 +1039,13 @@ def deception_policy_tier4_symmetric_nash(
     return best_claim
 
 
+# Alias kept for back-compat with older imports.
+deception_policy_tier4_symmetric_nash = deception_policy_tier4_backloaded
+
+
 DECEPTION_TIER_POLICIES = {
     "Math-T1": deception_policy_tier1_honest,
     "Math-T2": deception_policy_tier2_uniform,
     "Math-T3": deception_policy_tier3_single_attr_lie,
-    "Math-T4": deception_policy_tier4_symmetric_nash,
+    "Math-T4": deception_policy_tier4_backloaded,
 }
