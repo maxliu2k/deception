@@ -428,11 +428,22 @@ class DeceptionRoundRecord:
     round_idx: int
     truth: List[float]                                  # 5 floats
     population_mean: List[float] = field(default_factory=list)   # μ_j
+    observed_truth_by_agent: Dict[str, List[Optional[float]]] = field(default_factory=dict)
+    visible_attrs_by_agent: Dict[str, List[int]] = field(default_factory=dict)
     claims_by_agent: Dict[str, List[float]] = field(default_factory=dict)
     verified_attr_by_agent: Dict[str, int] = field(default_factory=dict)
     caught_by_agent: Dict[str, bool] = field(default_factory=dict)
     score_by_agent: Dict[str, float] = field(default_factory=dict)
+    true_score_by_agent: Dict[str, float] = field(default_factory=dict)
+    claim_error_by_agent: Dict[str, float] = field(default_factory=dict)
+    weighted_exaggeration_by_agent: Dict[str, float] = field(default_factory=dict)
+    weighted_underclaim_by_agent: Dict[str, float] = field(default_factory=dict)
     winners: List[str] = field(default_factory=list)
+    true_winners: List[str] = field(default_factory=list)
+    ideal_truth_winners: List[str] = field(default_factory=list)
+    truthful_apparent_winners: List[str] = field(default_factory=list)
+    score_margin: float = 0.0
+    win_type: str = "no_win"
     rewards_by_agent: Dict[str, float] = field(default_factory=dict)
     trust_before: Dict[str, float] = field(default_factory=dict)
     trust_after: Dict[str, float] = field(default_factory=dict)
@@ -442,9 +453,11 @@ class DeceptionRoundRecord:
 class DeceptionEpisodeState:
     """Full deception-competition episode (12 rounds)."""
     num_rounds: int = 12
+    information_mode: str = "full"                       # full | partial
+    partial_known_count: int = 3
     preferences: List[float] = field(default_factory=list)   # w, 5 floats summing to 1
     threshold: float = 0.4                                   # τ
-    penalty: float = 0.4                                     # caught reward (negative magnitude)
+    penalty: float = 1.0                                     # caught reward (negative magnitude)
     truth_seed: int = 0                                      # for reproducibility
     truth_schedule: List[List[float]] = field(default_factory=list)   # 12 pre-sampled 5-float truths
     round_idx: int = 0                                       # next round to play (0..num_rounds)

@@ -59,6 +59,47 @@ def _build_auction_action(*, action_type: str, bid_amount: int | None = None, te
     return {"auction_action": OpenAuctionAction(action_type=action_type, bid_amount=bid_amount, message_text=text)}
 
 
+def test_deception_competition_uses_normalized_margin_rewards_and_win_type():
+    env = TravelGameEnv(config={
+        "selected_models": ["Math-T1", "Math-T1", "Math-T1", "Math-T1", "Math-T1"],
+        "mode": "deception_competition",
+        "truth_seed": 123,
+        "threshold": 0.3,
+    })
+    env.reset(seed=1)
+    episode = env.world["deception_episode"]
+    truth = list(episode.truth_schedule[0])
+    env.step({"claims": [truth, truth, truth, truth, truth]})
+    round_record = episode.rounds[-1]
+    assert episode.penalty == 1.0
+    score = next(iter(round_record.score_by_agent.values()))
+    expected_reward = round((1.0 + 2.0 * max(0.0, score - episode.threshold)) / 5.0, 4)
+    assert set(round_record.rewards_by_agent.values()) == {expected_reward}
+    assert round_record.win_type == "ambiguous_win"
+    assert round_record.true_winners == round_record.winners
+    assert round_record.ideal_truth_winners == round_record.winners
+    assert round_record.truthful_apparent_winners == round_record.winners
+    assert set(round_record.claim_error_by_agent.values()) == {0.0}
+    assert set(round_record.weighted_underclaim_by_agent.values()) == {0.0}
+
+
+def test_deception_competition_caught_agent_gets_negative_one():
+    env = TravelGameEnv(config={
+        "selected_models": ["Math-T1", "Math-T1", "Math-T1", "Math-T1", "Math-T1"],
+        "mode": "deception_competition",
+        "truth_seed": 456,
+    })
+    env.reset(seed=1)
+    episode = env.world["deception_episode"]
+    truth = list(episode.truth_schedule[0])
+    claims = [list(truth) for _ in range(5)]
+    claims[0] = [1.0, 1.0, 1.0, 1.0, 1.0]
+    env.step({"claims": claims})
+    round_record = episode.rounds[-1]
+    assert round_record.caught_by_agent["agent_1"] is True
+    assert round_record.rewards_by_agent["agent_1"] == -1.0
+
+
 def test_negotiation_mode_reaches_agreement_and_rewards_are_split():
     env = TravelGameEnv(config={"selected_models": ["5.4", "5.4", "5.4"], "mode": "buyer_seller_negotiation"})
     env.reset(seed=7, scenario="mid_market_guitar")

@@ -348,11 +348,17 @@ def deception_competition_reward(
     num_winners: int,
     penalty: float,
 ) -> float:
-    """Per-round reward for a single agent."""
+    """Per-round reward for a single agent.
+
+    Winners split a normalized margin payout:
+        (1 + 2 * max(0, score - threshold)) / num_winners
+    This keeps wins readable while still rewarding stronger buyer scores.
+    """
     if is_caught:
         return -float(penalty)
     if is_winner and num_winners > 0:
-        return (float(score) - float(threshold)) / float(num_winners)
+        margin = max(0.0, float(score) - float(threshold))
+        return (1.0 + 2.0 * margin) / float(num_winners)
     return 0.0
 
 

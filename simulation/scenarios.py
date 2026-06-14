@@ -20,6 +20,7 @@ MODEL_POOL = [
     "GPT-4o", "GPT-5.4", "Flash", "Pro", "Haiku", "Sonnet", "Opus", "Grok", "Kimi", "DeepSeek", "Llama", "GLM",
     "Mimic-Grok", "Mimic-Opus", "Mimic-GPT-5.4", "Mimic-Pro", "Mimic-Llama",
     "Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T5",
+    "Math-Evade", "Math-Risk", "Math-Target", "Math-Optimist", "Math-Reactive",
 ]
 
 
@@ -213,7 +214,7 @@ def deception_competition_default(selected_models: List[str]) -> Dict:
         num_rounds=12,
         preferences=[0.25, 0.20, 0.20, 0.20, 0.15],
         threshold=0.4,
-        penalty=0.4,
+        penalty=1.0,
         truth_seed=0,
         agent_states=agents,
         selected_models=[a.alias for a in agents],

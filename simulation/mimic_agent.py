@@ -369,9 +369,13 @@ def mimic_bid(
 # ---------------------------------------------------------------------------
 
 class _DeceptionMimic(nn.Module):
-    """Two-head deception mimic — must mirror simulation/train_deception_nn.py."""
+    """Two-head deception mimic — must mirror simulation/train_deception_nn.py.
 
-    def __init__(self, input_dim: int = 10, hidden: int = 32, dropout: float = 0.2, num_attrs: int = 5):
+    Default input_dim is the 23-dim leakage-safe v3 schema; the loader passes the
+    checkpoint's actual input_dim, which also supports legacy 10-dim models.
+    """
+
+    def __init__(self, input_dim: int = 23, hidden: int = 32, dropout: float = 0.2, num_attrs: int = 5):
         super().__init__()
         self.register_buffer("input_mean", torch.zeros(input_dim))
         self.register_buffer("input_std", torch.ones(input_dim))
@@ -385,6 +389,10 @@ class _DeceptionMimic(nn.Module):
         )
         self.lie_head = nn.Linear(hidden, num_attrs)
         self.claim_head = nn.Linear(hidden, num_attrs)
+        # Per-attribute regressor residual std, populated from the checkpoint by
+        # _load_deception_mimic. Plain attribute (not a buffer / not in state_dict)
+        # so legacy checkpoints without it load cleanly; zeros → deterministic.
+        self.claim_resid_std = torch.zeros(num_attrs)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x = (x - self.input_mean) / self.input_std
@@ -392,7 +400,7 @@ class _DeceptionMimic(nn.Module):
         return self.lie_head(h), torch.sigmoid(self.claim_head(h))
 
 
-_DECEPTION_MODELS_DIR = Path(__file__).parent / "models" / "deception_v1"
+_DECEPTION_MODELS_DIR = Path(__file__).parent / "models" / "deception_v2"
 _DECEPTION_NET_CACHE: dict[str, _DeceptionMimic] = {}
 
 
@@ -420,8 +428,49 @@ def _load_deception_mimic(alias: str) -> _DeceptionMimic | None:
     )
     model.load_state_dict(payload["state_dict"])
     model.eval()
+    rs = payload.get("claim_resid_std")
+    if rs is not None:
+        try:
+            model.claim_resid_std = torch.tensor([float(v) for v in rs], dtype=torch.float32)
+        except Exception:
+            pass
     _DECEPTION_NET_CACHE[alias] = model
     return model
+
+
+def _build_deception_features_v3(
+    *,
+    observed_truth: list[float | None],
+    visible_mask: list[int],
+    preferences: list[float],
+    own_trust: float,
+    opponents_trust: list[float],
+    round_fraction: float,
+    threshold: float,
+    penalty: float,
+) -> list[float]:
+    """23-dim leakage-safe feature vector. MUST match the feature order produced
+    by extract_deception_dataset.FEATURE_NAMES."""
+    observed_for_x = [0.5 if v is None else float(v) for v in observed_truth[:5]]
+    while len(observed_for_x) < 5:
+        observed_for_x.append(0.5)
+    mask = [float(m) for m in visible_mask[:5]]
+    while len(mask) < 5:
+        mask.append(1.0)
+    prefs = [float(p) for p in (preferences or [])[:5]]
+    while len(prefs) < 5:
+        prefs.append(0.0)
+    opp = [float(o) for o in (opponents_trust or [])[:4]]
+    while len(opp) < 4:
+        opp.append(0.0)
+    return (
+        observed_for_x
+        + mask
+        + prefs
+        + [float(own_trust)]
+        + opp
+        + [float(round_fraction), float(threshold), float(penalty)]
+    )
 
 
 def deception_mimic_claim(
@@ -429,24 +478,69 @@ def deception_mimic_claim(
     truth: list[float],
     own_trust: float,
     opponents_trust: list[float],
+    *,
+    information_mode: str = "full",
+    observed_truth: list[float | None] | None = None,
+    visible_attrs: list[int] | None = None,
+    preferences: list[float] | None = None,
+    threshold: float = 0.0,
+    penalty: float = 0.0,
+    round_index: int = 0,
+    total_rounds: int = 12,
 ) -> list[float]:
     """Return a 5-float claim vector for the named mimic.
 
-    Per D9:
-      - Run two-head NN: P(lie per attr) + raw claim per attr
-      - For each attr: sample/argmax lie decision → if no lie, snap claim to truth
-        (avoids float-noise spurious catches); if lie, quantize the regressor
-        output to 2dp.
+    Two-head NN: P(lie per attr) + raw claim per attr. The emitted claim depends
+    on whether the attribute's truth is observable:
+      - visible attr: sample/argmax the lie decision. If no lie, snap to the known
+        truth (avoids float-noise spurious catches); if lie, use the regressor.
+      - hidden attr (partial info): the truth is unknown, so always use the
+        regressor — there is no truth to snap to.
+
+    The feature vector is chosen to match the loaded checkpoint's input width:
+    23-dim leakage-safe (v3) or the legacy 10-dim (truth + trust) for older
+    scripted-tier mimics.
     """
     model = _load_deception_mimic(alias)
-    if model is None:
-        # Mimic not yet trained — fall back to honest play.
-        return [round(float(t), 2) for t in truth]
+    # `truth` here is the policy/observed truth (0.5 placeholder for hidden);
+    # prefer the explicit observed_truth list (with None for hidden) when given.
+    obs = list(observed_truth) if observed_truth is not None else [float(t) for t in truth[:5]]
+    while len(obs) < 5:
+        obs.append(0.5)
+    if visible_attrs is not None:
+        visible_set = {int(a) for a in visible_attrs}
+    elif information_mode == "partial":
+        visible_set = {a for a, v in enumerate(obs) if v is not None}
+    else:
+        visible_set = set(range(5))
+    visible_mask = [1 if a in visible_set else 0 for a in range(5)]
+    # Per-attribute snap value for visible attrs (the known truth).
+    snap_truth = [0.5 if obs[a] is None else float(obs[a]) for a in range(5)]
 
-    # Build input. Truth (5) + own_trust (1) + opponents_trust (4).
-    if len(opponents_trust) < 4:
-        opponents_trust = list(opponents_trust) + [1.0] * (4 - len(opponents_trust))
-    x = list(truth[:5]) + [float(own_trust)] + [float(o) for o in opponents_trust[:4]]
+    if model is None:
+        # Mimic not yet trained — honest play on visible attrs, placeholder elsewhere.
+        return [round(snap_truth[a], 2) for a in range(5)]
+
+    input_dim = int(model.input_mean.numel())
+    if input_dim >= 23:
+        round_fraction = float(round_index) / max(1.0, float(total_rounds) - 1.0)
+        x = _build_deception_features_v3(
+            observed_truth=obs,
+            visible_mask=visible_mask,
+            preferences=preferences or [0.0] * 5,
+            own_trust=own_trust,
+            opponents_trust=opponents_trust,
+            round_fraction=round_fraction,
+            threshold=threshold,
+            penalty=penalty,
+        )
+    else:
+        # Legacy 10-dim: truth(5) + own_trust(1) + opponents_trust(4).
+        opp = [float(o) for o in (opponents_trust or [])[:4]]
+        while len(opp) < 4:
+            opp.append(1.0)
+        x = [snap_truth[a] for a in range(5)] + [float(own_trust)] + opp
+
     x_tensor = torch.tensor([x], dtype=torch.float32)
     with torch.no_grad():
         lie_logits, raw_claim = model(x_tensor)
@@ -454,14 +548,28 @@ def deception_mimic_claim(
     raw = raw_claim.squeeze(0).cpu().numpy()
 
     T = _temperature()
+    resid_std = getattr(model, "claim_resid_std", None)
+
+    def _regressor_val(a: int) -> float:
+        # Point estimate + calibrated Gaussian noise (std = training residual
+        # spread, scaled by temperature). Reproduces the real LLM's claim spread,
+        # which the bare point estimate under-disperses. T=0 → deterministic.
+        base = float(raw[a])
+        if T > 0 and resid_std is not None and a < int(resid_std.numel()):
+            s = float(resid_std[a])
+            if s > 0.0:
+                base += _stdlib_random.gauss(0.0, s * T)
+        return round(max(0.0, min(1.0, base)), 2)
+
     out: list[float] = []
     for a in range(5):
+        if a not in visible_set:
+            # Hidden attribute: cannot snap to an unknown truth → always regressor.
+            out.append(_regressor_val(a))
+            continue
         if T > 0:
             lie_a = _stdlib_random.random() < float(p_lie[a])
         else:
             lie_a = float(p_lie[a]) > 0.5
-        if lie_a:
-            out.append(round(max(0.0, min(1.0, float(raw[a]))), 2))
-        else:
-            out.append(round(float(truth[a]), 2))
+        out.append(_regressor_val(a) if lie_a else round(snap_truth[a], 2))
     return out

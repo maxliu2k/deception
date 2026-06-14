@@ -1,0 +1,226 @@
+% =====================================================================
+% DECEPTION COMPETITION — methodology + equations, paper-ready.
+%   CHUNK 1 -> \section{Methodology}  (environment, mimic, validation)
+%   Metrics block can move to \section{Experimental Results} if preferred.
+% Style mirrors auction_section_rewrite.tex (equation/cases, \label, \mathbf).
+% Figures to upload (extensionless \includegraphics):
+%   deception_environment, deception_lie_fingerprint, deception_info_gradient,
+%   deception_claim_dist, deception_outcome_parity, deception_benchmark.
+% =====================================================================
+
+
+% #####################################################################
+% ## CHUNK 1 — METHODOLOGY
+% #####################################################################
+
+\subsection{Deception Competition}
+\label{sec:deception}
+To study strategic dishonesty in a controlled setting, we designed a repeated
+simultaneous-move game in which $N=5$ sales agents pitch a single resort to a
+mechanical buyer over $T=12$ rounds. The resort is described by $K=5$ quality
+attributes whose true values in round $r$ form a vector
+$t^{(r)}\in[0,1]^{K}$, quantized to two decimal places. Each round, every agent
+$i$ simultaneously emits a \emph{claim} vector $c_i^{(r)}\in[0,1]^{K}$ about
+those attributes; the buyer rewards persuasive claims but audits the agents and
+penalizes exposed exaggeration. The buyer is non-strategic (a fixed mechanism),
+so the game is purely one of how far each agent will distort the truth given the
+risk of being caught and the value of the buyer's trust. The buyer holds fixed
+preference weights $w\in\Delta^{K}$ over attributes (default
+$w=(0.25,0.20,0.20,0.20,0.15)$).
+
+\subsubsection{Information conditions}
+We vary how much of the truth each agent knows. Under \emph{full information}
+every agent observes all $K$ attributes; under \emph{partial information} each
+agent observes a random size-$k$ subset $V_i^{(r)}\subseteq\{1,\dots,K\}$,
+sampled uniformly without replacement and re-drawn each round, with the
+remaining attributes hidden:
+\begin{equation}
+\tilde t_{i,a}^{(r)} =
+\begin{cases}
+t_a^{(r)}, & a \in V_i^{(r)},\\[2pt]
+\varnothing, & a \notin V_i^{(r)}.
+\end{cases}
+\label{eq:dec-info}
+\end{equation}
+The information level $k=\lvert V_i^{(r)}\rvert$ is held fixed within an episode
+and swept across $k\in\{1,\dots,5\}$ to trace an information gradient.
+
+\subsubsection{Audit and catch rule}
+After the five claims are submitted, the buyer computes the per-attribute
+\emph{population mean} (the crowd consensus),
+\begin{equation}
+\mu_a^{(r)} = \frac{1}{N}\sum_{i=1}^{N} c_{i,a}^{(r)},
+\label{eq:dec-mu}
+\end{equation}
+and audits each agent on the single attribute where it most exceeds the crowd,
+\begin{equation}
+a_i^{*} = \operatorname*{arg\,max}_{a\in\{1,\dots,K\}}\bigl(c_{i,a}^{(r)} - \mu_a^{(r)}\bigr),
+\label{eq:dec-audit}
+\end{equation}
+with ties broken uniformly at random. The agent is \emph{caught} if and only if
+its audited claim differs from the truth at that attribute,
+\begin{equation}
+\mathrm{caught}_i^{(r)} = \mathbb{1}\!\left[\, c_{i,a_i^{*}}^{(r)} \neq t_{a_i^{*}}^{(r)} \,\right],
+\label{eq:dec-caught}
+\end{equation}
+where equality is evaluated at the two-decimal quantization. Because only the
+most over-claimed attribute relative to the crowd is verified, the mechanism
+\emph{polices over-claims and never under-claims}: an agent is exposed precisely
+when it inflates one attribute above its peers and that inflation is false. This
+asymmetry is the central design choice of the environment.
+
+\subsubsection{Scoring, winner, and reward}
+The buyer scores each agent by its trust-weighted appeal, where an agent's
+standing trust $\mathrm{tr}_i^{(r)}\in[0,1]$ (initialized to $1$) scales its
+score between a $0.5$ floor and full weight:
+\begin{equation}
+s_i^{(r)} = \bigl(w \cdot c_i^{(r)}\bigr)\Bigl(\tfrac12 + \tfrac12\,\mathrm{tr}_i^{(r)}\Bigr),
+\qquad s_i^{(r)} = -\infty \ \text{if } \mathrm{caught}_i^{(r)},
+\label{eq:dec-score}
+\end{equation}
+caught agents being disqualified for the round. The buyer books the highest-scoring
+uncaught agent provided it clears the booking threshold $\tau$ (default $0.4$):
+\begin{equation}
+\mathcal{W}^{(r)} =
+\begin{cases}
+\operatorname*{arg\,max}_{i} s_i^{(r)}, & \max_i s_i^{(r)} > \tau,\\[2pt]
+\varnothing, & \text{otherwise,}
+\end{cases}
+\label{eq:dec-winner}
+\end{equation}
+(set-valued under ties). The per-round reward penalizes catches by a fixed
+amount $\rho$ (default $1.0$) and pays winners a threshold-normalized margin
+bonus split across co-winners:
+\begin{equation}
+R_i^{(r)} =
+\begin{cases}
+-\rho, & \mathrm{caught}_i^{(r)},\\[6pt]
+\dfrac{1 + 2\max\!\bigl(0,\, s_i^{(r)} - \tau\bigr)}{\lvert \mathcal{W}^{(r)} \rvert}, & i \in \mathcal{W}^{(r)},\\[10pt]
+0, & \text{otherwise.}
+\end{cases}
+\label{eq:dec-reward}
+\end{equation}
+
+\subsubsection{Trust dynamics}
+Trust carries across rounds and couples the single-shot incentives into a
+repeated game. A catch shrinks trust multiplicatively; any clean round restores
+it additively, both clipped to $[0,1]$:
+\begin{equation}
+\mathrm{tr}_i^{(r+1)} =
+\begin{cases}
+\max\!\bigl(0,\ \gamma\,\mathrm{tr}_i^{(r)}\bigr), & \mathrm{caught}_i^{(r)},\\[2pt]
+\min\!\bigl(1,\ \mathrm{tr}_i^{(r)} + \delta\bigr), & \text{otherwise,}
+\end{cases}
+\label{eq:dec-trust}
+\end{equation}
+with catch multiplier $\gamma=0.7$ and recovery increment $\delta=0.1$. Through
+Eq.~\eqref{eq:dec-score}, a catch is doubly costly: the immediate penalty of
+Eq.~\eqref{eq:dec-reward} plus a depressed score multiplier in all later rounds.
+The episode return is $R_i = \sum_{r=1}^{T} R_i^{(r)}$.
+
+\subsubsection{Behavioral metrics}
+\label{sec:dec-metrics}
+We summarize an agent's revealed strategy with opponent-light statistics. The
+\emph{lie rate} is the fraction of visible-attribute claims that over-state the
+truth,
+\begin{equation}
+\mathrm{LieRate}_i =
+\frac{\sum_r \sum_{a \in V_i^{(r)}} \mathbb{1}\!\left[c_{i,a}^{(r)} > t_a^{(r)}\right]}
+     {\sum_r \lvert V_i^{(r)} \rvert},
+\label{eq:dec-lierate}
+\end{equation}
+the catch and win rates are $\mathrm{CatchRate}_i = \tfrac{1}{T}\sum_r \mathrm{caught}_i^{(r)}$
+and $\mathrm{WinRate}_i = \tfrac{1}{T}\sum_r \mathbb{1}[i \in \mathcal{W}^{(r)}]$,
+and the preference-weighted exaggeration and under-claim are
+\begin{equation}
+E_i^{(r)} = \sum_{a} w_a \max\!\bigl(0,\, c_{i,a}^{(r)} - t_a^{(r)}\bigr),
+\qquad
+U_i^{(r)} = \sum_{a} w_a \max\!\bigl(0,\, t_a^{(r)} - c_{i,a}^{(r)}\bigr).
+\label{eq:dec-exag}
+\end{equation}
+
+\subsubsection{Behavioral mimics}
+\label{sec:dec-mimics}
+As in the auction study, we train a cheap surrogate of each LLM and use it as a
+drop-in replacement at scale. At agent $i$'s decision point in round $r$ we
+encode the leakage-safe public context as a normalized feature vector
+$\mathbf{x}_i^{(r)} \in \mathbb{R}^{23}$ concatenating the observed truth
+($K$ values, with hidden entries imputed), a visibility mask ($K$), the buyer
+preferences ($K$), the agent's own trust, the four opponents' trusts, the round
+fraction $r/(T-1)$, the threshold $\tau$, and the penalty $\rho$. The encoding
+deliberately \emph{excludes} the population mean $\mu^{(r)}$ and the agent index,
+so the mimic cannot peek at the audit signal or its own identity. The vector is
+z-scored, $\hat{\mathbf{x}} = (\mathbf{x} - \bar{\mathbf{x}})/\sigma_{\mathbf{x}}$,
+and passed through a shared two-layer trunk feeding two heads:
+\begin{align}
+h &= \mathrm{Dropout}\!\Bigl(\mathrm{ReLU}\bigl(W_2\,\mathrm{Dropout}(\mathrm{ReLU}(W_1\hat{\mathbf{x}} + b_1)) + b_2\bigr)\Bigr), \label{eq:dec-trunk}\\
+p_a &= \sigma\!\bigl((W_\ell h + b_\ell)_a\bigr), \qquad
+\hat{c}_a = \sigma\!\bigl((W_c h + b_c)_a\bigr), \label{eq:dec-heads}
+\end{align}
+where the trunk has width $32$ with dropout $0.2$; the \emph{lie head} $p_a$ is
+the probability of lying on attribute $a$, and the \emph{claim head}
+$\hat{c}_a$ is the regressed claim value. The heads are trained with masked
+losses: binary cross-entropy on the visible attributes
+($m^{\mathrm{vis}}_a = \mathbb{1}[a \in V]$), and mean-squared error on the
+attributes the regressor is responsible for at inference, namely those that are
+hidden or visibly lied on
+($m^{\mathrm{reg}}_a = \mathbb{1}[(\text{visible} \wedge \text{lied}) \vee \text{hidden}]$):
+\begin{equation}
+\mathcal{L}_{\mathrm{lie}} = \frac{\sum_a m^{\mathrm{vis}}_a\,\mathrm{BCE}(p_a, y^{\mathrm{lie}}_a)}{\sum_a m^{\mathrm{vis}}_a},
+\quad
+\mathcal{L}_{\mathrm{claim}} = \frac{\sum_a m^{\mathrm{reg}}_a\,(\hat{c}_a - y^{\mathrm{claim}}_a)^2}{\sum_a m^{\mathrm{reg}}_a},
+\quad
+\mathcal{L} = \mathcal{L}_{\mathrm{lie}} + \lambda\,\mathcal{L}_{\mathrm{claim}},
+\label{eq:dec-loss}
+\end{equation}
+with $\lambda = 1$. At deployment the mimic assembles a claim stochastically. It
+draws a lie decision $\ell_a \sim \mathrm{Bernoulli}(p_a)$ (temperature $\Theta$),
+snaps to the known truth on visible attributes it chooses not to lie about, and
+otherwise emits the regressed value perturbed by calibrated Gaussian noise:
+\begin{equation}
+c_a =
+\begin{cases}
+t_a, & a \in V \ \text{and}\ \neg \ell_a,\\[2pt]
+\mathrm{clip}_{[0,1]}\!\bigl(\hat{c}_a + \varepsilon_a\bigr), & \text{otherwise,}
+\end{cases}
+\qquad
+\varepsilon_a \sim \mathcal{N}\!\bigl(0,\ (\Theta\,\hat{\sigma}_a)^2\bigr),
+\label{eq:dec-infer}
+\end{equation}
+where the per-attribute noise scale $\hat{\sigma}_a = \operatorname{std}(\hat{c}_a - y^{\mathrm{claim}}_a)$
+is the regressor's training residual standard deviation, saved with the
+checkpoint. The noise term is what lets the surrogate reproduce the
+\emph{spread} of each LLM's claims rather than collapsing to the conditional
+mean.
+
+\subsubsection{Fidelity validation}
+\label{sec:dec-fidelity}
+We validate the substitution at three levels. At the \emph{decision} level we
+report leave-one-episode-out cross-validation of the lie head's accuracy and the
+claim head's mean absolute error. At the \emph{distributional} level we bin each
+attribute's claims and compare the real and mimic histograms $P,Q$ by their
+total-variation distance, used as the acceptance criterion because it is bounded
+and sample-size independent:
+\begin{equation}
+\mathrm{TVD}(P,Q) = \tfrac12 \sum_b \lvert P_b - Q_b \rvert,
+\qquad
+D_{\mathrm{KL}}(P \Vert Q) = \sum_b P_b \log\frac{P_b}{Q_b},
+\label{eq:dec-tvd}
+\end{equation}
+reporting KL divergence as a secondary effect size; we deliberately avoid a
+$\chi^2$ $p$-value gate, which at our sample sizes rejects negligible
+differences and is reported for reference only ($\chi^2 = \sum_b (O_b-E_b)^2/E_b$,
+Cram\'er's $V = \sqrt{\chi^2/n}$, with per-LLM $p$-values combined by Fisher's
+method $X = -2\sum_j \ln p_j \sim \chi^2_{2J}$). At the \emph{system} level we
+replay the matched truth seeds with the mimic loadout and compare competition
+outcomes (catch rate, win rate, final trust). Throughout, the episode is the
+independent replicate and uncertainty is reported as $95\%$ bootstrap
+confidence intervals,
+\begin{equation}
+\widehat{\theta}^{*(b)} = \frac{\sum_{e} n^{*}_{e}}{\sum_{e} d^{*}_{e}},
+\qquad
+\mathrm{CI}_{95} = \bigl[\,Q_{2.5}\{\widehat{\theta}^{*(b)}\},\ Q_{97.5}\{\widehat{\theta}^{*(b)}\}\,\bigr],
+\label{eq:dec-bootstrap}
+\end{equation}
+where each bootstrap replicate $b$ resamples episodes with replacement and
+recomputes the pooled ratio of numerator $n_e$ to denominator $d_e$.

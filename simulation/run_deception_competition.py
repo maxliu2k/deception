@@ -2,7 +2,7 @@
 
 Each episode:
   1. Creates a save slot in the target folder
-  2. POSTs /api/reset with the deception_competition mode + loadout
+  2. POSTs /api/reset with the selected deception mode + loadout
   3. POSTs /api/step (kicks off the 12-round episode worker)
   4. Polls /api/step_status until done
 
@@ -75,46 +75,86 @@ def run_one(
     truth_seed: int,
     slot_name: str,
     loadout: list[str],
+    mode: str,
+    known_attrs: int,
     threshold: float,
     penalty: float,
     num_rounds: int,
     preferences: list[float] | None,
     poll_interval_s: float,
     timeout_s: float,
+    slot_id: str | None = None,
+    resume: bool = False,
 ) -> dict:
-    create_resp = post(base, "/api/save_slot_create", {"name": slot_name, "folder_id": folder_id})
-    slot = create_resp.get("slot") or {}
-    slot_id = slot.get("slot_id")
+    # First attempt creates a fresh slot; retries reuse the same slot_id so we
+    # don't leave orphan slots behind.
     if not slot_id:
-        return {"slot_name": slot_name, "ok": False, "error": f"create failed: {create_resp}"}
+        create_resp = post(base, "/api/save_slot_create", {"name": slot_name, "folder_id": folder_id})
+        slot = create_resp.get("slot") or {}
+        slot_id = slot.get("slot_id")
+        if not slot_id:
+            return {"slot_name": slot_name, "ok": False, "error": f"create failed: {create_resp}"}
+        resume = False  # a brand-new slot has nothing to resume
 
     reset_payload = {
         "selected_models": loadout,
-        "mode": "deception_competition",
+        "mode": mode,
         "seed": int(seed),
         "truth_seed": int(truth_seed),
         "threshold": float(threshold),
         "penalty": float(penalty),
         "num_rounds": int(num_rounds),
+        "partial_known_count": int(known_attrs),
         "save_slot": slot_id,
     }
     if preferences:
         reset_payload["preferences"] = list(preferences)
-    reset_resp = post(base, "/api/reset", reset_payload)
-    if reset_resp.get("ok") is not True and reset_resp.get("_status", 200) >= 400:
-        return {"slot_id": slot_id, "ok": False, "error": f"reset failed: {reset_resp}"}
 
-    step_resp = post(base, "/api/step", {"use_models": True, "save_slot": slot_id})
-    if step_resp.get("ok") is not True and step_resp.get("_status", 200) >= 400:
-        return {"slot_id": slot_id, "ok": False, "error": f"step failed: {step_resp}"}
+    # Resume path: skip /api/reset so completed rounds are preserved, and just
+    # re-issue /api/step. The server worker loops `while not env.done`, so it
+    # continues from the round where the previous attempt failed instead of
+    # restarting at round 0 — saving the tokens already spent on earlier rounds.
+    # The paired truth schedule is unchanged; only the failed round's LLM calls
+    # re-roll, so experimental validity holds. If the slot can't be resumed
+    # (env not loaded / needs init), fall back to a full reset.
+    need_reset = not resume
+    if resume:
+        step_resp = post(base, "/api/step", {"use_models": True, "save_slot": slot_id})
+        if int(step_resp.get("_status", 200) or 200) >= 400:
+            detail = str(step_resp.get("detail") or step_resp.get("error") or step_resp)
+            if "already complete" in detail.lower():
+                # Episode actually finished on the prior attempt — treat as success.
+                return {"slot_id": slot_id, "ok": True, "resumed": True, "loadout": loadout}
+            need_reset = True  # couldn't resume; do a full reset below
 
-    started = time.time()
+    if need_reset:
+        reset_resp = post(base, "/api/reset", reset_payload)
+        if reset_resp.get("ok") is not True and reset_resp.get("_status", 200) >= 400:
+            return {"slot_id": slot_id, "ok": False, "error": f"reset failed: {reset_resp}"}
+        step_resp = post(base, "/api/step", {"use_models": True, "save_slot": slot_id})
+        if step_resp.get("ok") is not True and step_resp.get("_status", 200) >= 400:
+            return {"slot_id": slot_id, "ok": False, "error": f"step failed: {step_resp}"}
+
+    # Progress-aware timeout: abort only if NO round completes within timeout_s.
+    # A slow-but-advancing episode (e.g. high-effort Pro taking longer per round)
+    # keeps resetting its deadline as rounds tick over, so we never reset a
+    # nearly-finished run. timeout_s is now a "max time without progress" budget,
+    # not a hard total wall-clock cap — which still catches genuine stalls.
+    last_progress = -1
+    last_progress_t = time.time()
     while True:
-        if time.time() - started > timeout_s:
-            return {"slot_id": slot_id, "ok": False, "error": "timeout", "loadout": loadout}
+        if time.time() - last_progress_t > timeout_s:
+            return {"slot_id": slot_id, "ok": False,
+                    "error": f"stalled: no round progress for {timeout_s:.0f}s "
+                             f"(reached {max(0, last_progress)} rounds)",
+                    "loadout": loadout}
         time.sleep(poll_interval_s)
         status_resp = get(base, f"/api/step_status?session_id={slot_id}")
         status = status_resp.get("status") or status_resp
+        progress = status.get("rounds_completed")
+        if isinstance(progress, int) and progress > last_progress:
+            last_progress = progress
+            last_progress_t = time.time()
         if status.get("error"):
             return {"slot_id": slot_id, "ok": False, "error": status["error"], "loadout": loadout}
         if status.get("done"):
@@ -144,9 +184,14 @@ def main() -> int:
                    help="Seed for sampling distinct random permutations of the loadout.")
     p.add_argument("--loadout", default=",".join(DEFAULT_LOADOUT),
                    help="Comma-separated list of 5 model aliases for the agent slots.")
-    p.add_argument("--threshold", type=float, default=0.3,
-                   help="Buyer's booking threshold τ (tune via calibration sweep).")
-    p.add_argument("--penalty", type=float, default=0.05,
+    p.add_argument("--mode", default="deception_competition",
+                   choices=["deception_competition", "deception_competition_partial_info"],
+                   help="Deception mode key; use --known-attrs to control information.")
+    p.add_argument("--known-attrs", type=int, default=5,
+                   help="Number of true attributes each pitcher knows (5 = full information).")
+    p.add_argument("--threshold", type=float, default=0.4,
+                   help="Buyer's booking threshold tau (tune via calibration sweep).")
+    p.add_argument("--penalty", type=float, default=1.0,
                    help="Caught penalty magnitude (tune via calibration sweep).")
     p.add_argument("--num-rounds", type=int, default=12)
     p.add_argument("--preferences", default="",
@@ -170,6 +215,8 @@ def main() -> int:
     folder_id = find_or_create_folder(args.base, args.folder)
     print(f"Folder '{args.folder}' = {folder_id}")
     print(f"Loadout: {loadout}")
+    args.known_attrs = max(1, min(5, int(args.known_attrs)))
+    print(f"Mode = {args.mode}, known_attrs = {args.known_attrs}/5")
     print(f"Threshold = {args.threshold}, penalty = {args.penalty}, num_rounds = {args.num_rounds}")
     print(f"Running {args.count} episodes, {args.parallel} at a time")
 
@@ -199,6 +246,8 @@ def main() -> int:
             truth_seed=truth_seed,
             slot_name=slot_name,
             loadout=slot_loadout,
+            mode=args.mode,
+            known_attrs=args.known_attrs,
             threshold=args.threshold,
             penalty=args.penalty,
             num_rounds=args.num_rounds,

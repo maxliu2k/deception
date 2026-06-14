@@ -4,21 +4,29 @@ For each LLM/mimic pair, compares:
   - lie rate per attribute (from y_lied labels): real-LLM rate vs mimic rate
   - claim distribution per attribute, binned at 0.05 resolution
 
-Tests used:
-  - chi² goodness-of-fit on the binned claim distribution (per attribute,
-    aggregated across attributes for the per-LLM p-value)
-  - KL divergence (binned), reported as effect size
+Metrics:
+  - total-variation distance (TVD) on the binned claim distribution — the
+    HEADLINE metric and acceptance gate. TVD ∈ [0,1] is sample-size-independent
+    and interpretable (TVD=0.1 ⇒ distributions disagree on 10% of their mass).
+  - chi² goodness-of-fit p-value — reported for reference ONLY, not used as the
+    gate. At n=480–2400 the chi²-p is a poor gate: it rejects negligible
+    differences (over-power) and underflows to 0 on large ones, so the p answers
+    the wrong question. KL and Cramér's V are reported alongside as effect sizes.
 
-The per-LLM aggregate p is the result of Fisher-combining per-attribute p-values.
-The headline metric is `aggregate_p`: the chi² p-value across all 5 LLM/mimic
-pairs (using Fisher's combined-p method).
+In addition to the pooled fit, each LLM is scored *per information level*
+(known-attribute count). Because the information gradient IS the result, the
+mimic must track each rung, not just the pooled average — a pooled pass can mask
+one level fitting badly. Rungs above the TVD threshold are reported under
+`per_level_failures` (and warned on stdout).
 
-Acceptance: aggregate_p > 0.05.
+Acceptance: overall mean TVD ≤ --max-tvd (default 0.15). Per-level failures are
+surfaced as a warning rather than a hard reject, since low-k / multimodal cells
+are the hardest for a unimodal regressor to reproduce.
 
 Usage:
     python -m simulation.validate_deception_mimics \
-        --data simulation/datasets/deception_dataset_v1.jsonl \
-        --meta simulation/datasets/deception_dataset_v1_meta.json \
+        --data simulation/datasets/deception_dataset_v3.jsonl \
+        --meta simulation/datasets/deception_dataset_v3_meta.json \
         --out simulation/datasets/deception_fit_report_v1.json
 """
 from __future__ import annotations
@@ -88,6 +96,22 @@ def kl_divergence(p: np.ndarray, q: np.ndarray, eps: float = 1e-8) -> float:
     return float((p * np.log(p / q)).sum())
 
 
+def total_variation(p: np.ndarray, q: np.ndarray) -> float:
+    """Total-variation distance between two normalized histograms, in [0, 1].
+
+    TVD = ½·Σ|p−q|. Sample-size-independent (unlike chi²), and directly
+    interpretable: TVD=0.1 means the two claim distributions disagree on 10% of
+    their probability mass. This is the headline effect size for acceptance —
+    a p-value gate is inappropriate at n=480–2400, where chi² rejects negligible
+    differences and underflows on large ones."""
+    sp, sq = p.sum(), q.sum()
+    if sp <= 0 or sq <= 0:
+        return 1.0
+    p = p / sp
+    q = q / sq
+    return float(0.5 * np.abs(p - q).sum())
+
+
 def cramers_v(observed: np.ndarray, expected: np.ndarray, *, n_obs: int) -> float:
     """Cramér's V from chi² and table dims (1×k contingency table here → V = sqrt(chi2/n))."""
     chi2, _ = chi2_pvalue(observed, expected, n_obs=n_obs)
@@ -97,8 +121,14 @@ def cramers_v(observed: np.ndarray, expected: np.ndarray, *, n_obs: int) -> floa
 
 
 def fisher_combine(pvals: list[float], *, eps: float = 1e-300) -> float:
-    """Fisher's method for combining independent p-values."""
-    pvals = [max(eps, p) for p in pvals if p is not None and 0.0 < p <= 1.0]
+    """Fisher's method for combining independent p-values.
+
+    p-values are clamped to [eps, 1] BEFORE use — critically, a p that has
+    underflowed to exactly 0.0 (an extreme misfit) must be floored to eps, not
+    discarded. The old `if 0.0 < p` filter dropped such zeros, so a model whose
+    every attribute misfit so badly that p underflowed reported a *combined* p of
+    1.0 (empty list → default), inverting the verdict. Floor, don't filter."""
+    pvals = [min(1.0, max(eps, p)) for p in pvals if p is not None and not math.isnan(p)]
     if not pvals:
         return 1.0
     stat = -2.0 * sum(math.log(p) for p in pvals)
@@ -124,32 +154,101 @@ def sample_mimic_claims(alias: str, rows: list[dict], *, n_samples_per_row: int 
     if model is None:
         # Fall back: maybe the file is stored under the original alias (e.g., for math tiers).
         return None
+    mimic_alias = alias if alias.startswith("Mimic-") else f"Mimic-{alias}"
     samples = []
     for r in rows:
-        x = list(r["x"])
-        truth = x[:5]
+        feats = r.get("features") or {}
+        # Reconstruct the decision-time context from the structured features so the
+        # mimic sees exactly the v3 leakage-safe input it was trained on.
+        observed_truth = feats.get("observed_truth")
+        if observed_truth is None:
+            observed_truth = list(r["x"][:5])
+        policy_truth = [0.5 if v is None else float(v) for v in observed_truth]
+        visible_attrs = feats.get("visible_attrs")
+        preferences = feats.get("preferences") or list(r["x"][10:15])
+        own_trust = float(feats.get("own_trust", r["x"][15]))
+        opponents_trust = feats.get("opponent_trusts") or list(r["x"][16:20])
+        information_mode = feats.get("information_mode", "full")
+        threshold = float(feats.get("threshold", r["x"][21]))
+        penalty = float(feats.get("penalty", r["x"][22]))
+        round_index = int(feats.get("round_index", 0))
+        total_rounds = int(feats.get("num_rounds", 12))
         # Sample n_samples_per_row stochastic outputs for distributional comparison.
         for _ in range(n_samples_per_row):
             from simulation.mimic_agent import deception_mimic_claim
             c = deception_mimic_claim(
-                alias if alias.startswith("Mimic-") else f"Mimic-{alias}",
-                truth,
-                float(x[5]),
-                [float(v) for v in x[6:]],
+                mimic_alias,
+                policy_truth,
+                own_trust,
+                opponents_trust,
+                information_mode=information_mode,
+                observed_truth=observed_truth,
+                visible_attrs=visible_attrs,
+                preferences=preferences,
+                threshold=threshold,
+                penalty=penalty,
+                round_index=round_index,
+                total_rounds=total_rounds,
             )
             samples.append(c)
     return np.array(samples, dtype=np.float32)
 
 
+def _row_level(row: dict) -> int:
+    """Known-attribute count for a row = number of visible attrs (sum of the
+    visibility mask). Falls back to the mask slice of x if `visible_mask` is
+    absent. Every agent sees exactly `known_count` attrs, so this recovers the
+    information level the row was played at."""
+    vm = row.get("visible_mask")
+    if vm is not None:
+        return int(round(sum(float(x) for x in vm)))
+    x = row.get("x") or []
+    if len(x) >= 10:
+        return int(round(sum(float(v) for v in x[5:10])))
+    return 5
+
+
+def _compare(real_claims: np.ndarray, mimic_claims: np.ndarray, *, n_obs: int,
+             bins: int) -> tuple[list[dict], list[float], float, float]:
+    """Per-attribute chi²/KL/Cramér's V/TVD comparison of two claim sets.
+
+    Returns (per_attribute_records, attr_pvals, fisher_aggregate_p, mean_tvd).
+    """
+    per_attr, attr_pvals, tvds = [], [], []
+    for a in range(5):
+        real_dist = _binned_distribution(real_claims[:, a], bins=bins)
+        mimic_dist = _binned_distribution(mimic_claims[:, a], bins=bins)
+        chi2, pval = chi2_pvalue(real_dist, mimic_dist, n_obs=n_obs)
+        kl = kl_divergence(real_dist, mimic_dist)
+        v = cramers_v(real_dist, mimic_dist, n_obs=n_obs)
+        tvd = total_variation(real_dist, mimic_dist)
+        per_attr.append({
+            "attr_idx": a,
+            "chi2": round(chi2, 4),
+            "p": round(pval, 4),
+            "cramers_v": round(v, 4),
+            "kl": round(kl, 4),
+            "tvd": round(tvd, 4),
+        })
+        attr_pvals.append(pval)
+        tvds.append(tvd)
+    mean_tvd = float(sum(tvds) / len(tvds)) if tvds else 1.0
+    return per_attr, attr_pvals, fisher_combine(attr_pvals), mean_tvd
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--data", default="simulation/datasets/deception_dataset_v1.jsonl")
-    p.add_argument("--meta", default="simulation/datasets/deception_dataset_v1_meta.json")
+    p.add_argument("--data", default="simulation/datasets/deception_dataset_v3.jsonl")
+    p.add_argument("--meta", default="simulation/datasets/deception_dataset_v3_meta.json")
     p.add_argument("--out", default="simulation/datasets/deception_fit_report_v1.json")
     p.add_argument("--bins", type=int, default=20,
                    help="Number of equal-width bins over [0,1] for the histogram comparison.")
     p.add_argument("--samples-per-row", type=int, default=4,
                    help="Mimic samples to draw per real-LLM row (more = lower noise in mimic distribution).")
+    p.add_argument("--max-tvd", type=float, default=0.15,
+                   help="Acceptance threshold on mean total-variation distance "
+                        "between real and mimic claim distributions (lower = stricter). "
+                        "Effect-size gate; replaces the sample-size-dependent chi²-p gate.")
     args = p.parse_args()
 
     data_path = Path(args.data)
@@ -175,6 +274,7 @@ def main() -> int:
         "accept": False,
     }
     per_llm_pvals: list[float] = []
+    per_llm_tvds: list[float] = []
     for idx, real_rows in sorted(by_idx.items()):
         alias = idx_to_alias.get(idx, f"bidder_{idx}")
         real_claims = np.array([r["y_claim"] for r in real_rows], dtype=np.float32)
@@ -184,41 +284,86 @@ def main() -> int:
             print(f"  [{alias}] skipping — mimic not trained.")
             report["per_llm"].append({"alias": alias, "skipped": True, "reason": "mimic not trained"})
             continue
-        per_attr = []
-        attr_pvals = []
-        for a in range(5):
-            real_dist = _binned_distribution(real_claims[:, a], bins=args.bins)
-            mimic_dist = _binned_distribution(mimic_claims[:, a], bins=args.bins)
-            chi2, pval = chi2_pvalue(real_dist, mimic_dist, n_obs=n_obs)
-            kl = kl_divergence(real_dist, mimic_dist)
-            v = cramers_v(real_dist, mimic_dist, n_obs=n_obs)
-            per_attr.append({
-                "attr_idx": a,
-                "chi2": round(chi2, 4),
-                "p": round(pval, 4),
-                "cramers_v": round(v, 4),
-                "kl": round(kl, 4),
-            })
-            attr_pvals.append(pval)
-        agg_p = fisher_combine(attr_pvals)
+
+        # Pooled comparison: all information levels together (the headline number).
+        per_attr, attr_pvals, agg_p, mean_tvd = _compare(real_claims, mimic_claims, n_obs=n_obs, bins=args.bins)
         per_llm_pvals.append(agg_p)
+        per_llm_tvds.append(mean_tvd)
+
+        # Per-level (known-attribute) stratification. A pooled pass can hide a
+        # single level fitting badly — and since the information gradient IS the
+        # result, we need the mimic to track EACH rung, not just the average.
+        # sample_mimic_claims emits `samples_per_row` mimic draws per real row in
+        # row order, so np.repeat maps each mimic draw back to its row's level.
+        levels = np.array([_row_level(r) for r in real_rows])
+        n_spr = max(1, mimic_claims.shape[0] // max(1, n_obs))
+        mimic_levels = np.repeat(levels, n_spr)[: mimic_claims.shape[0]]
+        per_level = []
+        for k in sorted({int(x) for x in levels}, reverse=True):
+            rmask = levels == k
+            mmask = mimic_levels == k
+            if int(rmask.sum()) == 0 or int(mmask.sum()) == 0:
+                continue
+            lp_attr, lp_pvals, lp_agg, lp_tvd = _compare(
+                real_claims[rmask], mimic_claims[mmask], n_obs=int(rmask.sum()), bins=args.bins)
+            per_level.append({
+                "known": k,
+                "n_real": int(rmask.sum()),
+                "n_mimic": int(mmask.sum()),
+                "aggregate_p": round(lp_agg, 4),
+                "mean_tvd": round(lp_tvd, 4),
+                "per_attribute": lp_attr,
+            })
+
         report["per_llm"].append({
             "alias": alias,
             "n_real": n_obs,
             "n_mimic": int(mimic_claims.shape[0]),
             "per_attribute": per_attr,
             "aggregate_p": round(agg_p, 4),
+            "mean_tvd": round(mean_tvd, 4),
+            "per_level": per_level,
         })
-        print(f"  [{alias}] n_real={n_obs}  n_mimic={mimic_claims.shape[0]}  attribute p-values={[round(p,3) for p in attr_pvals]}  aggregate_p={agg_p:.4f}")
+        lvl_str = "  ".join(f"k{p['known']}:tvd={p['mean_tvd']:.3f}(n={p['n_real']})" for p in per_level)
+        print(f"  [{alias}] n_real={n_obs}  n_mimic={mimic_claims.shape[0]}  "
+              f"mean_TVD={mean_tvd:.4f}  (pooled chi2-p={agg_p:.4f})")
+        print(f"           per-level TVD: {lvl_str or '(single level)'}")
 
     overall_p = fisher_combine(per_llm_pvals)
+    overall_tvd = float(sum(per_llm_tvds) / len(per_llm_tvds)) if per_llm_tvds else 1.0
     report["aggregate_p"] = round(overall_p, 4)
-    report["accept"] = bool(overall_p > 0.05)
+    report["mean_tvd"] = round(overall_tvd, 4)
+    # Acceptance is on effect size (TVD), NOT the chi²-p: at n=480–2400 a p-gate
+    # rejects negligible differences and underflows on large ones, so it answers
+    # the wrong question. TVD measures *how much* the distributions differ.
+    report["max_tvd"] = args.max_tvd
+    report["accept"] = bool(overall_tvd <= args.max_tvd)
+
+    # Surface any per-level rung whose TVD exceeds the threshold even if the
+    # pooled average passes — these are the gradient rungs the mimic reproduces
+    # worst (often the data-starved low-info / multimodal cells).
+    level_failures = []
+    for entry in report["per_llm"]:
+        for pl in entry.get("per_level", []):
+            if pl.get("mean_tvd", 1.0) > args.max_tvd:
+                level_failures.append({"alias": entry["alias"], "known": pl["known"],
+                                       "mean_tvd": pl.get("mean_tvd"), "n_real": pl["n_real"]})
+    report["per_level_failures"] = level_failures
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"\nOverall aggregate_p = {overall_p:.4f}  ({'ACCEPT' if overall_p > 0.05 else 'REJECT'} mimic fit)")
+    accept = overall_tvd <= args.max_tvd
+    print(f"\nOverall mean_TVD = {overall_tvd:.4f}  (threshold {args.max_tvd}) "
+          f"-> {'ACCEPT' if accept else 'REJECT'}   [chi2-p={overall_p:.4f}, informational only]")
+    if level_failures:
+        print(f"WARNING: {len(level_failures)} per-level fit(s) above TVD {args.max_tvd} "
+              f"(pooled pass can mask these):")
+        for lf in sorted(level_failures, key=lambda d: -d["mean_tvd"]):
+            print(f"    {lf['alias']} @ known={lf['known']}: mean_TVD={lf['mean_tvd']:.4f} (n_real={lf['n_real']})")
+    else:
+        print(f"All per-level fits <= TVD {args.max_tvd}.")
     print(f"Report -> {out_path}")
-    return 0 if overall_p > 0.05 else 2
+    return 0 if accept else 2
 
 
 if __name__ == "__main__":
