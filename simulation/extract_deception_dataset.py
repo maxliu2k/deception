@@ -60,6 +60,11 @@ def _build_rows(log_path: Path, payload: dict, episode_index: int) -> list[dict]
     # Order agents by agent_index so canonical positions are stable.
     ordered_ids = [aid for aid, _ in sorted(agent_id_to_index.items(), key=lambda kv: kv[1])]
 
+    num_rounds = int(payload.get("num_rounds") or len(rounds) or 12)
+    # Per-agent running history (accumulated over rounds in order), so each row's
+    # features include the agent's trust arc / timing (needed to mimic backloading).
+    hist_state = {aid: {"wins": 0, "last_disc": 0.0, "last_won": 0} for aid in ordered_ids}
+
     rows: list[dict] = []
     for r in rounds:
         truth = list(r.get("truth") or [])
@@ -67,6 +72,10 @@ def _build_rows(log_path: Path, payload: dict, episode_index: int) -> list[dict]
             continue
         trust_before = dict(r.get("trust_before") or {})
         claims = dict(r.get("claims_by_agent") or {})
+        disc_by_agent = dict(r.get("discrepancy_by_agent") or {})
+        winners = set(r.get("winners") or [])
+        round_idx_val = int(r.get("round_idx", 0))
+        round_frac = round_idx_val / max(1, num_rounds - 1)
         for aid in ordered_ids:
             if aid not in claims or aid not in trust_before:
                 continue
@@ -81,7 +90,11 @@ def _build_rows(log_path: Path, payload: dict, episode_index: int) -> list[dict]
                 other_idx = (own_idx + k) % 5
                 other_id = ordered_ids[other_idx]
                 opp_trusts.append(float(trust_before.get(other_id, 0.0)))
-            x = list(truth) + [own_trust] + opp_trusts
+            hs = hist_state[aid]
+            win_rate = (hs["wins"] / round_idx_val) if round_idx_val > 0 else 0.0
+            # 14-dim: truth(5) + own_trust(1) + opp_trust(4) + [round_frac, last_over_promise, last_won, win_rate_so_far]
+            x = (list(truth) + [own_trust] + opp_trusts
+                 + [round_frac, hs["last_disc"], float(hs["last_won"]), win_rate])
             y_lied = [int(round(claim[a], 2) != round(truth[a], 2)) for a in range(5)]
             y_claim = [round(float(claim[a]), 2) for a in range(5)]
             rows.append({
@@ -91,9 +104,13 @@ def _build_rows(log_path: Path, payload: dict, episode_index: int) -> list[dict]
                 "alias": agent_id_to_alias[aid],
                 "agent_index": own_idx,
                 "episode_index": episode_index,
-                "round_index": int(r.get("round_idx", 0)),
+                "round_index": round_idx_val,
                 "source_log": str(log_path),
             })
+            # Advance this agent's history with the round just decided.
+            hs["last_disc"] = float(disc_by_agent.get(aid, 0.0))
+            hs["last_won"] = int(aid in winners)
+            hs["wins"] += int(aid in winners)
     return rows
 
 
@@ -168,10 +185,11 @@ def main() -> int:
 
     meta = {
         "version": "v1",
-        "input_dim": 10,
+        "input_dim": 14,
         "feature_names": [
             "truth_beach", "truth_food", "truth_pool", "truth_room", "truth_service",
             "own_trust", "opp1_trust", "opp2_trust", "opp3_trust", "opp4_trust",
+            "round_frac", "last_over_promise", "last_won", "win_rate_so_far",
         ],
         "output_heads": {
             "lie_classifier": {"dim": 5, "loss": "BCE per attribute"},

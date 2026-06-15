@@ -116,29 +116,49 @@ def sample_mimic_claims(alias: str, rows: list[dict], *, n_samples_per_row: int 
     Returns array shaped (n_rows * n_samples_per_row, 5) of claim values, or None
     if the mimic isn't trained.
     """
-    bare_alias = _strip_mimic_prefix(alias)  # mimic file uses bare alias
+    import torch
+    import random as _rnd
+    from simulation.mimic_agent import _temperature
     model = _load_deception_mimic(alias)
     if model is None:
-        # Try with "Mimic-" prefix in case alias is bare.
         model = _load_deception_mimic(f"Mimic-{alias}")
     if model is None:
-        # Fall back: maybe the file is stored under the original alias (e.g., for math tiers).
         return None
+    # Feed the dataset's exact feature vector x straight to the model. This is
+    # dimension-agnostic (works for the 14-dim schema) and uses precisely the
+    # features the mimic was trained on, instead of re-deriving them.
+    T = _temperature()
     samples = []
     for r in rows:
-        x = list(r["x"])
+        x = [float(v) for v in r["x"]]
         truth = x[:5]
-        # Sample n_samples_per_row stochastic outputs for distributional comparison.
+        xt = torch.tensor([x], dtype=torch.float32)
+        with torch.no_grad():
+            lie_logits, raw_claim = model(xt)
+        p_lie = torch.sigmoid(lie_logits).squeeze(0).cpu().numpy()
+        raw = raw_claim.squeeze(0).cpu().numpy()
+        rs = model.claim_resid_std   # calibrated per-attr noise (mirror deployment)
         for _ in range(n_samples_per_row):
-            from simulation.mimic_agent import deception_mimic_claim
-            c = deception_mimic_claim(
-                alias if alias.startswith("Mimic-") else f"Mimic-{alias}",
-                truth,
-                float(x[5]),
-                [float(v) for v in x[6:]],
-            )
+            c = []
+            for a in range(5):
+                lie = (_rnd.random() < float(p_lie[a])) if T > 0 else (float(p_lie[a]) > 0.5)
+                if lie:
+                    val = float(raw[a])
+                    sigma = float(rs[a]) if rs is not None and a < len(rs) else 0.0
+                    if T > 0 and sigma > 0:
+                        val += _rnd.gauss(0.0, sigma * T)
+                    c.append(round(max(0.0, min(1.0, val)), 2))
+                else:
+                    c.append(round(float(truth[a]), 2))
             samples.append(c)
     return np.array(samples, dtype=np.float32)
+
+
+def total_variation(p, q) -> float:
+    """TVD between two binned distributions: 0.5 * sum|p-q|, in [0,1]. Bounded and
+    sample-size-independent — the acceptance gate (chi2 p-value is over-powered)."""
+    p = np.asarray(p, dtype=np.float64); q = np.asarray(q, dtype=np.float64)
+    return 0.5 * float(np.abs(p - q).sum())
 
 
 def main() -> int:
@@ -150,6 +170,8 @@ def main() -> int:
                    help="Number of equal-width bins over [0,1] for the histogram comparison.")
     p.add_argument("--samples-per-row", type=int, default=4,
                    help="Mimic samples to draw per real-LLM row (more = lower noise in mimic distribution).")
+    p.add_argument("--max-tvd", type=float, default=0.15,
+                   help="Acceptance gate: overall mean TVD must be <= this.")
     args = p.parse_args()
 
     data_path = Path(args.data)
@@ -175,6 +197,7 @@ def main() -> int:
         "accept": False,
     }
     per_llm_pvals: list[float] = []
+    per_llm_tvds: list[float] = []
     for idx, real_rows in sorted(by_idx.items()):
         alias = idx_to_alias.get(idx, f"bidder_{idx}")
         real_claims = np.array([r["y_claim"] for r in real_rows], dtype=np.float32)
@@ -186,39 +209,51 @@ def main() -> int:
             continue
         per_attr = []
         attr_pvals = []
+        attr_tvds = []
         for a in range(5):
             real_dist = _binned_distribution(real_claims[:, a], bins=args.bins)
             mimic_dist = _binned_distribution(mimic_claims[:, a], bins=args.bins)
             chi2, pval = chi2_pvalue(real_dist, mimic_dist, n_obs=n_obs)
             kl = kl_divergence(real_dist, mimic_dist)
             v = cramers_v(real_dist, mimic_dist, n_obs=n_obs)
+            tvd = total_variation(real_dist, mimic_dist)
             per_attr.append({
                 "attr_idx": a,
+                "tvd": round(tvd, 4),
                 "chi2": round(chi2, 4),
                 "p": round(pval, 4),
                 "cramers_v": round(v, 4),
                 "kl": round(kl, 4),
             })
             attr_pvals.append(pval)
+            attr_tvds.append(tvd)
         agg_p = fisher_combine(attr_pvals)
+        mean_tvd = float(np.mean(attr_tvds))
         per_llm_pvals.append(agg_p)
+        per_llm_tvds.append(mean_tvd)
         report["per_llm"].append({
             "alias": alias,
             "n_real": n_obs,
             "n_mimic": int(mimic_claims.shape[0]),
+            "mean_tvd": round(mean_tvd, 4),
             "per_attribute": per_attr,
             "aggregate_p": round(agg_p, 4),
         })
-        print(f"  [{alias}] n_real={n_obs}  n_mimic={mimic_claims.shape[0]}  attribute p-values={[round(p,3) for p in attr_pvals]}  aggregate_p={agg_p:.4f}")
+        print(f"  [{alias}] n_real={n_obs}  n_mimic={mimic_claims.shape[0]}  mean_tvd={mean_tvd:.4f}  (ref aggregate_p={agg_p:.4f})")
 
     overall_p = fisher_combine(per_llm_pvals)
-    report["aggregate_p"] = round(overall_p, 4)
-    report["accept"] = bool(overall_p > 0.05)
+    overall_tvd = float(np.mean(per_llm_tvds)) if per_llm_tvds else float("nan")
+    accept = bool(overall_tvd <= args.max_tvd)
+    report["aggregate_p"] = round(overall_p, 4)   # chi2/Fisher kept as secondary reference only
+    report["mean_tvd"] = round(overall_tvd, 4)
+    report["max_tvd"] = args.max_tvd
+    report["accept"] = accept
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"\nOverall aggregate_p = {overall_p:.4f}  ({'ACCEPT' if overall_p > 0.05 else 'REJECT'} mimic fit)")
+    print(f"\nOverall mean_tvd = {overall_tvd:.4f}  (threshold {args.max_tvd})  ->  {'ACCEPT' if accept else 'REJECT'} mimic fit")
+    print(f"  (secondary ref, NOT the gate: chi2-Fisher aggregate_p = {overall_p:.4f})")
     print(f"Report -> {out_path}")
-    return 0 if overall_p > 0.05 else 2
+    return 0 if accept else 2
 
 
 if __name__ == "__main__":

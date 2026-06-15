@@ -590,7 +590,7 @@ class TravelGameEnv:
             deception_competition_score,
             deception_competition_discrepancy,
             deception_competition_reward,
-            deception_competition_trust_from_history,
+            deception_competition_trust_update,
         )
 
         # Per-agent score + discrepancy (discrepancy computed for ALL, applied only to winners).
@@ -607,14 +607,15 @@ class TravelGameEnv:
                 claim=c, truth=truth, preferences=episode.preferences
             )
 
-        # Winners: highest score above threshold.
+        # Winners: highest score above threshold (threshold defaults to 0 under
+        # Option B — tau is dropped, so the top scorer is always booked).
         max_score = max(score_by_agent.values()) if score_by_agent else 0.0
         if max_score > episode.threshold:
             winners = sorted([aid for aid, s in score_by_agent.items() if s == max_score])
         else:
             winners = []
 
-        # Reward + trust update. Only winners' trust history advances under R.
+        # Reward, then PERSISTENT credibility update for EVERY agent (full info).
         rewards_by_agent: Dict[str, float] = {}
         trust_after: Dict[str, float] = {}
         for agent in episode.agent_states:
@@ -626,13 +627,14 @@ class TravelGameEnv:
                 threshold=episode.threshold,
                 num_winners=len(winners),
             )
-            if is_winner:
+            if is_winner:                                    # kept for stats only
                 agent.sum_discrepancy_when_won += discrepancy_by_agent[aid]
                 agent.win_count += 1
-                agent.trust = deception_competition_trust_from_history(
-                    sum_discrepancy_when_won=agent.sum_discrepancy_when_won,
-                    win_count=agent.win_count,
-                )
+            # Credibility erodes with this round's over-promise (every agent, every
+            # round), recovers with honesty — sustained lying compounds toward 0.
+            agent.trust = deception_competition_trust_update(
+                trust=agent.trust, discrepancy=discrepancy_by_agent[aid],
+            )
             trust_after[aid] = agent.trust
             agent.total_reward += rewards_by_agent[aid]
             agent.last_claim = list(cleaned_claims[agent.agent_index])

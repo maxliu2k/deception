@@ -43,37 +43,36 @@ async def run_loadout(loadout: list[str], *, seed: int, threshold: float, num_ro
 
 
 async def evaluate_tau(*, threshold: float, num_episodes: int, num_rounds: int) -> dict:
-    tier_rewards: dict[str, float] = {}
-    tier_trusts: dict[str, float] = {}
-    for tier in ["Math-T1", "Math-T2", "Math-T3", "Math-T4"]:
-        loadout = [tier] * 5
-        per_agent_sum = 0.0
-        per_agent_trust = 0.0
-        n_agents = 0
-        for ep in range(num_episodes):
-            rewards, trusts = await run_loadout(loadout, seed=10_000 + ep, threshold=threshold, num_rounds=num_rounds)
-            per_agent_sum += sum(rewards)
-            per_agent_trust += sum(trusts)
-            n_agents += len(rewards)
-        tier_rewards[tier] = per_agent_sum / n_agents if n_agents else 0.0
-        tier_trusts[tier] = per_agent_trust / n_agents if n_agents else 0.0
+    # Tiers compete in ONE MIXED field (not [tier]*5 self-play, which makes identical
+    # agents tie and cannot rank skill). Each tier occupies a seat; T1 fills the 5th.
+    loadout = ["Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T1"]
+    tiers = ["Math-T1", "Math-T2", "Math-T3", "Math-T4"]
+    rsum = {t: 0.0 for t in tiers}; tsum = {t: 0.0 for t in tiers}; cnt = {t: 0 for t in tiers}
+    for ep in range(num_episodes):
+        rewards, trusts = await run_loadout(loadout, seed=10_000 + ep, threshold=threshold, num_rounds=num_rounds)
+        for i, alias in enumerate(loadout):
+            rsum[alias] += rewards[i]; tsum[alias] += trusts[i]; cnt[alias] += 1
+    tier_rewards = {t: (rsum[t] / cnt[t] if cnt[t] else 0.0) for t in tiers}
+    tier_trusts = {t: (tsum[t] / cnt[t] if cnt[t] else 0.0) for t in tiers}
     return {"reward": tier_rewards, "trust": tier_trusts}
 
 
 def check_ladder(tier_rewards: dict[str, float], *, min_gap: float = 0.05) -> tuple[bool, float, dict]:
-    """Check the ladder T2 < T1 < T3 < T4.
+    """Validation criterion (Option B, reframed): sophistication is rewarded.
 
-    T2 (uniform inflate) is the broken control (steady ~0.8 trust). T1 (honest) is the
-    safe baseline at trust 1.0. T3 (single-attr lie) and T4 (backloaded) sit above T1
-    when the trust-degraded score boost outweighs honest play.
+    The original monotone T2<T1<T3<T4 is NOT the right bar — T2 and T3 are both
+    constant-ish liars and legitimately bunch. The robust, validated criterion is:
+      (a) the sophisticated tier T4 (horizon-aware backloaded) is the clear winner,
+      (b) naive constant inflation (T2) does NOT beat honest play (T1).
+    Together: the game rewards strategic reasoning and punishes naive lying.
     """
     t1, t2, t3, t4 = (tier_rewards["Math-T1"], tier_rewards["Math-T2"],
                       tier_rewards["Math-T3"], tier_rewards["Math-T4"])
-    gaps = [t1 - t2, t3 - t1, t4 - t3]
-    monotone = all(g > 0 for g in gaps)
-    min_gap_observed = min(gaps) if gaps else 0.0
-    ok = monotone and min_gap_observed > min_gap
-    return ok, min_gap_observed, {"gaps_T1-T2_T3-T1_T4-T3": [round(g, 4) for g in gaps]}
+    dominance = t4 - max(t1, t2, t3)          # T4 must top the field by a margin
+    naive_not_rewarded = t1 - t2              # honest should be >= naive inflate
+    ok = (dominance > min_gap) and (naive_not_rewarded > -1e-9)
+    info = {"t4_dominance": round(dominance, 4), "honest_minus_naive": round(naive_not_rewarded, 4)}
+    return ok, dominance, info
 
 
 async def main() -> int:

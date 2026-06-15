@@ -185,6 +185,22 @@ def train_one(
 
     if best_state is not None:
         model.load_state_dict(best_state)
+
+    # Calibrated per-attribute residual std of the claim regressor over the
+    # positions it is actually used for (lied attributes). Saved with the
+    # checkpoint and added as Gaussian noise at inference so the mimic reproduces
+    # each LLM's claim SPREAD, not just the conditional mean (fixes the
+    # distributional under-dispersion that inflates TVD).
+    model.eval()
+    with torch.no_grad():
+        _, claim_pred_tr = model(torch.from_numpy(X_tr).to(device))
+    resid = claim_pred_tr.cpu().numpy() - y_claim_tr            # (n, 5)
+    lied = y_lied_tr > 0.5
+    claim_resid_std = []
+    for a in range(y_claim_tr.shape[1]):
+        col = resid[lied[:, a], a]
+        claim_resid_std.append(round(float(np.std(col)), 4) if col.size > 1 else 0.0)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "alias": bidder_name,
@@ -192,13 +208,15 @@ def train_one(
         "hidden": args.hidden,
         "num_attrs": 5,
         "state_dict": model.state_dict(),
+        "claim_resid_std": claim_resid_std,
     }, out_path)
-    print(f"  [{bidder_name}] saved -> {out_path}")
+    print(f"  [{bidder_name}] saved -> {out_path}  (claim_resid_std={claim_resid_std})")
     return {
         "alias": bidder_name,
         "n_train": int(len(train_rows)),
         "n_val": int(len(val_rows)),
         "best_val_loss": float(best_val),
+        "claim_resid_std": claim_resid_std,
     }
 
 

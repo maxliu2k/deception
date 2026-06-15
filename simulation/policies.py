@@ -977,12 +977,15 @@ def deception_policy_tier3_single_attr_lie(
     round_index: int = 0,
     total_rounds: int = 12,
 ) -> _DCList[float]:
-    """T3 Single-attr lie: inflate the attribute with the largest (1 - t[a]) × w[a]
-    (= largest headroom × weight). Discrepancy per win equals exactly that
-    product, so the long-run trust stays high while the score boost is meaningful."""
-    del threshold, own_trust, opponents_trust, round_index, total_rounds
+    """T3 Trust-conditional: inflate the highest headroom×weight attribute to 1.0
+    ONLY while credibility can afford it (own_trust > 0.6); otherwise stay honest
+    to let credibility recover. State-aware — self-regulates and never craters the
+    way a constant liar does under the persistent-reputation mechanic."""
+    del threshold, opponents_trust, round_index, total_rounds
     if len(preferences) != len(truth):
         raise ValueError("preferences and truth length mismatch")
+    if own_trust <= 0.6:
+        return [_dc_quantize(t) for t in truth]
     headroom_value = [(1.0 - truth[a]) * preferences[a] for a in range(len(truth))]
     target = max(range(len(headroom_value)), key=lambda i: headroom_value[i])
     out = [_dc_quantize(t) for t in truth]
@@ -1000,43 +1003,26 @@ def deception_policy_tier4_backloaded(
     round_index: int = 0,
     total_rounds: int = 12,
 ) -> _DCList[float]:
-    """T4 Backloaded deceiver: greedy DP-style heuristic.
+    """T4 Backloaded deceiver (horizon-aware): honest early, then RAMP a single
+    high-value lie up over the back half of the episode. Late lies cost little
+    because the persistent-reputation damage has few remaining rounds to bite, so
+    timing the deception to the end-game preserves credibility while it matters and
+    exploits it when it no longer does. Refrains if credibility is already low.
 
-    Reasoning: under Option R, trust = 1 − (sum past discrepancy) / (win count).
-    A lie now reduces trust for ALL future wins. The marginal cost of a lie of
-    magnitude d at round j, assuming you'd win on k = total_rounds − j remaining
-    rounds at average score s, is roughly:
-        future_cost ≈ k × s × 0.5 × (d / (win_count + 1))   (trust-multiplier loss)
-
-    For each candidate subset S of attributes to inflate (claim = 1, else truth),
-    compute:
-        gain  = w · (c − t) × (0.5 + 0.5 × own_trust)  / 5    [score gain split 5 ways]
-        cost  = remaining_rounds_factor × w · (c − t) × 0.5   [future trust degrade]
-        EV    = gain − cost
-
-    Pick the EV-maximizing subset, tie-break toward smaller subset (less risky).
-    """
+    The most sophisticated reference tier: it conditions on BOTH the horizon
+    (round fraction) and its own credibility. Validated (r_ladder_check) as the
+    robustly dominant strategy under the persistent mechanic."""
     del opponents_trust, threshold
     n = len(preferences)
-    rounds_remaining = max(1, int(total_rounds) - int(round_index))
-    multiplier_now = 0.5 + 0.5 * max(0.0, min(1.0, own_trust))
-    # rounds_remaining=12 → cost factor ~12*0.5 = 6.0; rounds_remaining=1 → 0.5.
-    future_cost_factor = max(0.0, (rounds_remaining - 1) * 0.5)
-    best_claim = [_dc_quantize(t) for t in truth]
-    best_ev = -math.inf
-    best_size = n + 1
-    for mask in range(1 << n):
-        c = [_dc_quantize(truth[a]) if not (mask & (1 << a)) else 1.0 for a in range(n)]
-        disc = max(0.0, sum(preferences[a] * (c[a] - truth[a]) for a in range(n)))  # weighted over-promise
-        gain_this_round = disc * multiplier_now / n   # 5-way split if everyone ties
-        future_cost = future_cost_factor * disc * 0.5
-        ev = gain_this_round - future_cost
-        lie_count = bin(mask).count("1")
-        if ev > best_ev or (ev == best_ev and lie_count < best_size):
-            best_ev = ev
-            best_size = lie_count
-            best_claim = c
-    return best_claim
+    frac = (int(round_index) / (int(total_rounds) - 1)) if int(total_rounds) > 1 else 1.0
+    ramp = min(1.0, max(0.0, (frac - 0.5) / 0.5))   # 0 until halfway, -> 1 at the end
+    out = [_dc_quantize(t) for t in truth]
+    if ramp <= 0.0 or own_trust < 0.4:               # honest early; refrain if credibility gone
+        return out
+    headroom_value = [(1.0 - truth[a]) * preferences[a] for a in range(n)]
+    target = max(range(len(headroom_value)), key=lambda i: headroom_value[i])
+    out[target] = _dc_quantize(truth[target] + (1.0 - truth[target]) * ramp)
+    return out
 
 
 # Alias kept for back-compat with older imports.

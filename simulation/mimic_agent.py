@@ -385,6 +385,7 @@ class _DeceptionMimic(nn.Module):
         )
         self.lie_head = nn.Linear(hidden, num_attrs)
         self.claim_head = nn.Linear(hidden, num_attrs)
+        self.claim_resid_std: list[float] | None = None   # per-attr noise std, loaded from checkpoint
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x = (x - self.input_mean) / self.input_std
@@ -419,6 +420,7 @@ def _load_deception_mimic(alias: str) -> _DeceptionMimic | None:
         num_attrs=int(payload.get("num_attrs", 5)),
     )
     model.load_state_dict(payload["state_dict"])
+    model.claim_resid_std = payload.get("claim_resid_std")
     model.eval()
     _DECEPTION_NET_CACHE[alias] = model
     return model
@@ -429,6 +431,10 @@ def deception_mimic_claim(
     truth: list[float],
     own_trust: float,
     opponents_trust: list[float],
+    *,
+    round_index: int = 0,
+    total_rounds: int = 12,
+    history: list[dict] | None = None,
 ) -> list[float]:
     """Return a 5-float claim vector for the named mimic.
 
@@ -437,16 +443,29 @@ def deception_mimic_claim(
       - For each attr: sample/argmax lie decision → if no lie, snap claim to truth
         (avoids float-noise spurious catches); if lie, quantize the regressor
         output to 2dp.
+
+    Feature schema matches extract_deception_dataset.py. If the loaded model was
+    trained on the 14-dim schema it gets the round/history block appended; a legacy
+    10-dim model gets only the base block (so both checkpoints keep working).
     """
     model = _load_deception_mimic(alias)
     if model is None:
         # Mimic not yet trained — fall back to honest play.
         return [round(float(t), 2) for t in truth]
 
-    # Build input. Truth (5) + own_trust (1) + opponents_trust (4).
+    # Base block: truth (5) + own_trust (1) + opponents_trust (4).
     if len(opponents_trust) < 4:
         opponents_trust = list(opponents_trust) + [1.0] * (4 - len(opponents_trust))
     x = list(truth[:5]) + [float(own_trust)] + [float(o) for o in opponents_trust[:4]]
+    # History block (must match the extractor's ordering): round timing + lag + win rate.
+    in_dim = int(model.input_mean.shape[0]) if hasattr(model, "input_mean") else len(x)
+    if in_dim >= 14:
+        hist = history or []
+        round_frac = round_index / max(1, total_rounds - 1)
+        last_disc = float(hist[-1].get("your_over_promise", 0.0)) if hist else 0.0
+        last_won = 1.0 if (hist and hist[-1].get("you_won")) else 0.0
+        win_rate = (sum(1 for h in hist if h.get("you_won")) / round_index) if round_index > 0 else 0.0
+        x = x + [round_frac, last_disc, last_won, win_rate]
     x_tensor = torch.tensor([x], dtype=torch.float32)
     with torch.no_grad():
         lie_logits, raw_claim = model(x_tensor)
@@ -454,6 +473,7 @@ def deception_mimic_claim(
     raw = raw_claim.squeeze(0).cpu().numpy()
 
     T = _temperature()
+    resid_std = model.claim_resid_std   # per-attr calibrated noise std (or None for legacy)
     out: list[float] = []
     for a in range(5):
         if T > 0:
@@ -461,7 +481,12 @@ def deception_mimic_claim(
         else:
             lie_a = float(p_lie[a]) > 0.5
         if lie_a:
-            out.append(round(max(0.0, min(1.0, float(raw[a]))), 2))
+            val = float(raw[a])
+            # Calibrated noise: reproduce the LLM's claim spread, not just the mean.
+            sigma = float(resid_std[a]) if resid_std is not None and a < len(resid_std) else 0.0
+            if T > 0 and sigma > 0:
+                val += _stdlib_random.gauss(0.0, sigma * T)
+            out.append(round(max(0.0, min(1.0, val)), 2))
         else:
             out.append(round(float(truth[a]), 2))
     return out

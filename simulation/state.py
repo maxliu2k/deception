@@ -445,7 +445,7 @@ class DeceptionEpisodeState:
     """Full deception-competition episode (12 rounds)."""
     num_rounds: int = 12
     preferences: List[float] = field(default_factory=list)   # w, 5 floats summing to 1
-    threshold: float = 0.4                                   # τ — the only game knob
+    threshold: float = 0.0                                   # τ dropped (Option B): top scorer always booked
     truth_seed: int = 0                                      # for reproducibility
     truth_schedule: List[List[float]] = field(default_factory=list)   # 12 pre-sampled 5-float truths
     round_idx: int = 0                                       # next round to play (0..num_rounds)

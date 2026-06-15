@@ -462,7 +462,7 @@
         if (mode === "open_painting_auction") {
           return [
             ["bidder1", "Bidder 1", "GPT-5.4"],
-            ["bidder2", "Bidder 2", "Sonnet"],
+            ["bidder2", "Bidder 2", "Opus"],
             ["bidder3", "Bidder 3", "Flash"],
             ["bidder4", "Bidder 4", "Llama"],
             ["bidder5", "Bidder 5", "Mathematical"],
@@ -471,7 +471,7 @@
         if (mode === "buyer_seller_negotiation") {
           return [
             ["customer", "Buyer", "GPT-5.4"],
-            ["agent", "Seller", "Sonnet"],
+            ["agent", "Seller", "Opus"],
             ["neg3", "Model Slot 3", "Flash"],
             ["neg4", "Model Slot 4", "Llama"],
             ["neg5", "Model Slot 5", "Mathematical"],
@@ -480,7 +480,7 @@
         if (mode === "five_attr") {
           return [
             ["customer", "Buyer", "GPT-5.4"],
-            ["agent", "Agent", "Sonnet"],
+            ["agent", "Agent", "Opus"],
             ["five3", "Model Slot 3", "Flash"],
             ["five4", "Model Slot 4", "Llama"],
             ["five5", "Model Slot 5", "Truthful"],
@@ -510,7 +510,7 @@
         mode = canonicalMode(mode);
         const out = migrateLegacyDefaultModels(mode, Array.isArray(models) ? models : []);
         if (mode === "five_attr") {
-          const defaults = ["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+          const defaults = ["GPT-5.4", "Opus", "Flash", "Llama", "Truthful"];
           const cleaned = Array.isArray(out) ? out.filter((m) => MODEL_POOL.includes(m)) : [];
           if (cleaned.length === 3 && cleaned[0] === "Haiku" && cleaned[1] === "Sonnet" && cleaned[2] === "Pro") {
             return [...defaults];
@@ -650,7 +650,7 @@
         const out = [...models];
         if (mode === "five_attr") {
           if (out.length === 3 && out[0] === "Haiku" && out[1] === "Sonnet" && out[2] === "Pro") {
-            return ["GPT-5.4", "Sonnet", "Flash", "Llama", "Truthful"];
+            return ["GPT-5.4", "Opus", "Flash", "Llama", "Truthful"];
           }
           if (out.length >= 5 && out[4] === "Mathematical") {
             out[4] = "Truthful";

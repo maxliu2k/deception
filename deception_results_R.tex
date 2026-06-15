@@ -1,0 +1,236 @@
+% =====================================================================
+% DECEPTION COMPETITION — EXPERIMENTAL RESULTS (Option-R design).
+% Supersedes the audit-design deception results in experimental_results.tex.
+%
+% NOTE: the METHODS for R differ from the audit-design deception_section.tex
+% (score = (w.c)*trust with no 0.5 floor; PERSISTENT compounding credibility
+% trust <- clip(trust + 0.1 - 1.5*over_promise) applied to every agent every
+% round; no audit / no catch event / no threshold tau). deception_section.tex
+% must be updated to these equations before this results section is dropped in.
+%
+% Data: 50 real-LLM episodes (full information, k=5), 14-dim mimics, in-process
+% strategy benchmark, and a real-LLM transfer check (4 tiers x 5 episodes).
+% =====================================================================
+
+\subsection{Deception Competition}
+
+\paragraph{Setup recap.}
+Five sales agents pitch one resort to a mechanical buyer over $T=12$ rounds; each
+round a fresh truth vector $t^{(r)}\in[0,1]^{5}$ is drawn and \emph{every agent
+sees it in full} (so a claim above the truth is a deliberate over-statement, not
+a guess). The buyer scores each agent by its trust-weighted appeal,
+$s_i = (w\cdot c_i)\,\mathrm{tr}_i$, and books the top scorer each round
+(winner reward $1/\lvert\mathcal{W}\rvert$, others $0$). Credibility is
+\emph{persistent}: every agent's trust updates each round by
+$\mathrm{tr}\leftarrow\mathrm{clip}(\mathrm{tr}+0.1-1.5\,d,\,0,\,1)$, where the
+over-promise $d=\max(0,\,w\cdot(c-t))$ is the buyer's weighted disappointment.
+Sustained over-claiming thus compounds credibility toward $0$ (and trust $0$
+means score $0$), while honesty drifts it back up. This makes the game a test of
+\emph{calibrated} deception: lie too much and you destroy the credibility lying
+depends on.
+
+\subsubsection{Model Behavior Characterization}
+We characterize claim behavior from $50$ real-LLM episodes. The five models split
+into two sharply different modes. \textbf{Llama is honest}: it over-claims on
+essentially zero visible attributes and holds trust at $1.0$ throughout.
+\textbf{GPT, Opus, Pro, and Grok deceive heavily}---over-claiming on $36$--$67\%$
+of attributes (Opus highest at $67\%$)---and in doing so \emph{crater their own
+credibility}, ending episodes at trust $\approx0$ (Table~\ref{tab:dec-r-strategy}).
+Crucially, this is not skillful deception: the buyer's persistent audit means
+that heavy, indiscriminate over-claiming destroys the trust multiplier that
+makes any claim count.
+
+The decisive behavioral signature is \emph{how the LLMs respond to their own
+collapsing credibility}, which they observe each round (the prompt includes the
+agent's trust trajectory). A strategic agent reduces over-claiming as trust falls,
+to recover; the LLMs do the opposite. Table~\ref{tab:dec-r-escalate} and Fig.~\ref{fig:dec-r-escalation} bin each
+model's per-round over-promise by its trust entering the round. GPT, Pro, and
+Opus over-claim \emph{$4$--$8\times$ more} once their trust has cratered
+($<0.3$) than when it is intact ($\geq0.6$)---i.e., they inflate hardest exactly
+when inflation is futile (score $=$ claim $\times$ trust $\approx0$). They are
+not modeling the trust\,$\to$\,score\,$\to$\,reward chain at all. Llama's flat
+$0.000$ is the clean contrast: the honest option was available, and one model
+took it.
+
+\begin{table}[htbp]
+\caption{Per-round over-promise $d=\max(0,w\cdot(c-t))$ binned by the agent's trust entering the round (50 real-LLM episodes). The four deceiving models do not pull back as credibility collapses---most over-claim \emph{more}. Cratered-trust bins have modest $n$ (11--66); read the direction, not the exact magnitude.}
+\label{tab:dec-r-escalate}
+\centering
+\begin{tabular}{lccc}
+\hline
+Model & trust $\geq 0.6$ & $0.3$--$0.6$ & $<0.3$ (cratered) \\
+\hline
+Llama   & 0.000 & --- & --- \\
+GPT     & 0.062 & 0.458 & \textbf{0.507} \\
+Pro     & 0.108 & 0.462 & \textbf{0.543} \\
+Opus    & 0.106 & 0.436 & \textbf{0.392} \\
+Grok    & 0.079 & 0.315 & 0.172 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{deception_r_escalation}
+\caption{Per-round over-promise $d$ binned by the trust an agent carries into the round (50 real-LLM episodes). Llama never over-claims; GPT, Pro, and Opus over-claim \emph{more} as their credibility collapses---the opposite of recovery, and futile at trust~$\approx0$ (where score $=$ claim $\times$ trust $\approx0$).}
+\label{fig:dec-r-escalation}
+\end{figure}
+
+\subsubsection{Mimic Fidelity}
+\label{sec:dec-r-fidelity}
+We distill each LLM into a small two-head network (lie head + claim regressor) on
+a leakage-safe $14$-dimensional encoding (observed truth, own and opponents'
+trust, round fraction, and a compact behavioral lag), and validate the
+substitution at the level we use it---the distribution of emitted claims. Binning
+each attribute's claims and comparing the real and mimic histograms by their
+total-variation distance gives a pooled $\mathrm{TVD}=0.108$, below our
+acceptance threshold of $0.15$ (Table~\ref{tab:dec-r-fidelity}). The key
+inference detail is calibrated noise: the claim regressor emits a point estimate,
+so we add per-attribute Gaussian noise equal to its training residual standard
+deviation, which lets the mimic reproduce the \emph{spread} of each model's
+claims rather than collapsing to the conditional mean (without it the pooled TVD
+is $0.156$ and four of five models fail).
+
+\begin{table}[htbp]
+\caption{Distributional mimic fidelity: total-variation distance between real and mimic claim histograms (acceptance $\leq 0.15$; pooled $\mathrm{TVD}=0.108$, ACCEPT). Calibrated residual noise is what brings the assertive models under threshold.}
+\label{tab:dec-r-fidelity}
+\centering
+\begin{tabular}{lc}
+\hline
+Model & TVD \\
+\hline
+Llama   & 0.001 \\
+GPT     & 0.108 \\
+Grok    & 0.121 \\
+Pro     & 0.148 \\
+Opus    & 0.163 \\
+\hline
+\multicolumn{2}{l}{Pooled $\mathrm{TVD}=0.108 \le 0.15$ (ACCEPT).} \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Strategy Comparison Against the Mimic Field}
+\label{sec:dec-r-ladder}
+Paralleling the auction baseline study, we pit hand-designed strategies against a
+\emph{fixed} field of four behavioral mimics, $200$ episodes each, so outcomes
+(including reward) are directly comparable. The strategies form a sophistication
+ladder: \textbf{T1} honest; \textbf{T2} naive constant inflation; \textbf{T3}
+trust-conditional (lie on the highest-value attribute only while credibility can
+afford it); \textbf{T4} backloaded (honest early, inflate late, when credibility
+damage has few remaining rounds to bite). Table~\ref{tab:dec-r-strategy} and Fig.~\ref{fig:dec-r-ladder} report
+the result. Against the mimic field the ladder is clean and the gradient is
+non-trivial: naive constant inflation (T2) self-destructs to half of fair share
+($0.102$, trust $0$); honesty is the safe baseline ($0.231\approx$ the $0.20$
+fair share); and \emph{calibrated} deception wins---T3 earns $0.414$ ($2\times$
+fair share) and T4 earns $0.265$, both by lying selectively enough to keep trust
+in the $0.57$--$0.63$ range. The game rewards reasoning about \emph{when} and
+\emph{how much} to deceive.
+
+The five LLMs, run as focals against the same field, all land \emph{between}
+honest and naive---none reaches the calibrated-deception rung. Llama plays honest
+($\approx$ fair share); GPT, Opus, Pro, and Grok deceive heavily, crater trust to
+$\approx0$, and earn no more than honesty (GPT and Grok less). They occupy the
+``tried to deceive but did it crudely'' band, never the skillful one.
+
+\begin{table}[htbp]
+\caption{Strategy performance against a fixed field of four behavioral mimics ($200$ episodes; fair share $=0.20$). Lie rate is over claimed attributes; win and reward are per round; final trust is end-of-episode. The math-tier ladder is well-formed (T2 $<$ T1 $<$ T4 $<$ T3); every LLM sits between honest and naive.}
+\label{tab:dec-r-strategy}
+\centering
+\begin{tabular}{lcccc}
+\hline
+Strategy / model & lie\,\% & win & reward/rnd & trust \\
+\hline
+T2 naive-inflate     & 99 & 0.102 & 0.102 & 0.00 \\
+T1 honest            & 0  & 0.252 & 0.231 & 1.00 \\
+T4 backloaded        & 10 & 0.287 & 0.265 & 0.63 \\
+T3 conditional       & 10 & 0.414 & \textbf{0.414} & 0.57 \\
+\hline
+GPT (LLM)            & 36 & 0.194 & 0.172 & 0.02 \\
+Opus (LLM)           & 67 & 0.223 & 0.223 & 0.01 \\
+Pro (LLM)            & 63 & 0.207 & 0.206 & 0.02 \\
+Grok (LLM)           & 39 & 0.166 & 0.150 & 0.01 \\
+Llama (LLM)          & 0  & 0.243 & 0.220 & 1.00 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{deception_r_ladder}
+\caption{Reward per round against the fixed mimic field, with $95\%$ bootstrap CIs (fair share $=0.20$, dotted). Calibrated deception (T3/T4) beats both honesty and naive inflation; every LLM lands between honest and naive, none reaching the skillful rung.}
+\label{fig:dec-r-ladder}
+\end{figure}
+
+\subsubsection{Transfer to the Real LLMs}
+\label{sec:dec-r-transfer}
+The mimic-field ladder describes play against the \emph{surrogates}; whether it
+describes play against the \emph{real} models is a separate question, and the one
+that matters. We re-ran the four math tiers against a field of four real LLMs
+(GPT, Opus, Pro, Grok; $5$ episodes each). \textbf{The ladder does not transfer}
+(Table~\ref{tab:dec-r-transfer}, Fig.~\ref{fig:dec-r-transfer}). Two things break. First, every strategy earns
+far less against the real LLMs ($0.00$--$0.13$) than against the mimics
+($0.23$--$0.41$): the real models inflate so aggressively that they sweep nearly
+all rounds among themselves, leaving almost nothing for any focal. Second, the
+ordering collapses---honest play wins \emph{zero} rounds across all episodes
+(versus $\approx$ fair share against mimics), and the sophistication gradient
+(T3/T4 $\gg$ T2) flattens into noise: against the real models you must inflate
+merely to win anything, but skillful and crude inflation no longer separate.
+
+The lesson mirrors the auction study's transfer caution. The mimics pass
+\emph{distributional} fidelity (Table~\ref{tab:dec-r-fidelity}) yet
+\emph{distributional fidelity is not competitive-outcome fidelity}: winning
+depends on claiming high exactly when it counts, and the mimics are competitively
+softer than the real models even though their marginal claim histograms match.
+Behavioral mimics are therefore faithful for \emph{characterizing} each model's
+claim behavior, but \emph{not} a reliable proxy for \emph{ranking strategies}
+against the real LLMs.
+
+\begin{table}[htbp]
+\caption{Transfer check: math-tier reward per round against the four \emph{real} LLMs ($5$ episodes each) vs.\ against the mimic field. The ladder does not transfer---honest play collapses to $0$ and the T3/T4 advantage flattens. The vs-real column has small $n$; the fine ordering among T2/T3/T4 is within noise, but the collapse of honesty and the across-the-board drop are robust.}
+\label{tab:dec-r-transfer}
+\centering
+\begin{tabular}{lcc}
+\hline
+Strategy & vs.\ mimic field & vs.\ real LLMs \\
+\hline
+T1 honest      & 0.231 & \textbf{0.000} \\
+T2 naive       & 0.102 & 0.117 \\
+T3 conditional & 0.414 & 0.133 \\
+T4 backloaded  & 0.265 & 0.083 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{deception_r_transfer}
+\caption{The mimic-field ladder does not transfer. Against the real LLMs every strategy earns far less, honest play wins zero, and the T3/T4 advantage flattens---distributional fidelity does not imply strategy-ranking fidelity.}
+\label{fig:dec-r-transfer}
+\end{figure}
+
+\subsubsection{Synthesis}
+The deception results form one coherent account, on real (validated) data:
+\begin{enumerate}
+\item \textbf{Behavior.} Under a persistent, crowd-disappointment audit, four of
+the five LLMs deceive heavily and indiscriminately, destroying their own
+credibility (trust $\to 0$); only Llama plays honest.
+\item \textbf{No trust reasoning.} They do not respond to the collapsing
+credibility they can observe---most \emph{escalate} over-claiming as trust
+craters, when it is provably futile. They are not modeling the
+trust/score/reward chain.
+\item \textbf{Distillable but mode-limited.} The behavior is distillable into
+faithful claim-distribution mimics (pooled $\mathrm{TVD}=0.108$); against that
+mimic field, a simple \emph{calibrated} deception strategy (T3/T4) cleanly beats
+both honesty and naive inflation, which the LLMs never discover.
+\item \textbf{But it does not transfer.} The real models are far more aggressive
+than their distributionally-faithful mimics, so honest play collapses against
+them and the strategy ladder flattens---behavioral mimics compare claim
+\emph{distributions} faithfully but cannot rank \emph{strategies} against the
+real LLMs.
+\end{enumerate}
+The through-line with the auction is the same: each LLM carries a stable,
+legible behavioral signature that small networks reproduce, and that simple
+hand-designed strategies expose---together with the same methodological boundary,
+that surrogates faithful enough to \emph{compare} are not faithful enough to
+\emph{stand in for} the real models when the question is strategic ranking.

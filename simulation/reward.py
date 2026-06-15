@@ -333,15 +333,16 @@ def deception_competition_score(
 ) -> float:
     """Buyer's perceived booking score for an agent.
 
-    score = (w · c) × (0.5 + 0.5 × trust)
+    score = (w · c) × trust            (Option B: M(trust)=trust, no 0.5 floor)
 
-    Trust 1.0 → 1.0× multiplier; trust 0.0 → 0.5× floor. Score is uncapped;
-    the env compares it to the threshold to decide winners.
+    Trust 1.0 → full appeal; trust 0.0 → zero (a fully discredited agent cannot
+    win). Dropping the old 0.5 floor is what lets sustained lying actually cost
+    you. Score is uncapped; the env compares it to the threshold to pick winners.
     """
     if len(claim) != len(preferences):
         raise ValueError(f"claim and preferences length mismatch: {len(claim)} vs {len(preferences)}")
     raw = sum(c * w for c, w in zip(claim, preferences))
-    multiplier = 0.5 + 0.5 * max(0.0, min(1.0, trust))
+    multiplier = max(0.0, min(1.0, trust))
     return raw * multiplier
 
 
@@ -393,3 +394,28 @@ def deception_competition_trust_from_history(
         return 1.0
     avg_discrepancy = float(sum_discrepancy_when_won) / float(win_count)
     return max(0.0, min(1.0, 1.0 - avg_discrepancy))
+
+
+# ── Persistent reputation (Option B) ─────────────────────────────────────────
+# Replaces the forgiving average-of-wins trust above. Validated (r_ladder_check):
+# the average-of-wins rule let constant lying settle at a comfortable ~0.8 and
+# win; a persistent, compounding credibility makes sustained lying decay toward 0
+# while letting well-timed/targeted deception still pay — an interior optimum.
+DECEPTION_TRUST_LAMBDA = 1.5     # credibility lost per unit of weighted over-promise
+DECEPTION_TRUST_RECOVERY = 0.1   # credibility regained per round (~10 honest rounds = full)
+
+
+def deception_competition_trust_update(
+    *, trust: float, discrepancy: float,
+    lam: float = DECEPTION_TRUST_LAMBDA, recovery: float = DECEPTION_TRUST_RECOVERY,
+) -> float:
+    """Persistent per-round credibility update, applied to EVERY agent each round
+    (full information: the buyer evaluates all claims against the known truth, not
+    only the booked one):
+
+        trust ← clip(trust + recovery − lam · max(0, over_promise), 0, 1)
+
+    Sustained over-promising compounds the agent toward 0; honesty drifts it back
+    up by `recovery` per round.
+    """
+    return max(0.0, min(1.0, trust + recovery - lam * max(0.0, discrepancy)))
