@@ -3,9 +3,11 @@
 %   CHUNK 1 -> goes in \section{Methodology}
 %   CHUNK 2 -> goes in \section{Experimental Results}
 % Names: Trivial / Fair-Share / Reactive / Market-Clearing heuristics + RL (PPO).
-% Real auctions n=10; mimic n=30. Figures: upload auction_bids.pdf and
-% math_wins_by_position.pdf to the Overleaf project (extensionless \includegraphics).
-% Needs \cite{milgromweber1982} in the bibliography.
+% Real auctions n=10; mimic n=30. Figure: upload auction_bids.pdf to the
+% Overleaf project (extensionless \includegraphics).
+% NOTE: the Milgrom-Weber sentence + \cite{MilgromWeber} are now COMMENTED OUT in the
+% intro to match the professor draft. Uncomment the ``Formally this is...'' line to
+% restore the reservation-price grounding (then keep \bibitem{MilgromWeber} in the bib).
 % =====================================================================
 
 
@@ -13,26 +15,21 @@
 % ## CHUNK 1 — METHODOLOGY
 % #####################################################################
 
-\subsection{Five-Agent Auction}
-To investigate LLM behavior in a constrained strategic setting, we designed a sequential open-ascending auction over twelve identical paintings. Five bidders compete in turn order, each starting with a budget of \$10,000. On each turn a bidder either raises the current bid (subject to a tiered minimum-raise schedule) or passes, with passes being permanent for the current painting. A painting resolves when only one active bidder remains; that bidder pays their final bid and wins the painting. The objective is to win as many paintings as possible; money is worthless in the reward function. Because the paintings are undifferentiated, the strategic problem is purely one of budget allocation and timing: when to commit, when to fold, and how to respond to opponents' commitments. Formally this is a finite sequential open-ascending (English) auction with budget-constrained bidders and irrevocable exit (a bidder that passes cannot re-enter for the current lot). When bids advance by the minimum increment (as our deterministic baselines do by construction, and the LLMs do on the large majority of turns), the mechanism coincides with a Japanese button auction, in which a bidder's play reduces to a \emph{reservation-price} (drop-out) strategy: a state-dependent price at which it leaves the contest for the current lot~\cite{milgromweber1982}. This setting lets us compare LLM bidders against principled deterministic policies that operate over the same observable state, defined in Section~\ref{sec:auction-baselines}.
+\subsection{Multi-Agent Auction}
+To investigate LLMs' behavior in a constrained strategic setting, we designed a sequential open-ascending auction over twelve identical paintings. Five bidders compete in turn order, each starting with a budget of \$10,000. On each turn a bidder either raises the current bid (subject to a tiered minimum-raise schedule) or passes, with passes being permanent for the current painting. A painting resolves when only one active bidder remains; that bidder pays their final bid and wins the painting. The objective is to win as many paintings as possible; money is worthless in the reward function. Because the paintings are undifferentiated, the strategic problem is purely one of budget allocation and timing: when to commit, when to fold, and how to respond to opponents' commitments.
+%Formally this is a finite sequential open-ascending (English) auction with budget-constrained bidders and irrevocable exit (a bidder that passes cannot re-enter for the current lot). When bids advance by the minimum increment (as our deterministic baselines do by construction, and the LLMs do on the large majority of turns), the mechanism coincides with a Japanese button auction, in which a bidder's play reduces to a \emph{reservation-price} (drop-out) strategy: a state-dependent price at which it leaves the contest for the current lot~\cite{MilgromWeber}. This setting lets us compare LLM bidders against principled deterministic policies that operate over the same observable state, defined in Section~\ref{sec:auction-baselines}.
 
 \subsubsection{Behavioral Mimics}
 \label{sec:mimics}
-Comparing LLMs against the baselines is slow and costly to run at scale. A single real-LLM auction makes hundreds of sequential model calls (roughly 70 decisions for each of the five bidders) and costs a few dollars in API credits, whereas a mimic auction is essentially free and finishes in seconds. Our baseline comparison alone spans hundreds of auctions across several policies and seeds, so running it against real LLMs would cost on the order of hundreds of dollars and tens of hours of wall-clock time, and every re-run as the policies or conditions change repeats that cost. We therefore train a \emph{behavioral mimic} of each LLM from a small sample of real auctions and use the mimics as drop-in replacements in the large-scale experiments. The tradeoff is explicit: we are no longer testing the LLMs directly, but networks trained to reproduce their behavior over the auction state space; Section~\ref{sec:fidelity-results} quantifies how faithful that substitution is.
+Running the baseline comparison against real LLMs is prohibitively slow and costly: a single auction makes hundreds of sequential model calls (roughly 70 per bidder), so the full sweep of hundreds of auctions across policies and seeds would run into hundreds of dollars and tens of hours, repeated on every change. We therefore train a \emph{behavioral mimic} of each LLM from a sample of real auctions and use the mimics as essentially free drop-in replacements at scale.
+%The tradeoff is explicit: we are no longer testing the LLMs directly, but networks trained to reproduce their behavior over the auction state space; Section~\ref{sec:fidelity-results} quantifies how faithful that substitution is.
 
 \subsubsection{Mimic Architecture and Training}
-For each of the five LLMs we train a pair of networks on a common encoding of the auction state. At the decision point of bidder $i$ on turn $t$, the public information is encoded as a normalized feature vector $\mathbf{x}^i_t \in \mathbb{R}^{32}$ formed by concatenating five blocks,
+For each of the five LLMs, we train a pair of networks on a common encoding of the auction state. At the decision point of bidder $i$ on turn $t$, the public information is encoded as a normalized feature vector $\mathbf{x}^i_t \in \mathbb{R}^{32}$ formed by concatenating five blocks,
 \begin{equation}
 \mathbf{x}^i_t = \big[\, \mathbf{x}_{\mathrm{prog}} \,\Vert\, \mathbf{x}_{\mathrm{round}} \,\Vert\, \mathbf{x}_{\mathrm{self}} \,\Vert\, \mathbf{x}_{\mathrm{prev}} \,\Vert\, \mathbf{x}_{\mathrm{opp}} \,\big],
 \end{equation}
-where $\Vert$ denotes concatenation and the shared bidder and turn indices $(i,t)$ are suppressed on the blocks. Budgets are normalized by the starting budget $B_0 = \$10{,}000$ and counts are left as raw integers. Writing $n_t$ for paintings remaining, $N_t$ for active bidders, $b_t$ and $\underline{b}_t$ for the current and minimum legal bids, and $\mathcal{O}^i$ for the opponents of bidder $i$ (with remaining budgets $\{B^j_t\}_{j\in\mathcal{O}^i}$ and paintings won $\{w^j_t\}$), the blocks are:
-\begin{itemize}
-\item Progress $\mathbf{x}_{\mathrm{prog}} \in \mathbb{R}^{3}$: the fraction of paintings elapsed, $n_t$, and a last-painting indicator $\mathbb{1}[n_t = 1]$.
-\item Round $\mathbf{x}_{\mathrm{round}} \in \mathbb{R}^{4}$: $b_t/B_0$, $\underline{b}_t/B_0$, $N_t$, and the turn-history length $h_t$.
-\item Self $\mathbf{x}_{\mathrm{self}} \in \mathbb{R}^{7}$: budget fraction $B^i_t/B_0$, budget relative to the mean opponent budget, budget relative to $\underline{b}_t$, paintings won $w^i_t$, deficit to the leader, the normalized fair share $B^i_t/(B_0\,n_t)$, and the bidder's own standing bid.
-\item Previous action $\mathbf{x}_{\mathrm{prev}} \in \mathbb{R}^{3}$: indicators for whether the previous turn was a raise and whether it was the bidder's own, and the previous bid $b_{t-1}/B_0$.
-\item Opponents $\mathbf{x}_{\mathrm{opp}} \in \mathbb{R}^{15}$: the mean, standard deviation, minimum, and maximum of $\{B^j_t/B_0\}$; the mean, standard deviation, and maximum of $\{w^j_t\}$; and the four largest opponent budgets and four largest opponent counts.
-\end{itemize}
+where $\Vert$ denotes concatenation and budgets are normalized by $B_0 = \$10{,}000$. With $n_t$ paintings remaining, minimum legal bid $\underline{b}_t$, opponent budgets $\{B^j_t\}$, and paintings won $\{w^j_t\}$, the five blocks (with dimensions) are progress ($\mathbf{x}_{\mathrm{prog}}\in\mathbb{R}^{3}$: paintings elapsed and a last-lot flag), round state ($\mathbf{x}_{\mathrm{round}}\in\mathbb{R}^{4}$: current and minimum legal bids, active bidders, and turn count), the bidder's own position ($\mathbf{x}_{\mathrm{self}}\in\mathbb{R}^{7}$: its budget in absolute, relative, and fair-share terms, paintings won, deficit to the leader, and standing bid), its previous action ($\mathbf{x}_{\mathrm{prev}}\in\mathbb{R}^{3}$), and opponent summaries ($\mathbf{x}_{\mathrm{opp}}\in\mathbb{R}^{15}$: order statistics of opponent budgets and win counts), concatenating to $32$ dimensions.
 The two heads map this vector to a bid. A classifier $f_\theta : \mathbb{R}^{32} \to [0,1]$ outputs the raise probability $p^i_t = f_\theta(\mathbf{x}^i_t)$, and a regressor $g_\psi : \mathbb{R}^{32} \to \mathbb{R}_{\ge 0}$ outputs the overbid $\delta^i_t = g_\psi(\mathbf{x}^i_t)$ above $\underline{b}_t$, measured in units of the legal raise increment $\Delta_t$. The emitted action, over the legal set $\mathcal{A}_t = \{\texttt{pass}\} \cup \{\texttt{raise}(v) : v \ge \underline{b}_t\}$, is
 \begin{equation}
 a^i_t =
@@ -43,7 +40,7 @@ a^i_t =
 \end{equation}
 where $\lfloor\cdot\rceil$ rounds to the nearest non-negative integer number of steps and $u^i_t \in \{0,1\}$ is the raise decision drawn from $p^i_t$ (sampled with temperature at deployment, as described below).
 
-The classifier is an MLP with two hidden layers of width 32 ($32\!\to\!32\!\to\!32\!\to\!1$), sigmoid activations, and dropout $0.2$, trained with binary cross-entropy. The regressor shares this shape with ReLU activations and a softplus output, trained with Huber loss on the subset of rows where the LLM raised. Each network carries its own z-score normalization parameters as buffers, so checkpoints are self-contained. We fit the mimics on 3{,}334 recorded decisions drawn from the ten real auctions, performing leave-one-episode-out cross-validation as an honest accuracy check before training the final models on all but one held-out episode; data from earlier mimic-vs-mimic runs is excluded to prevent self-feedback contamination. At deployment the mimics act \emph{stochastically} rather than greedily, sampling the raise/pass decision and perturbing the overbid under a temperature parameter, so they reproduce the variance of the source policy rather than collapsing to its modal action.
+The classifier is an MLP with two hidden layers of width 32 ($32\!\to\!32\!\to\!32\!\to\!1$), sigmoid activations, and dropout $0.2$, trained with binary cross-entropy. The regressor shares this shape with ReLU activations and a softplus output, trained with Huber loss on the subset of rows where the LLM raised. We fit the mimics on 3{,}334 decisions from the ten real auctions, using leave-one-episode-out cross-validation as an honest accuracy check and excluding earlier mimic-vs-mimic runs to avoid self-feedback. At deployment the mimics act \emph{stochastically}, sampling the raise/pass decision and perturbing the overbid under a temperature parameter, so they reproduce the source policy's variance rather than collapsing to its modal action.
 
 \subsubsection{Fidelity Validation Procedure}
 We validate the substitution at two levels. At the \emph{outcome} level we run real-LLM and mimic auctions under identical conditions and compare the resulting distributions of paintings won, treating the auction as the independent replicate and reporting the effect size (Cram\'er's $V$) together with auction-level bootstrap confidence intervals on the per-model win-share differences, plus a chi-squared test of independence as a secondary check. At the \emph{decision} level we report the leave-one-episode-out cross-validation accuracy of the raise/pass classifier and the overbid regressor's mean absolute error. Results are reported in Section~\ref{sec:fidelity-results}.
@@ -63,45 +60,49 @@ The caps form a ladder of increasing information use. With deficit-to-leader $d^
 \item \textbf{Trivial:} $c^i_t = \infty$. Raises whenever solvent; no state, no opponent reasoning. The ``do anything'' floor.
 \item \textbf{Fair-Share:} $c^i_t = 1.05\,B^i_t / n_t$. Spreads its own budget evenly across remaining paintings; no opponent information.
 \item \textbf{Reactive:} $c^i_t = (B^i_t / n_t)\,\kappa^i_t\,\eta_t$. Scales the fair share by the public scoreboard (win counts), but not opponent budgets.
-\item \textbf{Market-Clearing:} $c^i_t = m_t\,\kappa^i_t\,\eta_t$, where the competitive-equilibrium price $m_t = \tfrac{1}{n_t}\sum_{j} B^j_t\,\mathbb{1}[B^j_t \ge \underline{b}_t]$ sums over all solvent bidders $j$ (including $i$). Adds opponent-budget visibility; it is never less aggressive than Reactive (Proposition~1).
+\item \textbf{Market-Clearing:} $c^i_t = m_t\,\kappa^i_t\,\eta_t$, where the competitive-equilibrium price $m_t = \tfrac{1}{n_t}\sum_{j} B^j_t\,\mathbb{1}[B^j_t \ge \underline{b}_t]$ sums over all solvent bidders $j$ (including $i$). Adds opponent-budget visibility; because that base includes $i$ itself, it is by construction never less aggressive than Reactive.
 \end{itemize}
 
-\noindent\textbf{Proposition 1.} \emph{For a bidder that is itself solvent, the Market-Clearing cap is never below the Reactive cap: $c^{\mathrm{MC}}_t \ge c^{\mathrm{React}}_t$.}
-
-\noindent\emph{Proof.} The two caps apply the same catch-up and endgame factors $\kappa^i_t\eta_t$ to different bases: $\tfrac{1}{n_t}\sum_{j:\,B^j_t\ge\underline{b}_t} B^j_t$ for Market-Clearing and $\tfrac{1}{n_t}B^i_t$ for Reactive. A solvent bidder satisfies $B^i_t\ge\underline{b}_t$, so it belongs to the summation and $\sum_{j:\,B^j_t\ge\underline{b}_t} B^j_t \ge B^i_t$; multiplying both bases by the shared nonnegative factor preserves the inequality. \hfill$\square$
-
-\smallskip
 The fifth policy, \textbf{RL}, replaces the hand-coded rule with a learned stochastic policy $a^i_t \sim \pi_\phi(\cdot \mid \mathbf{x}^i_t)$ trained with PPO (clipped surrogate objective, GAE advantage estimation) for 4{,}000 episodes against the mimic ensemble. Each episode randomizes the learner's seat and samples four of the five mimics as opponents; the reward is the number of paintings won, so the policy approximates a best response to the mimic opponent population.
 
 \subsubsection{Experimental Design}
-Each baseline is evaluated in 50 auctions in which it occupies one seat and four mimics fill the rest, with the displaced mimic rotated so that each of the five is replaced an equal number of times; this yields 600 contested paintings per baseline. Seeds and seat permutations are varied across auctions to control for turn-order effects. With five equal bidders, a strategically neutral policy wins the fair share of $20\%$. To test whether these mimic-mediated results transfer, we additionally run each baseline against the five real LLMs (5 auctions, 60 paintings, per baseline).
+Each baseline is evaluated in 50 auctions in which it occupies one seat and four mimics fill the rest, with the displaced mimic rotated so that each of the five is replaced an equal number of times; this yields 600 contested paintings per baseline. Seeds and seat permutations are varied across auctions to control for turn-order effects. With five equal bidders, a strategically neutral policy wins the fair share of $20\%$. To test whether these mimic-mediated results transfer, we additionally run each baseline against the five real LLMs (5 auctions, 60 paintings, per baseline). Throughout, a policy's win rate is reported as the mean of its per-auction win fractions with an auction-level $95\%$ confidence interval, since the auction (not the individual painting) is the independent replicate; the $n=5$ transfer intervals are only indicative.
 
 
 % #####################################################################
 % ## CHUNK 2 — EXPERIMENTAL RESULTS
 % #####################################################################
 
-\subsection{Five-Agent Auction}
+\subsection{Multi-Agent Auction}
 
 \subsubsection{Model Behavior Characterization}
-We characterize LLM bidding from ten real auctions. For this scenario we used five models with no special instructions: GPT, Opus, Pro, Grok, and Llama. A striking feature is that all five reason from the same scaffold (an explicit per-painting ``fair-share'' computation stated in their own deliberations) yet derive very different behavior from it. Four of the five anchor to their own budget divided by the paintings ($10{,}000/12 \approx \$833$); Pro instead anchors to the total money in the room divided by the paintings ($50{,}000/12 \approx \$4{,}166$), a five-fold higher valuation that leads it to read nearly every lot as underpriced. The models are far less differentiated in \emph{engagement} than in \emph{budget aggression}: all five participate on $95$--$97\%$ of paintings and bid the minimum increment on most turns (median raise \$50). We describe each below, ordered by paintings won.
+We characterize LLM bidding from ten real auctions. For this scenario we used five models with no special instructions: GPT, Opus, Pro, Grok, and Llama. A striking feature is that all five reason from the same scaffold (an explicit per-painting ``fair-share'' computation stated in their own deliberations) yet derive very different behavior from it. Four of the five anchor to their own budget divided by the paintings ($10{,}000/12 \approx \$833$); Pro instead anchors to the total money in the room divided by the paintings ($50{,}000/12 \approx \$4{,}166$), a five-fold higher valuation that leads it to read nearly every lot as underpriced. The models are far less differentiated in \emph{engagement} than in \emph{budget aggression}: all five participate on $95$--$97\%$ of paintings and bid the minimum increment on most turns (median raise \$50). Table~\ref{tab:auction_behavior} summarizes the per-model outcome and spending, ordered by paintings won.
 
-\textbf{Llama (most won, $26.7\%$).} Works from the \$833 anchor but reasons it ``can afford to bid aggressively for the first few paintings,'' raising to ``deter others'' and treating an early pass as conceding a winnable point. It pairs assertive early presence with capital reserved for the closing lots, where a few large jump bids (opening as high as \$4{,}850) close them out. The result is the highest win share on the second-lowest mean spend (\$5{,}226), making it the most budget-efficient bidder.
+\begin{table}[htbp]
+\caption{Per-model auction behavior over ten real auctions: paintings-won share, the per-painting valuation anchor each model reasons from in its own deliberations, and mean budget spent per auction. Every model but Pro anchors to its own budget divided by the lots ($\sim$\$833); Pro anchors to the total money in the room ($\sim$\$4{,}166).}
+\label{tab:auction_behavior}
+\centering
+\begin{tabular}{lccc}
+\hline
+Model & Win share (\%) & Anchor (\$) & Mean spend (\$) \\
+\hline
+Llama & 26.7 & 833   & 5{,}226 \\
+Pro   & 21.7 & 4{,}166 & 7{,}495 \\
+Opus  & 18.3 & 833   & 6{,}955 \\
+GPT   & 17.5 & 833   & 3{,}980 \\
+Grok  & 15.8 & 833   & 5{,}890 \\
+\hline
+\end{tabular}
+\end{table}
 
-\textbf{Pro (second, $21.7\%$).} Its distinguishing feature is the valuation anchor: pricing lots off the total money in the room ($\sim$\$4{,}166/painting), it judges paintings ``extremely cheap'' and ``highly undervalued.'' This licenses the most aggressive play of any model: the highest mean spend (\$7{,}495) and by far the most non-incremental shock bids (single raises from \$100 to \$8{,}700), buying a high win share at the cost of efficiency.
-
-\textbf{Opus (third, $18.3\%$).} The most explicit budget accountant: it tracks the budget-per-remaining-painting it would retain after each hypothetical bid and frames sub-\$833 lots as ``bargains'' to win cheaply while preserving escalation room. Predominantly incremental, it occasionally deploys a large bid ($\sim$\$7{,}500) for a contested late lot, landing mid-pack on spend (\$6{,}955) and wins.
-
-\textbf{GPT (fourth, $17.5\%$).} Adheres most strictly to the \$833 benchmark, invoking the ``minimum efficient raise'' and a goal to ``stay disciplined'' and ``preserve budget.'' It engages on nearly every painting (highest participation, $97\%$) but concedes as soon as the price clears fair share, and largely does not redeploy the conserved budget, yielding the lowest mean spend (\$3{,}980) and a below-average win share. Active but price-disciplined.
-
-\textbf{Grok (fewest, $15.8\%$).} Shares the \$833 anchor but draws the sharpest disengagement rule: as a non-leader once the price exceeds fair share it reasons it has ``no incentive to raise further'' and should ``conserve budget,'' expecting the equilibrium price to ``settle well below 833.'' It enters lots to ``test opponents'' but withdraws earliest from contested ones, making the fewest raises and almost never jumping, giving it the lowest win share.
+The spend column carries the efficiency story the win shares alone do not. Llama converts the highest win share from the second-lowest spend, the most budget-efficient profile, pairing assertive early bidding with a few large closing jumps. Pro spends the most and throws the largest non-incremental jumps (single raises from \$100 into the thousands), buying wins at the cost of efficiency. GPT is the most price-disciplined, conceding as soon as a lot clears fair share and leaving most of its budget unspent (the lowest spend). Grok disengages earliest, making the fewest raises and almost never jumping, for the lowest win share. Opus sits mid-pack, taking sub-\$833 lots cheaply while reserving budget for the occasional contested late lot.
 
 \subsubsection{Mimic Fidelity}
 \label{sec:fidelity-results}
 % PIN (see auction_stats_notes.md): n is in AUCTIONS (10 real / 30 mimic), not paintings;
 % auctions are near-deterministic so the chi-squared is conservative -> lead with the effect-size CI.
 % Action-level CV table removed (was v6-contaminated); claim scoped to outcome fidelity.
-We assess fidelity at the level the mimics are actually used for, the auction outcome (the distribution of paintings won), across 10 real-LLM and 30 mimic auctions (the auction, not the individual painting, is the independent replicate, and the within-auction outcomes are near-deterministic). The win-share distributions are nearly identical: the effect size is negligible (Cram\'er's $V = 0.041$, $95\%$ CI $[0.02, 0.08]$, below the conventional $0.1$ threshold), and every per-model win-share difference is at most $2.8$ percentage points (auction-level bootstrap $95\%$ CIs in Table~\ref{tab:mimic_fidelity}). A chi-squared test of independence is consistent with this ($\chi^2 = 0.81$, $p = 0.94$). The mimics also reproduce behavior at the decision level: leave-one-episode-out cross-validation over the $3{,}334$ training decisions recovers each LLM's per-decision raise/pass choice with $88$--$93\%$ accuracy, and the overbid regressor predicts bid size to within roughly half a legal raise step for every model except Pro (Table~\ref{tab:mimic_action_fidelity}). The residual gap is bidding \emph{magnitude}: the mimics do not reproduce the rare large jump bids the real LLMs occasionally deploy (real auctions contain single raises above \$8{,}000; the mimics top out near \$6{,}500), which is also why Pro's overbid error is the largest ($1.6$ steps) and why the mimic end-game price spike is compressed relative to the real auctions ($2.4\times$ vs $3.8\times$). Because such jumps are infrequent their effect on the win distribution is negligible.
+We assess fidelity at the level the mimics are actually used for, the auction outcome (the distribution of paintings won), across 10 real-LLM and 30 mimic auctions (the auction, not the individual painting, is the independent replicate, and the within-auction outcomes are near-deterministic). The win-share distributions are nearly identical: the effect size is negligible (Cram\'er's $V = 0.041$, $95\%$ CI $[0.02, 0.08]$, below the conventional $0.1$ threshold), and every per-model win-share difference is at most $2.8$ percentage points (auction-level bootstrap $95\%$ CIs in Table~\ref{tab:mimic_fidelity}). A chi-squared test of independence is consistent with this ($\chi^2 = 0.81$, $p = 0.94$). The mimics also reproduce behavior at the decision level: leave-one-episode-out cross-validation over the $3{,}334$ training decisions recovers each LLM's per-decision raise/pass choice with $88$--$93\%$ accuracy, and the overbid regressor predicts bid size to within roughly half a legal raise step for every model except Pro. The residual gap is bidding \emph{magnitude}: the mimics do not reproduce the rare large jump bids the real LLMs occasionally deploy (real auctions contain single raises above \$8{,}000; the mimics top out near \$6{,}500), which is also why Pro's overbid error is the largest ($1.6$ steps) and why the mimic end-game price spike is compressed relative to the real auctions ($2.4\times$ vs $3.8\times$). Because such jumps are infrequent their effect on the win distribution is negligible.
 
 \begin{table}[htbp]
 \caption{Mimic fidelity (outcome level): paintings won across 10 real-LLM and 30 mimic auctions. The $\Delta$ confidence intervals are auction-level bootstrap (10{,}000 resamples).}
@@ -122,23 +123,6 @@ Pro     & 21.7 & 18.9 & $-2.8$ & $[-6.1, +0.6]$ \\
 \end{tabular}
 \end{table}
 
-\begin{table}[htbp]
-\caption{Mimic fidelity (decision level): leave-one-episode-out cross-validation of the per-decision raise/pass classifier and the overbid regressor. Overbid MAE is in units of the legal raise step; Pro's larger value reflects its occasional non-incremental jump bids.}
-\label{tab:mimic_action_fidelity}
-\centering
-\begin{tabular}{lccc}
-\hline
-Model & Decisions & Raise/Pass acc. & Overbid MAE (steps) \\
-\hline
-GPT & 697 & $0.93 \pm 0.02$ & 0.46 \\
-Grok    & 628 & $0.89 \pm 0.03$ & 0.02 \\
-Llama   & 670 & $0.88 \pm 0.02$ & 0.44 \\
-Opus    & 672 & $0.90 \pm 0.05$ & 0.51 \\
-Pro     & 667 & $0.91 \pm 0.03$ & 1.55 \\
-\hline
-\end{tabular}
-\end{table}
-
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.9\textwidth]{auction_bids}
@@ -147,33 +131,76 @@ Pro     & 667 & $0.91 \pm 0.03$ & 1.55 \\
 \end{figure*}
 
 \subsubsection{Baseline Comparison}
-Each baseline played 50 auctions against four rotating mimics (600 paintings each); with five bidders the fair share is $20\%$. Table~\ref{tab:math_results} reports win rates. Two findings stand out. First, performance is \emph{non-monotonic} in nominal sophistication: the Trivial min-bidder ($29.7\%$) substantially outperforms the principled Fair-Share budgeter ($19.5\%$, below fair share). The mechanism is visible in the cap: early in the auction Fair-Share bids only up to $1.05\,B^i_t/n_t \approx \$875$, below the price at which early lots actually clear ($\sim$\$1{,}200; Fig.~\ref{fig:auction_bids}(a)), so it concedes the many cheap early paintings and hoards budget for the few expensive late lots. Since every painting counts equally, winning many cheap lots beats winning a few costly ones, and Trivial, bounded only by solvency, takes the early majority (Fig.~\ref{fig:math_wins_by_position}). Indeed, neither Fair-Share nor Reactive beats an ordinary LLM: in each of their batches Llama, the strongest model, wins a larger share of the lots it contests than the math policy (Fair-Share batch, $30.6\%$ vs.\ $19.5\%$; Reactive batch, $26.7\%$ vs.\ $23.8\%$), and the ordering repeats against the real LLMs ($29.2\%$ for Llama vs.\ $18.3\%$ and $25.0\%$). Their nominal sophistication buys nothing over the LLMs they aim to outclass; among the math policies, only the opponent-aware Market-Clearing and the learned RL clearly beat Trivial's $29.7\%$ floor.
+Each baseline played 50 auctions against four rotating mimics (600 paintings each); with five bidders the fair share is $20\%$. Table~\ref{tab:math_results} reports win rates. Two findings stand out. First, performance is \emph{non-monotonic} in nominal sophistication: the Trivial min-bidder ($29.7\%$) substantially outperforms the principled Fair-Share budgeter, which wins \emph{no better than} the $20\%$ fair share ($19.5\%$, auction-level CI $[18.1,20.9]$, which includes $20\%$); the Trivial--Fair-Share gap is well outside both intervals. The mechanism is visible in the cap: early in the auction Fair-Share bids only up to $1.05\,B^i_t/n_t \approx \$875$, below the price at which early lots actually clear ($\sim$\$1{,}200; Fig.~\ref{fig:auction_bids}(a)), so it concedes the many cheap early paintings and hoards budget for the few expensive late lots. Since every painting counts equally, winning many cheap lots beats winning a few costly ones, and Trivial, bounded only by solvency, takes the early majority. Indeed, neither Fair-Share nor Reactive beats an ordinary LLM: in each of their batches Llama, the strongest model, wins a larger share of the lots it contests than the math policy (Fair-Share batch, $30.6\%$ vs.\ $19.5\%$; Reactive batch, $26.7\%$ vs.\ $23.8\%$), and the ordering repeats against the real LLMs ($29.2\%$ for Llama vs.\ $18.3\%$ and $25.0\%$). Their nominal sophistication buys nothing over the LLMs they aim to outclass. Among the math policies, RL has the highest mimic-field point estimate, but its interval overlaps those of Market-Clearing and Trivial (Table~\ref{tab:math_results}), so these three are statistically comparable rather than cleanly ordered.
 
-Second, re-running every policy against the five real LLMs (5 auctions each) shows that the overall ordering transfers, but the top reshuffles. Fair-Share stays worst (below fair share), Reactive stays mid-pack, and Trivial, Market-Clearing, and RL still beat every LLM. Against the mimics RL is strongest; against the real LLMs its edge disappears, and the behavior-agnostic policies overtake it: Trivial and Market-Clearing each reach $40\%$ while RL holds at $36.7\%$ (a two-painting margin within the $n=5$ noise, so we read it as RL \emph{losing its lead} rather than being beaten). The reason is that RL was trained against the mimics: it learned to exploit the surrogate, and that exploitation does not transfer, whereas Trivial (which models nothing) and Market-Clearing (which keys off opponent budgets, an observable, rather than a learned behavioral model) carry over cleanly and in fact gain, since the real LLMs concede contested lots even earlier than the mimics do. The mimics are thus reliable for \emph{comparing} fixed policies, but not for \emph{training} one to deploy against the real models.
+Second, re-running every policy against the five real LLMs (5 auctions each) shows that the overall ordering transfers, but the top reshuffles. Fair-Share stays worst (below fair share), Reactive stays mid-pack, and Trivial, Market-Clearing, and RL still beat every LLM. Against the mimics RL has the highest point estimate (within overlapping intervals of Market-Clearing); against the real LLMs that nominal edge disappears, and the behavior-agnostic policies match or pass it: Trivial and Market-Clearing each reach $40\%$ while RL holds at $36.7\%$ (a two-painting margin, and all three intervals overlap heavily at $n=5$, so we read it as RL \emph{losing its lead} rather than being beaten). A plausible explanation, which we do not isolate directly, is that RL was trained against the mimics and fit surrogate-specific behavior that does not transfer, whereas Trivial (which models nothing) and Market-Clearing (which keys off opponent budgets, an observable, rather than a learned behavioral model) carry over cleanly, and the real LLMs concede contested lots even earlier than the mimics do. The mimics are thus reliable for \emph{comparing} fixed policies, but not for \emph{training} one to deploy against the real models.
 
 \begin{table}[htbp]
-\caption{Baseline win rates against the mimic ensemble (50 auctions, 600 paintings) and against the five real LLMs (5 auctions, 60 paintings). Fair share with five bidders is $20\%$; bold marks the best policy in each column. The vs-real-LLM column has high variance ($n=5$); treat the magnitudes as indicative.}
+\caption{Baseline win rates (percentages) with auction-level $95\%$ confidence intervals: against the mimic ensemble (50 auctions) and against the five real LLMs (5 auctions). Win rate is the mean of per-auction win fractions; the auction (not the painting) is the independent replicate, and intervals are $t$ intervals over auctions. Fair share with five bidders is $20\%$; bold marks the highest point estimate in each column (intervals may overlap). \emph{The vs-real column has only $n=5$: its intervals are approximate and overconfident (simulated coverage $\sim$75--90\% against a nominal $95\%$), and Reactive's $[25.0,25.0]$ reflects five identical auctions, not zero uncertainty. Treat that column as indicative.}}
 \label{tab:math_results}
 \centering
 \begin{tabular}{lcc}
 \hline
-Policy & vs mimics & vs real LLMs \\
+Policy & vs mimics (95\% CI) & vs real LLMs (95\% CI) \\
 \hline
-Trivial          & 29.7\% & \textbf{40.0\%} \\
-Fair-Share       & 19.5\% & 18.3\% \\
-Reactive         & 23.8\% & 25.0\% \\
-Market-Clearing  & 31.2\% & \textbf{40.0\%} \\
-RL               & \textbf{33.5\%} & 36.7\% \\
+Trivial          & 29.7 [27.7, 31.6] & \textbf{40.0} [35.4, 44.6] \\
+Fair-Share       & 19.5 [18.1, 20.9] & 18.3 [13.7, 23.0] \\
+Reactive         & 23.8 [22.9, 24.8] & 25.0 [25.0, 25.0] \\
+Market-Clearing  & 31.2 [29.3, 33.1] & \textbf{40.0} [35.4, 44.6] \\
+RL               & \textbf{33.5} [31.9, 35.1] & 36.7 [31.0, 42.3] \\
 \hline
 \end{tabular}
 \end{table}
 
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.9\textwidth]{math_wins_by_position}
-\caption{Auctions won by painting position, per math policy (50 auctions; one panel each, others faint; dashed = $20\%$ fair share). Trivial, Market-Clearing, and RL front-load (winning the cheap early lots, then fading); Fair-Share is back-loaded, taking only the costly final lots, hence its lowest total.}
-\label{fig:math_wins_by_position}
-\end{figure*}
 
 \subsubsection{Synthesis}
 The three results cohere into one account. The LLMs converge on a simple, one-dimensional strategy: a fair-share reservation price that governs when to drop out. That simplicity is what makes them \emph{distillable} (small networks reproduce their play at $V = 0.041$ and $88$--$93\%$ per-decision accuracy) and what makes them \emph{beatable} (a trivial minimum-bidder, a budget-aware heuristic, and a learned policy all exceed their share). The methodological caution we carry forward is the boundary of that distillability: a policy \emph{trained} against the mimics fails to transfer while fixed policies do, so behavioral mimics are faithful enough to \emph{compare} strategies but not to \emph{train} a deployable one.
+
+% =====================================================================
+% REVIEW LATER -- open auction scrutinies (statistical pass, 2026-06).
+% Everything is backed up; nothing below is rendered. Decide, then delete.
+%
+% ALREADY APPLIED in this pass:
+%  - Baseline table (tab:math_results) now carries auction-level t intervals
+%    (unit = auction, n=50 / n=5), not painting-level. Verified against the
+%    bootstrap; identical at n=50. vs-mimics CIs are trustworthy; vs-real (n=5)
+%    are flagged overconfident in the caption.
+%  - "Fair-Share below fair share" -> "no better than fair share"
+%    (CI [18.1,20.9] includes 20%).
+%  - "only Market-Clearing and RL clearly beat Trivial" -> softened: Trivial /
+%    Market-Clearing / RL have OVERLAPPING CIs (statistically comparable).
+%  - RL "learned to exploit the surrogate" -> "a plausible explanation, which we
+%    do not isolate directly".
+%  - milgrom-weber \cite key aligned to \bibitem{MilgromWeber}.
+%  - Fidelity table (tab:mimic_fidelity) left on bootstrap CIs; deterministic
+%    Welch t corroborates it (GPT [-1.3,+3.0]  Grok [-3.9,+0.6]  Llama [-0.9,+4.8]
+%    Opus [-1.1,+4.5]  Pro [-6.3,+0.8]); all still include 0.
+%
+% NEEDS A DECISION (substantive -- not changed; may need a reframe or a run):
+%  1. AGGRESSION vs INFORMATION confound. The win-rate order tracks cap
+%     AGGRESSIVENESS (Trivial/MC/RL ~30-33%, overlapping CIs; Fair-Share/Reactive
+%     clearly lower), not cleanly "information use". Prop 1 only proves MC is
+%     >= Reactive in aggression, not that it uses opponent info *well*. The
+%     "ladder of increasing information use" framing may be unsupported. Fix:
+%     add an opponent-blind policy matched in aggression to MC to isolate the
+%     information effect, OR reframe the ladder as a cap-aggression axis.
+%  2. REWARD DEGENERACY. Money worthless + identical paintings => grabbing cheap
+%     early lots is mechanically dominant, so "the aggressive policy wins" is
+%     partly built into the reward. State as a scope limit or it reads as an
+%     artifact, not a finding about LLMs.
+%  3. MAGIC CONSTANTS (1.05 Fair-Share, 0.18 kappa, 1.75/1.15 eta). Confirm fixed
+%     a priori, NOT tuned on eval data; add one sentence on provenance.
+%  4. n=5 TRANSFER CIs are overconfident (coverage sim: t ~87%, percentile
+%     bootstrap ~75%, both ~62% in the degenerate Reactive case). ASK: report a
+%     Bayesian Beta-Binomial credible interval (won't degenerate), or keep
+%     point+direction with the caveat? Real fix = more real-LLM auctions
+%     (ask Prof. Zong re: API budget).
+%  5. BEHAVIOR CHARACTERIZATION leans on chain-of-thought quotes, which are soft
+%     evidence (CoT need not be faithful). Keep as qualitative color only;
+%     consider trimming -- it is also the most perishable / least-novel part.
+%  6. Pro is the worst-fit mimic (Delta -2.8, MAE 1.55) yet we claim "jumps don't
+%     affect the win distribution" -- mild tension; fine to keep, note Pro is the
+%     soft spot.
+%  CONSISTENCY ASK: switch the fidelity table to the Welch t CIs above so the
+%     whole section is seedless? (Currently fidelity=bootstrap, baseline=t.)
+% =====================================================================

@@ -1,10 +1,10 @@
 """Walk save_slots/*/deception_episode/episode_log.json and build a training dataset.
 
 Output: simulation/datasets/deception_dataset_v1.jsonl with rows shaped for the
-two-head mimic architecture (D9):
+two-head mimic architecture (per-attribute trust schema, 30-dim input):
 
   {
-    "x": [t0..t4, own_trust, opp1_trust, opp2_trust, opp3_trust, opp4_trust],
+    "x": [30-float vector — see simulation.mimic_agent.build_deception_mimic_input],
     "y_lied":  [0|1, 0|1, 0|1, 0|1, 0|1],         # per-attribute lie label
     "y_claim": [c0, c1, c2, c3, c4],              # per-attribute raw claim value
     "bidder_index": int,    # 0..(len(bidder_vocab)-1)
@@ -13,8 +13,9 @@ two-head mimic architecture (D9):
     "source_log": str,
   }
 
-The trust vector is in canonical "own-first" order: opp_k_trust corresponds to
-agent slot ((own_index + k) mod 5). Mimic input dim = 10.
+Input vector is permutation-invariant in opponent slot order (per-attr
+aggregates + sorted opp strengths), so opponent slot assignment in the source
+loadout does not affect training.
 
 Companion `*_meta.json` includes `bidder_vocab` (alias -> index) and the
 attribute/feature breakdown.
@@ -27,6 +28,8 @@ import sys
 from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Iterable
+
+from simulation.mimic_agent import DECEPTION_MIMIC_INPUT_DIM, build_deception_mimic_input
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -55,18 +58,27 @@ def _build_rows(log_path: Path, payload: dict, episode_index: int) -> list[dict]
     agents = payload.get("agents") or []
     if not agents:
         return []
+    num_rounds = int(payload.get("num_rounds") or 12)
     agent_id_to_index = {a["agent_id"]: int(a["agent_index"]) for a in agents}
     agent_id_to_alias = {a["agent_id"]: str(a.get("alias", a["agent_id"])) for a in agents}
     # Order agents by agent_index so canonical positions are stable.
     ordered_ids = [aid for aid, _ in sorted(agent_id_to_index.items(), key=lambda kv: kv[1])]
 
+    # Running wins_count tally per agent_id, snapshot BEFORE each round
+    # (because the claim that gets emitted in round r is conditioned on the
+    # wins state at the start of round r, not after r resolves).
+    wins_before_round: dict[str, int] = {aid: 0 for aid in ordered_ids}
+
     rows: list[dict] = []
-    for r in rounds:
+    # Walk rounds in chronological order so wins_before_round is correct.
+    for r in sorted(rounds, key=lambda x: int(x.get("round_idx", 0))):
         truth = list(r.get("truth") or [])
         if len(truth) != 5:
             continue
         trust_before = dict(r.get("trust_before") or {})
         claims = dict(r.get("claims_by_agent") or {})
+        round_idx = int(r.get("round_idx", 0))
+        winners_this_round = r.get("winners") or []
         for aid in ordered_ids:
             if aid not in claims or aid not in trust_before:
                 continue
@@ -74,14 +86,33 @@ def _build_rows(log_path: Path, payload: dict, episode_index: int) -> list[dict]
             claim = list(claims[aid])
             if len(claim) != 5:
                 continue
-            own_trust = float(trust_before[aid])
-            # Canonical opponent ordering: rotate through slots (own_idx + 1..4) mod 5.
-            opp_trusts = []
-            for k in range(1, 5):
-                other_idx = (own_idx + k) % 5
-                other_id = ordered_ids[other_idx]
-                opp_trusts.append(float(trust_before.get(other_id, 0.0)))
-            x = list(truth) + [own_trust] + opp_trusts
+            raw_own = trust_before[aid]
+            if isinstance(raw_own, (int, float)):
+                own_trust = [float(raw_own)] * 5
+            else:
+                own_trust = [float(v) for v in raw_own]
+            opp_trust_vecs: list[list[float]] = []
+            opp_wins: list[int] = []
+            for other_id in ordered_ids:
+                if other_id == aid:
+                    continue
+                raw_opp = trust_before.get(other_id)
+                if raw_opp is None:
+                    continue
+                if isinstance(raw_opp, (int, float)):
+                    opp_trust_vecs.append([float(raw_opp)] * 5)
+                else:
+                    opp_trust_vecs.append([float(v) for v in raw_opp])
+                opp_wins.append(int(wins_before_round.get(other_id, 0)))
+            x = build_deception_mimic_input(
+                truth=truth,
+                own_trust=own_trust,
+                opponents_trust=opp_trust_vecs,
+                round_index=round_idx,
+                total_rounds=num_rounds,
+                own_wins_count=wins_before_round.get(aid, 0),
+                opponents_wins_count=opp_wins,
+            )
             y_lied = [int(round(claim[a], 2) != round(truth[a], 2)) for a in range(5)]
             y_claim = [round(float(claim[a]), 2) for a in range(5)]
             rows.append({
@@ -91,9 +122,13 @@ def _build_rows(log_path: Path, payload: dict, episode_index: int) -> list[dict]
                 "alias": agent_id_to_alias[aid],
                 "agent_index": own_idx,
                 "episode_index": episode_index,
-                "round_index": int(r.get("round_idx", 0)),
+                "round_index": round_idx,
                 "source_log": str(log_path),
             })
+        # Update running wins AFTER all rows for this round are emitted.
+        for w_aid in winners_this_round:
+            if w_aid in wins_before_round:
+                wins_before_round[w_aid] += 1
     return rows
 
 
@@ -167,11 +202,16 @@ def main() -> int:
             n_episodes += 1
 
     meta = {
-        "version": "v1",
-        "input_dim": 10,
+        "version": "v2_per_attr_trust",
+        "input_dim": DECEPTION_MIMIC_INPUT_DIM,
         "feature_names": [
             "truth_beach", "truth_food", "truth_pool", "truth_room", "truth_service",
-            "own_trust", "opp1_trust", "opp2_trust", "opp3_trust", "opp4_trust",
+            "own_trust_beach", "own_trust_food", "own_trust_pool", "own_trust_room", "own_trust_service",
+            "opp_max_beach", "opp_max_food", "opp_max_pool", "opp_max_room", "opp_max_service",
+            "opp_mean_beach", "opp_mean_food", "opp_mean_pool", "opp_mean_room", "opp_mean_service",
+            "opp_min_beach", "opp_min_food", "opp_min_pool", "opp_min_room", "opp_min_service",
+            "opp_strength_1", "opp_strength_2", "opp_strength_3", "opp_strength_4",
+            "round_progress",
         ],
         "output_heads": {
             "lie_classifier": {"dim": 5, "loss": "BCE per attribute"},

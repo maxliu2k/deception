@@ -125,18 +125,32 @@ def sample_mimic_claims(alias: str, rows: list[dict], *, n_samples_per_row: int 
         # Fall back: maybe the file is stored under the original alias (e.g., for math tiers).
         return None
     samples = []
+    from simulation.mimic_agent import _load_deception_mimic
+    import torch
+    mimic_alias = alias if alias.startswith("Mimic-") else f"Mimic-{alias}"
+    model = _load_deception_mimic(mimic_alias)
     for r in rows:
         x = list(r["x"])
         truth = x[:5]
-        # Sample n_samples_per_row stochastic outputs for distributional comparison.
+        if model is None:
+            # No mimic — fall back to truth (no spurious lies).
+            for _ in range(n_samples_per_row):
+                samples.append([round(float(t), 2) for t in truth])
+            continue
+        x_tensor = torch.tensor([x], dtype=torch.float32)
+        with torch.no_grad():
+            lie_logits, raw_claim = model(x_tensor)
+        p_lie = torch.sigmoid(lie_logits).squeeze(0).cpu().numpy()
+        raw = raw_claim.squeeze(0).cpu().numpy()
+        import random as _rng
         for _ in range(n_samples_per_row):
-            from simulation.mimic_agent import deception_mimic_claim
-            c = deception_mimic_claim(
-                alias if alias.startswith("Mimic-") else f"Mimic-{alias}",
-                truth,
-                float(x[5]),
-                [float(v) for v in x[6:]],
-            )
+            c = []
+            for a in range(5):
+                lie = _rng.random() < float(p_lie[a])
+                if lie:
+                    c.append(round(max(0.0, min(1.0, float(raw[a]))), 2))
+                else:
+                    c.append(round(float(truth[a]), 2))
             samples.append(c)
     return np.array(samples, dtype=np.float32)
 

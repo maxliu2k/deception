@@ -918,13 +918,23 @@ def open_auction_policy_tier4_market_clearing(
 
 
 # ---------------------------------------------------------------------------
-# Deception Competition math-tier policies — Option R (continuous trust)
+# Deception Competition math-tier policies — Option R (per-attribute trust)
 # ---------------------------------------------------------------------------
-# Each policy takes (truth, preferences) + kwargs (threshold, own_trust,
-# opponents_trust, round_index, total_rounds) and returns a 5-float claim
-# quantized to 2dp. They do not see opponents' claims for this round
-# (simultaneous-move structure) but can reason about trust state and the
-# remaining-rounds horizon.
+# Each policy takes (truth) + kwargs (own_trust [per-attr list], opponents_trust
+# [list of per-attr lists], round_index, total_rounds) and returns a 5-float
+# claim quantized to 2dp. They do not see opponents' claims for this round
+# (simultaneous-move structure) but can reason about per-attribute trust state
+# and the remaining-rounds horizon.
+#
+# All attributes are weighted equally — there are no buyer preferences.
+#
+# Scoring rule:  score = (Σ_a c_a × trust_a) / 5
+# Discrepancy:   disc_a = max(0, c_a − t_a)
+# Trust update:  trust_a = 1 − sum_disc_a_when_won / win_count
+#
+# Strategic implication: WHICH attribute(s) to lie on now matters — single-attr
+# lies damage only that attribute's trust dimension; uniform lies damage all
+# five. This creates a true 5D strategy space.
 # ---------------------------------------------------------------------------
 
 from typing import List as _DCList
@@ -934,118 +944,363 @@ def _dc_quantize(x: float) -> float:
     return round(max(0.0, min(1.0, float(x))), 2)
 
 
-def deception_policy_tier1_honest(
+def deception_policy_tier1_trivial_max(
     truth: _DCList[float],
-    preferences: _DCList[float],
     *,
-    threshold: float,
-    own_trust: float,
-    opponents_trust: _DCList[float] | None = None,
+    own_trust: _DCList[float],
+    opponents_trust: _DCList[_DCList[float]] | None = None,
     round_index: int = 0,
     total_rounds: int = 12,
+    own_wins_count: int = 0,
+    opponents_wins_count: _DCList[int] | None = None,
 ) -> _DCList[float]:
-    """T1 Honest: claim = truth, always. Preserves trust = 1.0 indefinitely."""
-    del preferences, threshold, own_trust, opponents_trust, round_index, total_rounds
+    """T1 Trivial-Max: claim 1.0 on every attribute, every round.
+
+    Information used: none. State-free ceiling baseline."""
+    del truth, own_trust, opponents_trust, round_index, total_rounds
+    del own_wins_count, opponents_wins_count
+    return [1.0] * 5
+
+
+# Math-Naive is the same policy as T1 — kept under both names because the
+# decoration / trust-teeth comparison scripts read the Math-Naive alias.
+deception_policy_naive_max = deception_policy_tier1_trivial_max
+
+
+def deception_policy_tier1_honest(
+    truth: _DCList[float],
+    *,
+    own_trust: _DCList[float],
+    opponents_trust: _DCList[_DCList[float]] | None = None,
+    round_index: int = 0,
+    total_rounds: int = 12,
+    own_wins_count: int = 0,
+    opponents_wins_count: _DCList[int] | None = None,
+) -> _DCList[float]:
+    """[Legacy] Pure honesty."""
+    del own_trust, opponents_trust, round_index, total_rounds
+    del own_wins_count, opponents_wins_count
     return [_dc_quantize(t) for t in truth]
 
 
-def deception_policy_tier2_uniform(
+def deception_policy_smart(
     truth: _DCList[float],
-    preferences: _DCList[float],
     *,
-    threshold: float,
-    own_trust: float,
-    opponents_trust: _DCList[float] | None = None,
+    own_trust: _DCList[float],
+    opponents_trust: _DCList[_DCList[float]] | None = None,
     round_index: int = 0,
     total_rounds: int = 12,
-    delta: float = 0.2,
+    own_wins_count: int = 0,
+    opponents_wins_count: _DCList[int] | None = None,
 ) -> _DCList[float]:
-    """T2 Uniform-inflate: claim = clip(t + 0.2). Discrepancy ≈ 0.2 per win →
-    long-run trust ≈ 0.8. Used as the broken-control baseline (always inflates,
-    accepts the steady trust hit)."""
-    del preferences, threshold, own_trust, opponents_trust, round_index, total_rounds
-    return [_dc_quantize(t + delta) for t in truth]
+    """Smart aggressive: smooth per-attribute trust-gated lie.
+
+    Per-attribute formula:
+
+        c_a = clip(t_a + own_trust_a × (1 − t_a), 0, 1)
+            = own_trust_a + (1 − own_trust_a) × t_a
+
+    Interpretation: lie a fraction `own_trust_a` of the way from t_a to 1.0.
+    When trust is fresh (=1), claim 1.0 (Naive). When trust is burned (=0),
+    claim t_a (honest rest). Smooth interpolation between — backs off
+    proportionally to how much trust you've already spent on that attribute.
+
+    Each attribute is treated independently. Mean claim stays near 1.0
+    early game (high trust); drops gradually as trust depletes.
+
+    Contrast with the previous rest-only-the-worst variant: that one
+    sacrificed full claim on one attribute every round, even when the others
+    were healthy. This version distributes the backoff smoothly across all
+    five attributes proportional to their actual trust state."""
+    del opponents_trust, round_index, total_rounds
+    del own_wins_count, opponents_wins_count
+    n = len(truth)
+    if len(own_trust) != n:
+        raise ValueError("truth/own_trust length mismatch")
+    return [
+        _dc_quantize(
+            float(truth[a])
+            + max(0.0, min(1.0, float(own_trust[a]))) * (1.0 - float(truth[a]))
+        )
+        for a in range(n)
+    ]
 
 
-def deception_policy_tier3_single_attr_lie(
+def deception_policy_calibrated(
     truth: _DCList[float],
-    preferences: _DCList[float],
     *,
-    threshold: float,
-    own_trust: float,
-    opponents_trust: _DCList[float] | None = None,
+    own_trust: _DCList[float],
+    opponents_trust: _DCList[_DCList[float]] | None = None,
     round_index: int = 0,
     total_rounds: int = 12,
+    own_wins_count: int = 0,
+    opponents_wins_count: _DCList[int] | None = None,
+    truth_threshold: float = 0.5,
+    trust_floor: float = 0.6,
 ) -> _DCList[float]:
-    """T3 Single-attr lie: inflate the attribute with the largest (1 - t[a]) × w[a]
-    (= largest headroom × weight). Discrepancy per win equals exactly that
-    product, so the long-run trust stays high while the score boost is meaningful."""
-    del threshold, own_trust, opponents_trust, round_index, total_rounds
-    if len(preferences) != len(truth):
-        raise ValueError("preferences and truth length mismatch")
-    headroom_value = [(1.0 - truth[a]) * preferences[a] for a in range(len(truth))]
-    target = max(range(len(headroom_value)), key=lambda i: headroom_value[i])
-    out = [_dc_quantize(t) for t in truth]
-    out[target] = 1.0
+    """Calibrated: actual trust management.
+
+    Two simultaneous rules (both per-attribute, independent across attrs):
+
+      1. CHEAP-LIE RULE: claim 1.0 only on attrs where truth is already high
+         (t_a > truth_threshold). Discrepancy from a 1.0 claim is then
+         (1 - t_a) ≈ small, so trust damage per win is minimized.
+
+      2. TRUST-FLOOR RULE: if own_trust_a < trust_floor, do not inflate that
+         attribute at all — claim truth instead, so the buyer's running
+         average can dilute back toward 1.0 over future rounds.
+
+    Attributes that don't pass both gates are emitted as truth. This is what
+    the original "Calibrated" specification meant: claim high only where it's
+    cheap, back off on burned attrs to let them heal.
+
+    Contrast with T3 (max-headroom concentrator), which slams the LOWEST-truth
+    attribute to 1.0 — exactly the most expensive lie possible. T3 is
+    misnamed for this experiment; it tests max-score concentration, not
+    trust-preserving calibration."""
+    del opponents_trust, round_index, total_rounds
+    del own_wins_count, opponents_wins_count
+    n = len(truth)
+    if len(own_trust) != n:
+        raise ValueError("truth/own_trust length mismatch")
+    out: _DCList[float] = []
+    for a in range(n):
+        t_a = float(truth[a])
+        trust_a = max(0.0, min(1.0, float(own_trust[a])))
+        if t_a > truth_threshold and trust_a >= trust_floor:
+            # Cheap to lie here, and trust budget can afford it.
+            out.append(1.0)
+        else:
+            # Either too-expensive a lie (low truth) or trust too damaged
+            # — back off and play honest on this attribute.
+            out.append(_dc_quantize(t_a))
     return out
 
 
-def deception_policy_tier4_backloaded(
+def deception_policy_tier2_truth_anchored(
     truth: _DCList[float],
-    preferences: _DCList[float],
     *,
-    threshold: float,
-    own_trust: float,
-    opponents_trust: _DCList[float] | None = None,
+    own_trust: _DCList[float],
+    opponents_trust: _DCList[_DCList[float]] | None = None,
     round_index: int = 0,
     total_rounds: int = 12,
+    own_wins_count: int = 0,
+    opponents_wins_count: _DCList[int] | None = None,
 ) -> _DCList[float]:
-    """T4 Backloaded deceiver: greedy DP-style heuristic.
+    """T2 — truth-anchored cheap-lie selector. Info used: {truth}.
 
-    Reasoning: under Option R, trust = 1 − (sum past discrepancy) / (win count).
-    A lie now reduces trust for ALL future wins. The marginal cost of a lie of
-    magnitude d at round j, assuming you'd win on k = total_rounds − j remaining
-    rounds at average score s, is roughly:
-        future_cost ≈ k × s × 0.5 × (d / (win_count + 1))   (trust-multiplier loss)
+    First "thinking" tier: under track-record (denom = wins), claiming 1.0
+    on a high-truth attribute spends almost no trust (disc = 1 - t ≈ small),
+    while claiming 1.0 on a low-truth attribute spends a lot (disc = 1 -
+    small_t ≈ large). T2 claims 1.0 only where the lie is cheap and stays
+    moderate elsewhere:
 
-    For each candidate subset S of attributes to inflate (claim = 1, else truth),
-    compute:
-        gain  = w · (c − t) × (0.5 + 0.5 × own_trust)  / 5    [score gain split 5 ways]
-        cost  = remaining_rounds_factor × w · (c − t) × 0.5   [future trust degrade]
-        EV    = gain − cost
+        c_a = 1.0  if t_a >= 0.5  (cheap lie)
+              clip(t_a + 0.3, 0.5, 1.0)  otherwise  (credible floor)
 
-    Pick the EV-maximizing subset, tie-break toward smaller subset (less risky).
-    """
-    del opponents_trust, threshold
-    n = len(preferences)
-    rounds_remaining = max(1, int(total_rounds) - int(round_index))
-    multiplier_now = 0.5 + 0.5 * max(0.0, min(1.0, own_trust))
-    # rounds_remaining=12 → cost factor ~12*0.5 = 6.0; rounds_remaining=1 → 0.5.
-    future_cost_factor = max(0.0, (rounds_remaining - 1) * 0.5)
-    best_claim = [_dc_quantize(t) for t in truth]
-    best_ev = -math.inf
-    best_size = n + 1
-    for mask in range(1 << n):
-        c = [_dc_quantize(truth[a]) if not (mask & (1 << a)) else 1.0 for a in range(n)]
-        disc = max(0.0, sum(preferences[a] * (c[a] - truth[a]) for a in range(n)))  # weighted over-promise
-        gain_this_round = disc * multiplier_now / n   # 5-way split if everyone ties
-        future_cost = future_cost_factor * disc * 0.5
-        ev = gain_this_round - future_cost
-        lie_count = bin(mask).count("1")
-        if ev > best_ev or (ev == best_ev and lie_count < best_size):
-            best_ev = ev
-            best_size = lie_count
-            best_claim = c
-    return best_claim
+    State-free over time; reads only this round's truth. Aggressive — mean
+    claim around 0.85, minimum 0.5."""
+    del own_trust, opponents_trust, round_index, total_rounds
+    del own_wins_count, opponents_wins_count
+    out: _DCList[float] = []
+    for t in truth:
+        t = float(t)
+        if t >= 0.5:
+            out.append(1.0)
+        else:
+            out.append(_dc_quantize(max(0.5, min(1.0, t + 0.3))))
+    return out
 
 
-# Alias kept for back-compat with older imports.
-deception_policy_tier4_symmetric_nash = deception_policy_tier4_backloaded
+# Back-compat alias for old name.
+deception_policy_tier2_uniform_backoff = deception_policy_tier2_truth_anchored
+
+
+def deception_policy_tier3_self_aware(
+    truth: _DCList[float],
+    *,
+    own_trust: _DCList[float],
+    opponents_trust: _DCList[_DCList[float]] | None = None,
+    round_index: int = 0,
+    total_rounds: int = 12,
+    own_wins_count: int = 0,
+    opponents_wins_count: _DCList[int] | None = None,
+) -> _DCList[float]:
+    """T3 — self-aware. Info used: {truth, own_trust, own_wins, progress}.
+
+    Adds three pieces of own-state on top of T2's truth-only baseline:
+
+      1. PER-ATTR HEALING: if own_trust_a < 0.5, claim t_a verbatim. Under
+         track-record this is the *only* way a damaged attribute heals: an
+         honest win brings disc=0, which drops the running average toward
+         zero. T2 has no concept of healing because it ignores own_trust.
+
+      2. PROGRESS-AWARE THRESHOLD: the cheap-lie threshold shifts down
+         (more attrs qualify as "cheap") as the round counter rises.
+         Late-game lies cost less because there are fewer future rounds
+         to benefit from preserved trust.
+
+      3. WINS-AWARE INFLATION: the moderate-claim term scales with wins
+         so far. Under track-record, marginal cost of a new disc point =
+         disc / (wins + 1) — so each win you've already booked makes the
+         next inflation cheaper.
+
+    Formula:
+        if own_trust_a < 0.5:
+            c_a = t_a                         (heal)
+        else:
+            threshold = 0.5 − 0.3 × progress
+            if t_a >= threshold:
+                c_a = 1.0                     (cheap lie, easier to qualify late)
+            else:
+                c_a = clip(t_a + 0.3 + 0.3 × wins_norm, 0.5, 1.0)
+
+    where progress = round_index/total_rounds and wins_norm = wins/total_rounds."""
+    del opponents_trust
+    del opponents_wins_count
+    n = len(truth)
+    if len(own_trust) != n:
+        raise ValueError("truth/own_trust length mismatch")
+    N = max(1, int(total_rounds))
+    progress = max(0.0, min(1.0, float(round_index) / N))
+    wins_norm = max(0.0, min(1.0, float(own_wins_count) / N))
+    threshold = 0.5 - 0.3 * progress
+    out: _DCList[float] = []
+    for a in range(n):
+        t = float(truth[a])
+        trust = max(0.0, min(1.0, float(own_trust[a])))
+        if trust < 0.5:
+            out.append(_dc_quantize(t))
+        elif t >= threshold:
+            out.append(1.0)
+        else:
+            out.append(_dc_quantize(max(0.5, min(1.0, t + 0.3 + 0.3 * wins_norm))))
+    return out
+
+
+deception_policy_tier3_trust_proportional = deception_policy_tier3_self_aware
+
+
+def deception_policy_tier4_pack_aware(
+    truth: _DCList[float],
+    *,
+    own_trust: _DCList[float],
+    opponents_trust: _DCList[_DCList[float]] | None = None,
+    round_index: int = 0,
+    total_rounds: int = 12,
+    own_wins_count: int = 0,
+    opponents_wins_count: _DCList[int] | None = None,
+) -> _DCList[float]:
+    """T4 — pack-aware. Info used: {T3 + opp_trust + opp_wins}.
+
+    Builds on T3's self-aware logic and adds two opponent-state signals:
+
+      A. OPP-WEAKNESS BONUS: when the strongest opponent on attribute a has
+         damaged trust (max_opp_trust_a low), I can dominate that attribute
+         at a cheaper claim. The T3 cheap-lie threshold is LOWERED by
+         0.2 × (1 − max_opp_trust_a) on attrs where opps are weak, so more
+         attributes qualify as cheap-lie targets.
+
+      B. OPP-WINS PRESSURE: when the leading opponent has many wins, they
+         are at peak strategic power (their trust ratio is most efficient).
+         The non-cheap inflation term gets a bonus +0.2 × opp_max_wins_norm
+         to push harder before their position consolidates further.
+
+    Formula (extending T3):
+        opp_weakness_a   = 1 − max(opp_trust_a)
+        opp_pressure     = max(opp_wins) / total_rounds
+        threshold_a      = 0.5 − 0.3 × progress − 0.2 × opp_weakness_a
+        if own_trust_a < 0.5:
+            c_a = t_a
+        elif t_a >= threshold_a:
+            c_a = 1.0
+        else:
+            c_a = clip(t_a + 0.3 + 0.3 × wins_norm + 0.2 × opp_pressure, 0.5, 1.0)
+
+    Reduces to T3 when opps are fresh (opp_weakness=0, opp_pressure=0).
+    Strict generalization in the auction-T4 sense — extra opp info never
+    hurts, sometimes helps."""
+    n = len(truth)
+    if len(own_trust) != n:
+        raise ValueError("truth/own_trust length mismatch")
+    N = max(1, int(total_rounds))
+    progress = max(0.0, min(1.0, float(round_index) / N))
+    wins_norm = max(0.0, min(1.0, float(own_wins_count) / N))
+    if opponents_trust:
+        opp_max_per_attr = [
+            max(max(0.0, min(1.0, v[a])) for v in opponents_trust)
+            for a in range(n)
+        ]
+    else:
+        opp_max_per_attr = [1.0] * n
+    del opponents_wins_count
+    # Strength-based push: push harder on attributes where opp is STRONG
+    # (still in scoring territory) AND I have spare wins-capacity to spend.
+    # Per-attribute marginal calculus under track-record:
+    #   - opp_strength_a (= max_opp_trust_a) high → opp's per-attr ceiling is
+    #     high → I need to push to compete on this attr.
+    #   - opp_strength_a low → opp's per-attr score is bounded low → moderate
+    #     play already wins this attr → don't waste own trust here.
+    #   - wins_norm high → my own marginal cost-per-disc is tiny (denominator
+    #     dilution) → cheap to push.
+    # Push factor combines both: only push hard where competition is real AND
+    # I can afford it.
+    out: _DCList[float] = []
+    for a in range(n):
+        t = float(truth[a])
+        trust = max(0.0, min(1.0, float(own_trust[a])))
+        opp_strength = opp_max_per_attr[a]  # high = opp is strong on a
+        push_a = wins_norm * opp_strength
+        threshold = 0.5 - 0.3 * progress - 0.3 * push_a
+        if trust < 0.5:
+            out.append(_dc_quantize(t))
+        elif t >= threshold:
+            out.append(1.0)
+        else:
+            c = t + 0.3 + 0.3 * wins_norm
+            out.append(_dc_quantize(max(0.5, min(1.0, c))))
+    return out
+
+
+deception_policy_tier4_pack_proportional = deception_policy_tier4_pack_aware
+
+
+# Back-compat aliases — legacy imports reference older T2/T3/T4 names.
+deception_policy_tier2_cheap_lie = deception_policy_tier2_uniform_backoff
+deception_policy_tier3_trust_budgeter = deception_policy_tier3_trust_proportional
+deception_policy_tier4_pack_shadower = deception_policy_tier4_pack_proportional
+deception_policy_tier2_uniform_aggressive = deception_policy_tier2_uniform_backoff
+deception_policy_tier3_trust_scaled_aggressive = deception_policy_tier3_trust_proportional
+deception_policy_tier4_opp_adjusted_aggressive = deception_policy_tier4_pack_proportional
+deception_policy_tier2_max_headroom = deception_policy_tier2_uniform_backoff
+deception_policy_tier2_uniform = deception_policy_tier2_uniform_backoff
+deception_policy_tier2_greedy_maxweight = deception_policy_tier2_uniform_backoff
+deception_policy_tier3_trust_aware_concentrator = deception_policy_tier3_trust_proportional
+deception_policy_tier3_per_attr_nash = deception_policy_tier3_trust_proportional
+deception_policy_tier3_single_attr_lie = deception_policy_tier3_trust_proportional
+deception_policy_tier4_opp_aware_concentrator = deception_policy_tier4_pack_proportional
+deception_policy_tier4_symmetric_nash = deception_policy_tier4_pack_proportional
+deception_policy_tier4_backloaded = deception_policy_tier4_pack_proportional
+deception_policy_tier4_concentrator = deception_policy_tier4_pack_proportional
 
 
 DECEPTION_TIER_POLICIES = {
-    "Math-T1": deception_policy_tier1_honest,
-    "Math-T2": deception_policy_tier2_uniform,
-    "Math-T3": deception_policy_tier3_single_attr_lie,
-    "Math-T4": deception_policy_tier4_backloaded,
+    # Canonical semantic names — preferred for new code and outputs.
+    "Math-Trivial-Max":   deception_policy_tier1_trivial_max,
+    "Math-Truth-Anchored": deception_policy_tier2_truth_anchored,
+    "Math-Self-Aware":    deception_policy_tier3_self_aware,
+    "Math-Pack-Aware":    deception_policy_tier4_pack_aware,
+    # Math-RL ("Math-T5") is dispatched via _deception_t5_claim in server.py,
+    # not via this registry, since it loads a PPO checkpoint at runtime.
+    # Back-compat aliases — older save slots and scripts use the T-numbered
+    # form. Keep both so historical episode_log.json reads correctly and
+    # existing run scripts don't break.
+    "Math-T1": deception_policy_tier1_trivial_max,
+    "Math-T2": deception_policy_tier2_truth_anchored,
+    "Math-T3": deception_policy_tier3_self_aware,
+    "Math-T4": deception_policy_tier4_pack_aware,
+    # Other hand-coded benchmarks (not part of the info-ladder).
+    "Math-Naive":      deception_policy_naive_max,
+    "Math-Smart":      deception_policy_smart,
+    "Math-Calibrated": deception_policy_calibrated,
 }
