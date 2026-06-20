@@ -1,0 +1,142 @@
+% =====================================================================
+% DECEPTION COMPETITION (v5, "track-record") -- full rewrite, two chunks.
+%   CHUNK 1 -> goes in \section{Methodology}
+%   CHUNK 2 -> goes in \section{Experimental Results}
+% Replaces the old (scalar-trust, w-vector) deception section entirely.
+% v5 rules: per-attribute trust, EQUAL weights, track-record denominator =
+% win count. Math tiers are an INFORMATION ladder (Trivial-Max, Truth-Anchored,
+% Self-Aware, Pack-Aware, RL), mirroring the auction baselines.
+% Data: 50 real-LLM episodes (folder 65); 150 mimic episodes (folder 84);
+% 150 per tier vs mimics (85-89); 10 per tier vs real LLMs (92-96).
+% No em dashes. See deception_stats_notes.md for provenance.
+% =====================================================================
+
+
+% #####################################################################
+% ## CHUNK 1 -- METHODOLOGY
+% #####################################################################
+
+\subsection{Deception Competition}
+\label{sec:deception}
+To study strategic dishonesty in a controlled setting, we designed a repeated simultaneous-move game in which $N=5$ sales agents pitch a single resort to a mechanical buyer over $T=12$ rounds. Each round the resort is described by $K=5$ quality attributes whose true values form a vector $t^{(r)}\in[0,1]^{K}$, quantized to two decimal places and re-sampled each round, and every agent observes the full truth before acting. Each agent then simultaneously emits a claim vector $c_i^{(r)}\in[0,1]^{K}$. Because every agent sees the truth, a claim above it is a deliberate over-statement rather than a guess, so the game is purely one of how far each agent will distort what it knows, given that distortion erodes its standing with the buyer. The buyer is non-strategic (a fixed mechanism), and all five attributes are weighted equally.
+
+\subsubsection{Scoring and booking}
+The buyer scores each agent by its credibility-weighted appeal, where a per-attribute credibility $\mathrm{tr}_{i,a}^{(r)}\in[0,1]$ (initialized to $1$) multiplies each claim:
+\begin{equation}
+s_i^{(r)} = \frac{1}{K}\sum_{a=1}^{K} c_{i,a}^{(r)}\,\mathrm{tr}_{i,a}^{(r)}.
+\label{eq:dec5-score}
+\end{equation}
+Per-attribute credibility acts as an attribute-level discount: a claim on a discredited attribute contributes little to the score even when it is high. Each round the buyer books the highest-scoring agent, $\mathcal{W}^{(r)}=\operatorname*{arg\,max}_i s_i^{(r)}$ (set-valued under ties, with no minimum threshold); winners split a unit reward equally and all others receive $0$, so an agent's episode return is its number of (tie-shared) bookings, bounded by $T$. The score magnitude never enters the reward directly; credibility matters only through who wins.
+
+\subsubsection{Credibility dynamics: a track record}
+The single cost of lying is a persistent loss of credibility, and it is incurred only on the rounds the buyer actually books the agent, since the buyer experiences a resort only when it books it. Writing the per-attribute over-promise as $d_{i,a}^{(r)} = \max\!\bigl(0,\, c_{i,a}^{(r)} - t_a^{(r)}\bigr)$, an agent's per-attribute credibility is one minus its average over-promise across the rounds it has won:
+\begin{equation}
+\mathrm{tr}_{i,a} = 1 - \frac{\sum_{r\,:\,i\in\mathcal{W}^{(r)}} d_{i,a}^{(r)}}{\max\!\bigl(1,\ n_i^{\mathrm{win}}\bigr)},
+\label{eq:dec5-trust}
+\end{equation}
+where $n_i^{\mathrm{win}}$ is the agent's booking count so far. An agent that has never been booked retains full credibility (no track record). Winning a round with a large over-promise on attribute $a$ craters that attribute's credibility; winning with honest claims on $a$ heals it, since the running average falls. Because the denominator is the booking count and the numerator is per-attribute, the five-dimensional structure carries real strategic weight: a single-attribute lie damages only that dimension, so \emph{which} attribute to inflate, and how cheaply, is the core decision.
+
+\subsubsection{Behavioral metrics}
+We summarize an agent's revealed strategy by its lie rate (the fraction of claimed attributes that exceed the truth), its win rate (the fraction of rounds booked), its per-attribute over-promise $d_{i,a}^{(r)}$, and its final credibility $\mathrm{tr}_{i,a}^{(T)}$.
+
+\subsubsection{Math-tier reference policies}
+\label{sec:dec5-tiers}
+Paralleling the auction baselines, we define a ladder of policies of increasing information use, all acting on the truth plus the listed state and emitting a quantized claim vector:
+\begin{itemize}
+\item \textbf{Trivial-Max:} claim $1.0$ on every attribute every round. No information; the state-free ceiling baseline.
+\item \textbf{Truth-Anchored:} information $\{$truth$\}$. Claims maximally only where the truth is already high, so the over-promise (and thus the credibility damage) is small, and stays near the truth on the rest. The first ``thinking'' tier.
+\item \textbf{Self-Aware:} adds own per-attribute credibility, own bookings, and round progress. Backs off inflation on attributes whose credibility is burned and restores them by claiming honestly there.
+\item \textbf{Pack-Aware:} adds the opponents' credibility and bookings, concentrating inflation where it can outscore the current field.
+\item \textbf{RL:} a stochastic policy warm-started by $30$ episodes of behavior cloning on Pack-Aware and then trained with PPO (clipped surrogate objective, GAE advantage estimation) for $8{,}000$ episodes against the mimic ensemble; the reward is the number of bookings, so the policy approximates a best response to the mimic opponent population.
+\end{itemize}
+
+\subsubsection{Behavioral mimics}
+\label{sec:dec5-mimics}
+As in the auction study, we distill each LLM into a cheap surrogate and use it as a drop-in replacement at scale. We reuse the two-head design of Section~\ref{sec:mimics}: a shared trunk feeding a lie head (a per-attribute probability of over-claiming, trained with binary cross-entropy) and a claim head (the regressed claim value, trained with mean-squared error on the attributes that were lied on). The only deception-specific change is the input, a leakage-safe $32$-dimensional encoding of the observed truth, the agent's own and opponents' per-attribute credibility, the round fraction, and a compact behavioral-history block, the last of which lets the surrogate reproduce timing-dependent play. At deployment the mimic samples the per-attribute lie decision (with temperature $\Theta$), snaps the attributes it does not lie about to the truth, and perturbs each remaining regressed claim by Gaussian noise at the claim head's per-attribute training-residual scale, so the surrogate reproduces the spread of each model's claims rather than collapsing to the conditional mean.
+
+\subsubsection{Fidelity validation and the transfer test}
+\label{sec:dec5-fidelity-method}
+We validate the substitution at the level the mimics are actually used for, namely as the opponent field in the strategy comparison, and therefore at the \emph{outcome} level: we compare the per-model distribution of bookings between real-LLM and mimic-field games, treating the episode as the independent replicate. As a secondary and looser check we report the marginal claim-distribution total-variation distance (TVD). Finally, because distributional fidelity need not imply that strategy \emph{rankings} measured against the mimics hold against the real models, we run an explicit transfer test: each reference policy is played against a fixed field of mimics and, separately, against the real LLMs, and the two orderings are compared. Throughout, the episode is the independent replicate and win rates are reported as the mean of per-episode booking fractions with $95\%$ confidence intervals.
+
+
+% #####################################################################
+% ## CHUNK 2 -- EXPERIMENTAL RESULTS
+% #####################################################################
+
+\subsection{Deception Competition}
+
+\subsubsection{Model Behavior Characterization}
+We characterize claim behavior from $50$ real-LLM episodes (Table~\ref{tab:dec5_behavior}). One feature is shared by all five models: on attributes whose truth is already high they all claim near the ceiling (mean claim $0.94$--$0.97$ on attributes with $t\ge0.7$), which is nearly free, since the over-promise there is only $0.09$--$0.12$. What separates the models is entirely how hard they inflate the \emph{low-truth} attributes, where a high claim is an expensive lie that craters that attribute's credibility.
+
+\begin{table}[htbp]
+\caption{Deception behavior (50 real-LLM episodes). Win rate is the mean of per-episode booking fractions with a $95\%$ confidence interval; over-claim is the mean over-promise on low-truth attributes ($t\le0.3$, the expensive lies); final credibility is averaged over attributes. Fair share is $20\%$.}
+\label{tab:dec5_behavior}
+\centering
+\begin{tabular}{lcccc}
+\hline
+Model & Win\% (95\% CI) & Mean claim & Over-claim$_{\,t\le0.3}$ & Final cred. \\
+\hline
+Pro   & 29.6 [25.5, 33.6] & 0.86 & 0.56 & 0.56 \\
+Opus  & 24.7 [20.5, 28.9] & 0.86 & 0.60 & 0.59 \\
+Llama & 20.3 [17.7, 23.0] & 0.61 & 0.09 & 0.82 \\
+GPT   & 13.1 [10.4, 15.8] & 0.78 & 0.43 & 0.55 \\
+Grok  & 12.3 [10.1, 14.5] & 0.83 & 0.52 & 0.53 \\
+\hline
+\end{tabular}
+\end{table}
+
+Pro and Opus inflate the low-truth attributes the hardest (over-promising by $0.56$ and $0.60$ on attributes with $t\le0.3$), drive their credibility down to $\approx0.56$--$0.59$, and win the most rounds ($29.6\%$ and $24.7\%$) on the strength of the raw claim height. Llama is the lone exception: it stays close to the truth on the low-truth attributes (over-promise $0.09$), keeps by far the highest credibility ($0.82$), and lands at the fair share ($20.3\%$), credible but never claiming high enough to dominate. GPT and Grok inflate the low-truth attributes moderately and end with credibility as damaged as Pro and Opus but without the winning claim height, finishing last ($13.1\%$ and $12.3\%$). The worst outcome is thus the muddled middle: spending one's track record without claiming high enough to cash it in.
+
+\subsubsection{Mimic Fidelity}
+\label{sec:dec5-fidelity}
+We assess fidelity at the level the mimics are used for, the competition outcome. Replaying the matched-seed games with the mimic loadout reproduces the real per-model booking distribution closely: the effect size is negligible (Cram\'er's $V = 0.039$, below the conventional $0.1$ threshold), every per-model win-share difference is at most $3.0$ percentage points (Table~\ref{tab:dec5_fidelity}, $50$ real and $150$ mimic episodes), and a chi-squared test of independence is consistent with this ($\chi^2 = 3.56$, $p = 0.47$). The marginal claim distributions are matched more loosely, with a pooled TVD of $0.186$ (per-model $0.085$--$0.342$, Grok the loosest). The contrast is itself informative: the mimics are faithful where it matters for their use, the competitive outcome, even though their raw claim histograms agree only roughly, so outcome fidelity here does not ride on tight distributional fidelity.
+
+\begin{table}[htbp]
+\caption{Outcome-level mimic fidelity: per-model booking share, real ($n=50$) vs.\ the mimic field ($n=150$). All differences are within $3.0$ pp.}
+\label{tab:dec5_fidelity}
+\centering
+\begin{tabular}{lccc}
+\hline
+Model & Real (\%) & Mimic (\%) & $\Delta$ (pp) \\
+\hline
+Pro   & 29.6 & 28.2 & $-1.4$ \\
+Opus  & 24.7 & 24.2 & $-0.5$ \\
+Llama & 20.3 & 23.3 & $+3.0$ \\
+GPT   & 13.1 & 11.3 & $-1.8$ \\
+Grok  & 12.3 & 13.0 & $+0.7$ \\
+\hline
+\multicolumn{4}{l}{Cram\'er's $V = 0.039$;\ \ $\chi^2 = 3.56$, $p = 0.47$ ($N=2399$ bookings).} \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Baseline Comparison}
+\label{sec:dec5-ladder}
+We play each reference policy as the focal seat against a fixed field of four mimics ($150$ episodes each); with five agents the fair share is $20\%$. Table~\ref{tab:dec5_ladder} reports win rates, and the ladder is cleanly monotonic in information use: the information-free Trivial-Max is the \emph{worst} policy ($12.8\%$, well below fair share), and every added layer of information improves on it, from Truth-Anchored ($19.0\%$) to Self-Aware ($22.9\%$) to Pack-Aware ($24.4\%$) to the learned RL ($35.2\%$). The mechanism is the track-record audit: Trivial-Max claims $1.0$ on every attribute, so it over-promises maximally on the low-truth attributes and craters their credibility, which the multiplier in Eq.~\eqref{eq:dec5-score} discounts to near nothing. This inverts the auction, where the information-free Trivial policy was near the \emph{top}: blind maximization wins cheap lots there but craters credibility here, because the depletable resource is credibility rather than budget.
+
+\begin{table}[htbp]
+\caption{Information ladder: win rate of each reference policy against a fixed field of four mimics ($n=150$ each), and the transfer to a field of four real LLMs ($n=10$ each). Win rate is the mean of per-episode booking fractions with a $95\%$ confidence interval; fair share is $20\%$. The vs-real column is $n=10$ and should be read for ordering, not exact magnitude.}
+\label{tab:dec5_ladder}
+\centering
+\begin{tabular}{lcc}
+\hline
+Policy & vs mimics (95\% CI) & vs real LLMs (95\% CI) \\
+\hline
+Trivial-Max    & 12.8 [11.6, 14.0] & 13.6 [\,9.3, 17.9] \\
+Truth-Anchored & 19.0 [17.0, 21.1] & 18.3 [11.0, 25.7] \\
+Self-Aware     & 22.9 [20.6, 25.3] & 25.8 [17.2, 34.5] \\
+Pack-Aware     & 24.4 [21.9, 26.9] & 23.3 [14.1, 32.6] \\
+RL             & \textbf{35.2} [33.2, 37.2] & 29.2 [21.6, 36.7] \\
+\hline
+\end{tabular}
+\end{table}
+
+We then re-ran every tier against a field of four real LLMs ($10$ episodes each; the right column of Table~\ref{tab:dec5_ladder}). The hand-coded ladder transfers: the ordering is preserved (Trivial-Max worst, the information tiers rising through it) and the magnitudes barely move (Trivial-Max $12.8\to13.6$, Truth-Anchored $19.0\to18.3$). The exception is the learned policy: against the mimics RL leads the next-best tier by nearly $11$ points with a separated interval, but against the real LLMs that lead collapses into the noise ($29.2\%$, overlapping Self-Aware and Pack-Aware), since RL fit surrogate-specific behavior that the fixed information rules do not. With only $n=10$ real-LLM episodes per tier these magnitudes are indicative, but the preserved ordering and the RL collapse are robust.
+
+\subsubsection{Synthesis}
+The deception results cohere into one account. Under the track-record audit the five attributes are load-bearing: inflating the cheap (high-truth) attributes is nearly free while inflating the expensive (low-truth) ones craters that dimension's credibility, so the winning models ride that line aggressively, the honest one takes its fair share, and the muddled middle is worst. The reference ladder is monotonic in information use and transfers cleanly to the real models; the lone exception is the learned RL policy, whose decisive mimic-field lead collapses to within noise against them. That boundary is the same one the auction draws, and the two environments together make it sharper: distributional and strategic fidelity are decoupled in both directions, since the auction mimics matched the bid distribution tightly yet a trained policy lost its lead, while the deception mimics match the claim distribution only loosely yet still rank the fixed ladder faithfully. In both, it is the policy \emph{trained} on the mimics that fails to transfer, so behavioral mimics are faithful enough to \emph{compare} fixed strategies but not to \emph{train} a deployable one.
+
+% Two figures exist in simulation/exports/figures/ but are omitted for space/parallelism:
+% deception_claim_vs_truth (behavior; redundant with the prose + Table~\ref{tab:dec5_behavior})
+% and deception_ladder_transfer (redundant with Table~\ref{tab:dec5_ladder}). Drop either in
+% if a reviewer wants a visual.

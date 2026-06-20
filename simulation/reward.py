@@ -320,76 +320,133 @@ def open_auction_reward(*, paintings_won: int, invalid_actions: int = 0, timeout
     return float(paintings_won) - 0.1 * float(invalid_actions) - 0.05 * float(timeout_actions)
 
 
-# ── Deception Competition reward (Option R: continuous trust degradation) ───
+# ── Deception Competition reward (Option R: per-attribute trust) ────────────
 #
-# No catch event, no penalty. The buyer scores each agent's pitch, books the
-# highest among those who clear the threshold, and post-booking experiences
-# the truth — which updates the booked agent's trust toward their long-run
-# average truthfulness. Losers' trust is untouched (the buyer never tested
-# them this round).
+# No catch event, no penalty, no threshold. The buyer scores each agent's pitch
+# using PER-ATTRIBUTE trust and books the highest scorer every round (ties
+# split). Post-booking, the winner's per-attribute trusts each update toward
+# the running average of their per-attribute over-promise. Losers' trust is
+# untouched (the buyer never tested them this round).
+#
+# Strategic consequence: concentrating lies in one attribute damages only that
+# attribute's trust dimension, leaving the others clean. So the choice of
+# WHICH attribute(s) to lie on becomes genuinely strategic — unlike the prior
+# scalar-trust design, where total weighted over-promise was the only knob.
+
+import os as _os
+
+
+def _deception_trust_exponent() -> float:
+    """Sharpness exponent k for the trust→score curve. score_a = c_a × trust_a^k.
+
+    k = 1 (default original): linear, mild punishment for lying.
+    k > 1: damaged trust hurts more steeply; rewards strategic backoff.
+    Tunable via env var DECEPTION_TRUST_EXPONENT for calibration sweeps.
+    """
+    try:
+        return max(0.0, float(_os.environ.get("DECEPTION_TRUST_EXPONENT", "1.0")))
+    except (TypeError, ValueError):
+        return 2.0
+
 
 def deception_competition_score(
-    *, claim: List[float], preferences: List[float], trust: float
+    *, claim: List[float], trust: List[float]
 ) -> float:
     """Buyer's perceived booking score for an agent.
 
-    score = (w · c) × (0.5 + 0.5 × trust)
+    score = (Σ_a c_a × trust_a^k) / 5
 
-    Trust 1.0 → 1.0× multiplier; trust 0.0 → 0.5× floor. Score is uncapped;
-    the env compares it to the threshold to decide winners.
+    All 5 attributes are weighted equally. Per-attribute trust acts as an
+    attribute-level credibility multiplier raised to a sharpness exponent k
+    (see _deception_trust_exponent). At k=1 the multiplier is linear; at k>1
+    a damaged-trust attribute contributes much less to the buyer's perceived
+    value, making strategic lie-management worthwhile.
     """
-    if len(claim) != len(preferences):
-        raise ValueError(f"claim and preferences length mismatch: {len(claim)} vs {len(preferences)}")
-    raw = sum(c * w for c, w in zip(claim, preferences))
-    multiplier = 0.5 + 0.5 * max(0.0, min(1.0, trust))
-    return raw * multiplier
+    if len(claim) != len(trust):
+        raise ValueError(f"claim/trust length mismatch: {len(claim)} / {len(trust)}")
+    n = len(claim)
+    if n == 0:
+        return 0.0
+    k = _deception_trust_exponent()
+    return sum(
+        c * (max(0.0, min(1.0, t)) ** k)
+        for c, t in zip(claim, trust)
+    ) / float(n)
 
 
-def deception_competition_discrepancy(
-    *, claim: List[float], truth: List[float], preferences: List[float]
-) -> float:
-    """Weighted over-promise: max(0, w · (c − t)).
+def deception_competition_discrepancy_per_attr(
+    *, claim: List[float], truth: List[float]
+) -> List[float]:
+    """Per-attribute non-negative over-promise: [max(0, c_a − t_a) for a].
 
-    Always in [0, 1] because w sums to 1 and c, t ∈ [0, 1]. Under-promising
-    (c < t on an attribute) is ignored — the buyer is never disappointed by
-    under-promised attributes.
+    Under-promising (c < t on an attribute) contributes 0 — the buyer is never
+    disappointed by under-promised attributes. Unlike the prior weighted-sum
+    discrepancy, this is per-attribute so attribute trust can update
+    independently.
     """
-    if not (len(claim) == len(truth) == len(preferences)):
-        raise ValueError("claim, truth, and preferences must have the same length")
-    raw = sum(w * (c - t) for c, t, w in zip(claim, truth, preferences))
-    return max(0.0, raw)
+    if len(claim) != len(truth):
+        raise ValueError("claim and truth length mismatch")
+    return [max(0.0, c - t) for c, t in zip(claim, truth)]
 
 
 def deception_competition_reward(
-    *, is_winner: bool, score: float, threshold: float, num_winners: int,
+    *, is_winner: bool, num_winners: int,
 ) -> float:
     """Per-round reward for a single agent.
 
     Winners split 1.0 evenly: solo win = +1, 2-way tie = +0.5 each, etc.
     Non-winners get 0. The score magnitude does NOT enter the reward — trust
-    matters only because it affects who wins (via the score multiplier), not
-    because it shrinks per-win payout.
+    matters only because it affects who wins (via the score multiplier).
 
     Total episode reward = effective wins, bounded by num_rounds.
     """
-    del score, threshold   # signature kept for compatibility; values unused
     if is_winner and num_winners > 0:
         return 1.0 / float(num_winners)
     return 0.0
 
 
-def deception_competition_trust_from_history(
-    *, sum_discrepancy_when_won: float, win_count: int
-) -> float:
-    """Average-of-experiences trust.
+def _deception_trust_mode() -> str:
+    """Which trust formula to use. 'passive_dilution' (default) divides by
+    rounds_played → lying agents passively recover trust over time even on
+    losing rounds. 'track_record' divides by wins_count → trust is the
+    average quality of your delivered claims, so rest only heals on wins."""
+    mode = _os.environ.get("DECEPTION_TRUST_MODE", "track_record").strip().lower()
+    if mode not in {"passive_dilution", "track_record"}:
+        return "passive_dilution"
+    return mode
 
-    trust = 1 - sum_discrepancy_when_won / max(1, win_count)
 
-    Never-won agents have trust = 1 (no data). Asymptotic recovery toward 1.0
-    as honest wins accumulate; one big lie can't permanently destroy trust
-    given enough subsequent honest wins.
+def deception_competition_trust_from_history_per_attr(
+    *,
+    sum_discrepancy_when_won: List[float],
+    rounds_played: int,
+    wins_count: int = 0,
+) -> List[float]:
+    """Per-attribute trust as a running average of discrepancy on winning rounds.
+
+    The denominator depends on DECEPTION_TRUST_MODE:
+
+    - 'passive_dilution' (default): trust_a = 1 − sum_disc_a / max(1, rounds_played).
+      Numerator only grows on wins; denominator grows every round.
+      Losing rounds passively heal trust toward 1.0 (no action required).
+
+    - 'track_record': trust_a = 1 − sum_disc_a / max(1, wins_count).
+      Numerator AND denominator only grow on wins.
+      Trust on attribute a is literally the average over-claim on a per win.
+      Losing rounds don't heal anything; the only way to lower the average
+      is to win a round while claiming truthfully on attr a.
+
+    The track_record mode pairs with the 5-D per-attr trust structure: smart
+    play is to lie on high-truth (cheap) attrs in winning rounds and claim
+    truth on low-trust attrs to pull their running average back down.
+
+    Agents who haven't played any rounds yet have trust = [1.0]×5 (no data).
     """
-    if win_count <= 0:
-        return 1.0
-    avg_discrepancy = float(sum_discrepancy_when_won) / float(win_count)
-    return max(0.0, min(1.0, 1.0 - avg_discrepancy))
+    if rounds_played <= 0:
+        return [1.0] * len(sum_discrepancy_when_won)
+    mode = _deception_trust_mode()
+    if mode == "track_record":
+        denom = max(1, int(wins_count))
+    else:
+        denom = max(1, int(rounds_played))
+    return [max(0.0, min(1.0, 1.0 - s / denom)) for s in sum_discrepancy_when_won]

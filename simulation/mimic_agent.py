@@ -22,6 +22,34 @@ import torch.nn as nn
 from .state import OpenAuctionAction
 
 
+def _deception_temperature() -> float:
+    """Scale applied to each LLM's learned residual std for stochastic dispatch.
+
+    Default 1.75 — "sample with the model's natural variance plus a small
+    smoothing buffer". The actual additive Gaussian noise std per attribute
+    is `T * residual_std_per_attr`, where residual_std is fit at training
+    time and stored in the .pt checkpoint.
+
+    T = 1.75 was selected by sweeping {0.0, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75,
+    2.0, 2.5, 3.0, 4.0} on the v3 LLM episodes against 150 matched-seed
+    all-mimic episodes (3 replicates per truth seed). T = 1.75 minimized
+    Cramer's V at 0.017 with chi-sq p = 0.95 (compared to auction's 0.041
+    benchmark) while keeping per-LLM strategic fingerprints intact;
+    higher T values start washing out the per-LLM signature.
+
+    Useful overrides via DECEPTION_MIMIC_TEMPERATURE env var:
+      T = 0      → fully deterministic argmax-style emission
+      T = 1.0    → exactly the source LLM's learned variance
+      T = 1.75   → default (smoothed natural variance, best fidelity)
+      T = 3.0+   → over-stochastic; per-LLM fingerprint degrades
+    """
+    import os
+    try:
+        return max(0.0, float(os.environ.get("DECEPTION_MIMIC_TEMPERATURE", "0.50")))
+    except (TypeError, ValueError):
+        return 1.75
+
+
 def _temperature() -> float:
     """Global stochasticity knob, read from MIMIC_TEMPERATURE env var.
 
@@ -368,10 +396,88 @@ def mimic_bid(
 # Deception Competition mimic dispatch (D9: two-head architecture)
 # ---------------------------------------------------------------------------
 
-class _DeceptionMimic(nn.Module):
-    """Two-head deception mimic — must mirror simulation/train_deception_nn.py."""
+DECEPTION_MIMIC_INPUT_DIM = 32
 
-    def __init__(self, input_dim: int = 10, hidden: int = 32, dropout: float = 0.2, num_attrs: int = 5):
+
+def build_deception_mimic_input(
+    *,
+    truth: list[float],
+    own_trust: list[float],
+    opponents_trust: list[list[float]] | None,
+    round_index: int,
+    total_rounds: int,
+    own_wins_count: int = 0,
+    opponents_wins_count: list[int] | None = None,
+) -> list[float]:
+    """Build the 32-dim mimic input vector.
+
+    Layout:
+        [ 0: 5]  truth                              — this round's truth
+        [ 5:10]  own_trust                          — per-attribute own trust
+        [10:15]  opp_trust_max_per_attr             — strongest opp on each attr
+        [15:20]  opp_trust_mean_per_attr            — average opp on each attr
+        [20:25]  opp_trust_min_per_attr             — weakest opp on each attr
+        [25:29]  opp_strengths_sorted_desc          — each opp's mean trust, sorted
+        [29:30]  round_progress                     — round_index / total_rounds
+        [30:31]  own_wins_norm                      — own_wins_count / total_rounds
+        [31:32]  opp_wins_max_norm                  — max(opp_wins) / total_rounds
+
+    Under track-record, trust = cum_disc / max(1, wins_count). The marginal cost
+    of an over-claim THIS round depends on wins_count: a 0.5 disc lie at
+    wins=1 → trust drops by 0.5; at wins=6 → trust drops by 0.07. Same trust
+    state, very different future-cost calculus. own_wins_norm and the
+    strongest-opp's wins (max) are the two scalar additions; opp_wins for the
+    weaker opponents are correlated enough with opp_trust aggregates to skip.
+
+    Permutation-invariant in opponent order.
+    """
+    n_attrs = 5
+    n_opps = 4
+    t = list(truth[:n_attrs])
+    if len(t) < n_attrs:
+        t = t + [0.0] * (n_attrs - len(t))
+    own = list(own_trust[:n_attrs])
+    if len(own) < n_attrs:
+        own = own + [1.0] * (n_attrs - len(own))
+    opps = []
+    for vec in (opponents_trust or []):
+        v = list(vec[:n_attrs])
+        if len(v) < n_attrs:
+            v = v + [1.0] * (n_attrs - len(v))
+        opps.append(v)
+    while len(opps) < n_opps:
+        opps.append([1.0] * n_attrs)
+    opps = opps[:n_opps]
+    opp_max = [max(opps[i][a] for i in range(n_opps)) for a in range(n_attrs)]
+    opp_mean = [sum(opps[i][a] for i in range(n_opps)) / float(n_opps) for a in range(n_attrs)]
+    opp_min = [min(opps[i][a] for i in range(n_opps)) for a in range(n_attrs)]
+    opp_strengths = sorted(
+        [sum(opps[i]) / float(n_attrs) for i in range(n_opps)],
+        reverse=True,
+    )
+    progress = float(round_index) / max(1, int(total_rounds))
+    progress = max(0.0, min(1.0, progress))
+    own_wins_norm = max(0.0, min(1.0, float(own_wins_count) / max(1, int(total_rounds))))
+    opp_wins = list(opponents_wins_count or [])
+    while len(opp_wins) < n_opps:
+        opp_wins.append(0)
+    opp_wins = opp_wins[:n_opps]
+    opp_wins_max_norm = max(
+        max(0.0, min(1.0, float(w) / max(1, int(total_rounds)))) for w in opp_wins
+    )
+    return (
+        t + own + opp_max + opp_mean + opp_min + opp_strengths
+        + [progress, own_wins_norm, opp_wins_max_norm]
+    )
+
+
+class _DeceptionMimic(nn.Module):
+    """Single-head direct-claim deception mimic — mirrors train_deception_nn.py.
+
+    Sigmoid output gives claim_a in [0, 1] directly.
+    """
+
+    def __init__(self, input_dim: int = DECEPTION_MIMIC_INPUT_DIM, hidden: int = 32, dropout: float = 0.2, num_attrs: int = 5):
         super().__init__()
         self.register_buffer("input_mean", torch.zeros(input_dim))
         self.register_buffer("input_std", torch.ones(input_dim))
@@ -383,16 +489,15 @@ class _DeceptionMimic(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
         )
-        self.lie_head = nn.Linear(hidden, num_attrs)
         self.claim_head = nn.Linear(hidden, num_attrs)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = (x - self.input_mean) / self.input_std
         h = self.trunk(x)
-        return self.lie_head(h), torch.sigmoid(self.claim_head(h))
+        return torch.sigmoid(self.claim_head(h))
 
 
-_DECEPTION_MODELS_DIR = Path(__file__).parent / "models" / "deception_v1"
+_DECEPTION_MODELS_DIR = Path(__file__).parent / "models" / "deception_v5"
 _DECEPTION_NET_CACHE: dict[str, _DeceptionMimic] = {}
 
 
@@ -406,6 +511,9 @@ def _deception_model_path(alias: str) -> Path:
     return _DECEPTION_MODELS_DIR / f"mimic_{base}.pt"
 
 
+_DECEPTION_RESIDUAL_STD_CACHE: dict[str, list[float]] = {}
+
+
 def _load_deception_mimic(alias: str) -> _DeceptionMimic | None:
     if alias in _DECEPTION_NET_CACHE:
         return _DECEPTION_NET_CACHE[alias]
@@ -414,54 +522,84 @@ def _load_deception_mimic(alias: str) -> _DeceptionMimic | None:
         return None
     payload = torch.load(path, map_location="cpu", weights_only=False)
     model = _DeceptionMimic(
-        input_dim=int(payload.get("input_dim", 10)),
+        input_dim=int(payload.get("input_dim", DECEPTION_MIMIC_INPUT_DIM)),
         hidden=int(payload.get("hidden", 32)),
         num_attrs=int(payload.get("num_attrs", 5)),
     )
     model.load_state_dict(payload["state_dict"])
     model.eval()
     _DECEPTION_NET_CACHE[alias] = model
+    # Cache residual std (may be absent on legacy checkpoints; default to 0
+    # which makes stochastic dispatch a no-op for old models).
+    rs = payload.get("residual_std")
+    if isinstance(rs, list) and len(rs) == 5:
+        _DECEPTION_RESIDUAL_STD_CACHE[alias] = [float(x) for x in rs]
+    else:
+        _DECEPTION_RESIDUAL_STD_CACHE[alias] = [0.0] * 5
     return model
 
 
 def deception_mimic_claim(
     alias: str,
     truth: list[float],
-    own_trust: float,
-    opponents_trust: list[float],
+    own_trust: list[float],
+    opponents_trust: list[list[float]] | None = None,
+    *,
+    round_index: int = 0,
+    total_rounds: int = 12,
+    own_wins_count: int = 0,
+    opponents_wins_count: list[int] | None = None,
 ) -> list[float]:
     """Return a 5-float claim vector for the named mimic.
 
-    Per D9:
-      - Run two-head NN: P(lie per attr) + raw claim per attr
-      - For each attr: sample/argmax lie decision → if no lie, snap claim to truth
-        (avoids float-noise spurious catches); if lie, quantize the regressor
-        output to 2dp.
+    Input is the 35-dim vector built by `build_deception_mimic_input` (see
+    that function for the layout): truth + own_trust + opp_trust aggregates
+    + round_progress + own_wins_norm + opp_wins_norm. Permutation-invariant
+    in opponent order.
     """
     model = _load_deception_mimic(alias)
     if model is None:
-        # Mimic not yet trained — fall back to honest play.
         return [round(float(t), 2) for t in truth]
 
-    # Build input. Truth (5) + own_trust (1) + opponents_trust (4).
-    if len(opponents_trust) < 4:
-        opponents_trust = list(opponents_trust) + [1.0] * (4 - len(opponents_trust))
-    x = list(truth[:5]) + [float(own_trust)] + [float(o) for o in opponents_trust[:4]]
+    x = build_deception_mimic_input(
+        truth=list(truth),
+        own_trust=list(own_trust),
+        opponents_trust=opponents_trust,
+        round_index=round_index,
+        total_rounds=total_rounds,
+        own_wins_count=own_wins_count,
+        opponents_wins_count=opponents_wins_count,
+    )
     x_tensor = torch.tensor([x], dtype=torch.float32)
     with torch.no_grad():
-        lie_logits, raw_claim = model(x_tensor)
-    p_lie = torch.sigmoid(lie_logits).squeeze(0).cpu().numpy()
-    raw = raw_claim.squeeze(0).cpu().numpy()
+        claim_pred = model(x_tensor)
+    raw = claim_pred.squeeze(0).cpu().numpy()
 
-    T = _temperature()
+    # Stochastic dispatch: noise std per attribute = T * residual_std_per_attr
+    # (residual_std is the LLM's natural variance learned at training time).
+    # T=1.0 (default) reproduces the LLM's variance; T=0 is deterministic.
+    # Per-mimic-call RNG seeded from the full input state hash so noise is
+    # reproducible from the env_seed (via truth schedule + own_trust history)
+    # rather than dependent on Python's global random state (which drifts
+    # unpredictably across HTTP server activity).
+    T = _deception_temperature()
+    rs = _DECEPTION_RESIDUAL_STD_CACHE.get(alias, [0.0] * 5)
+    import hashlib as _hashlib
+    h = _hashlib.sha256()
+    h.update(alias.encode("utf-8"))
+    h.update(str(int(round_index)).encode("utf-8"))
+    h.update(str(int(total_rounds)).encode("utf-8"))
+    h.update(str(tuple(round(float(t), 4) for t in truth)).encode("utf-8"))
+    h.update(str(tuple(round(float(t), 4) for t in own_trust)).encode("utf-8"))
+    h.update(str(int(own_wins_count or 0)).encode("utf-8"))
+    seed = int.from_bytes(h.digest()[:8], "big")
+    local_rng = _stdlib_random.Random(seed)
     out: list[float] = []
     for a in range(5):
-        if T > 0:
-            lie_a = _stdlib_random.random() < float(p_lie[a])
-        else:
-            lie_a = float(p_lie[a]) > 0.5
-        if lie_a:
-            out.append(round(max(0.0, min(1.0, float(raw[a]))), 2))
-        else:
-            out.append(round(float(truth[a]), 2))
+        v = float(raw[a])
+        noise_std = T * float(rs[a])
+        if noise_std > 0:
+            v = v + local_rng.gauss(0.0, noise_std)
+        v = max(0.0, min(1.0, v))
+        out.append(round(v, 2))
     return out

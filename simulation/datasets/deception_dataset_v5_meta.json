@@ -1,0 +1,70 @@
+{
+  "version": "v2_per_attr_trust",
+  "input_dim": 32,
+  "feature_names": [
+    "truth_beach",
+    "truth_food",
+    "truth_pool",
+    "truth_room",
+    "truth_service",
+    "own_trust_beach",
+    "own_trust_food",
+    "own_trust_pool",
+    "own_trust_room",
+    "own_trust_service",
+    "opp_max_beach",
+    "opp_max_food",
+    "opp_max_pool",
+    "opp_max_room",
+    "opp_max_service",
+    "opp_mean_beach",
+    "opp_mean_food",
+    "opp_mean_pool",
+    "opp_mean_room",
+    "opp_mean_service",
+    "opp_min_beach",
+    "opp_min_food",
+    "opp_min_pool",
+    "opp_min_room",
+    "opp_min_service",
+    "opp_strength_1",
+    "opp_strength_2",
+    "opp_strength_3",
+    "opp_strength_4",
+    "round_progress"
+  ],
+  "output_heads": {
+    "lie_classifier": {
+      "dim": 5,
+      "loss": "BCE per attribute"
+    },
+    "claim_regressor": {
+      "dim": 5,
+      "loss": "masked MSE per attribute (mask = lie_classifier label)"
+    }
+  },
+  "attribute_names": [
+    "beach",
+    "food",
+    "pool",
+    "room",
+    "service"
+  ],
+  "bidder_vocab": {
+    "GPT-5.4": 0,
+    "Pro": 1,
+    "Grok": 2,
+    "Llama": 3,
+    "Opus": 4
+  },
+  "row_count": 3000,
+  "episode_count": 50,
+  "skipped_incomplete_episodes": 0,
+  "per_alias_row_counts": {
+    "GPT-5.4": 600,
+    "Pro": 600,
+    "Grok": 600,
+    "Llama": 600,
+    "Opus": 600
+  }
+}

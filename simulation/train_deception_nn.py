@@ -1,15 +1,20 @@
 """Train per-LLM deception mimic networks.
 
-Architecture (D9):
-  Input:  10-dim [t0..t4, own_trust, opp1..opp4_trust]
-  Output: 5-dim lie classifier (sigmoid)  +  5-dim claim regressor (per-attribute)
+Architecture (per-attribute trust schema):
+  Input:  30-dim — see simulation.mimic_agent.build_deception_mimic_input
+          [truth_5, own_trust_5, opp_max_5, opp_mean_5, opp_min_5,
+           opp_strengths_sorted_4, round_progress_1]
+  Output: 5-dim claim regressor (sigmoid → [0, 1] per attribute)
 
 Loss:
-  BCE per attribute on the classifier head
-  Masked MSE on the regressor head (mask = y_lied label)
+  Plain MSE on the raw claim vector (no classifier, no masking).
+  Under the per-attribute continuous-trust system, lying-vs-honest is a
+  measure-zero distinction — the strategic variable is the (claim − truth)
+  magnitude. A single-head regressor captures this cleanly without the
+  base-rate confusion of a near-degenerate binary classifier.
 
-One model per LLM alias. Each model is saved as a single `.pt` file containing
-both heads' state dicts plus the input z-score buffers.
+One model per LLM alias. Each model is saved as a single `.pt` file
+containing the trunk + claim_head weights plus the input z-score buffers.
 
 Usage:
     python -m simulation.train_deception_nn \
@@ -35,14 +40,20 @@ from torch.utils.data import DataLoader, TensorDataset
 # ── Models ──────────────────────────────────────────────────────────────────
 
 class DeceptionMimic(nn.Module):
-    """Two-head deception mimic.
+    """Single-head direct-claim deception mimic.
 
-    Shared trunk processes the 10-dim input. Two independent linear heads emit:
-      - lie_logits: 5 floats (sigmoid → P(lie on attr a))
-      - claim_regr: 5 floats (sigmoid → claim value in [0,1] when lying)
+    Trunk processes the 30-dim input. One linear head emits a 5-float claim
+    vector (sigmoid → constrained to [0, 1]). No binary lie classifier:
+    under per-attribute continuous trust, lying-vs-honest is a measure-zero
+    distinction (small claim-truth deviations cost proportional trust damage),
+    so a regressor trained on raw claim values captures behavior cleanly.
+
+    Residual prediction (tanh on delta = claim - truth) was tested and made
+    fidelity marginally worse — tanh's zero-centered output biased mimics
+    toward under-claiming for aggressive LLMs. Direct-claim sigmoid stays.
     """
 
-    def __init__(self, input_dim: int = 10, hidden: int = 32, dropout: float = 0.2, num_attrs: int = 5):
+    def __init__(self, input_dim: int = 30, hidden: int = 32, dropout: float = 0.2, num_attrs: int = 5):
         super().__init__()
         self.register_buffer("input_mean", torch.zeros(input_dim))
         self.register_buffer("input_std", torch.ones(input_dim))
@@ -54,19 +65,17 @@ class DeceptionMimic(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
         )
-        self.lie_head = nn.Linear(hidden, num_attrs)
         self.claim_head = nn.Linear(hidden, num_attrs)
 
     def set_scaler(self, mean: torch.Tensor, std: torch.Tensor) -> None:
         self.input_mean.copy_(mean)
         self.input_std.copy_(std)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the predicted claim vector in [0, 1]^num_attrs."""
         x = (x - self.input_mean) / self.input_std
         h = self.trunk(x)
-        lie_logits = self.lie_head(h)
-        claim_raw = torch.sigmoid(self.claim_head(h))   # constrain to [0, 1]
-        return lie_logits, claim_raw
+        return torch.sigmoid(self.claim_head(h))
 
 
 def fit_scaler(X: np.ndarray, eps: float = 1e-6) -> tuple[torch.Tensor, torch.Tensor]:
@@ -113,20 +122,18 @@ def train_one(
     val_rows = bidder_rows[:n_val]
     train_rows = bidder_rows[n_val:]
 
-    X_tr, y_lied_tr, y_claim_tr = rows_to_arrays(train_rows)
-    X_val, y_lied_val, y_claim_val = rows_to_arrays(val_rows)
+    X_tr, _, y_claim_tr = rows_to_arrays(train_rows)
+    X_val, _, y_claim_val = rows_to_arrays(val_rows)
 
     mean, std = fit_scaler(X_tr)
     model = DeceptionMimic(input_dim=X_tr.shape[1], hidden=args.hidden, dropout=args.dropout).to(device)
     model.set_scaler(mean.to(device), std.to(device))
 
     optim = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    bce = nn.BCEWithLogitsLoss(reduction="mean")
-    mse = nn.MSELoss(reduction="none")
+    mse = nn.MSELoss(reduction="mean")
 
     tr_ds = TensorDataset(
         torch.from_numpy(X_tr),
-        torch.from_numpy(y_lied_tr),
         torch.from_numpy(y_claim_tr),
     )
     loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
@@ -138,36 +145,23 @@ def train_one(
 
     for epoch in range(args.epochs):
         model.train()
-        for xb, yl, yc in loader:
+        for xb, yc in loader:
             xb = xb.to(device)
-            yl = yl.to(device)
             yc = yc.to(device)
-            lie_logits, claim_pred = model(xb)
-            loss_lie = bce(lie_logits, yl)
-            # Masked MSE: only train regressor on attributes that were lied on.
-            mask = yl.float()
-            per_elem = mse(claim_pred, yc) * mask
-            mask_sum = mask.sum()
-            loss_claim = per_elem.sum() / mask_sum if float(mask_sum) > 0 else per_elem.sum() * 0.0
-            loss = loss_lie + args.claim_loss_weight * loss_claim
+            claim_pred = model(xb)
+            loss = mse(claim_pred, yc)
             optim.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optim.step()
 
-        # Validation
+        # Validation: MSE on raw claim values across all 5 attributes.
         model.eval()
         with torch.no_grad():
             xb = torch.from_numpy(X_val).to(device)
-            yl = torch.from_numpy(y_lied_val).to(device)
             yc = torch.from_numpy(y_claim_val).to(device)
-            lie_logits, claim_pred = model(xb)
-            val_lie = bce(lie_logits, yl).item()
-            mask = yl.float()
-            per_elem = mse(claim_pred, yc) * mask
-            mask_sum = mask.sum()
-            val_claim = (per_elem.sum() / mask_sum).item() if float(mask_sum) > 0 else 0.0
-            val_total = val_lie + args.claim_loss_weight * val_claim
+            claim_pred = model(xb)
+            val_total = float(mse(claim_pred, yc).item())
 
         if val_total + 1e-5 < best_val:
             best_val = val_total
@@ -177,14 +171,27 @@ def train_one(
             epochs_no_improve += 1
         if (epoch + 1) % args.log_every == 0 or epoch == 0:
             print(f"  [{bidder_name}] epoch {epoch + 1:3d}/{args.epochs}  "
-                  f"val_lie={val_lie:.4f}  val_claim_mse={val_claim:.4f}  "
-                  f"val_total={val_total:.4f}  best={best_val:.4f}  patience={epochs_no_improve}/{patience}")
+                  f"val_claim_mse={val_total:.4f}  best={best_val:.4f}  "
+                  f"patience={epochs_no_improve}/{patience}")
         if epochs_no_improve >= patience:
             print(f"  [{bidder_name}] early stop at epoch {epoch + 1}")
             break
 
     if best_state is not None:
         model.load_state_dict(best_state)
+
+    # Compute per-attribute residual std on the training set. This is each
+    # LLM's natural variance around its predicted mean. Stored in the
+    # checkpoint and used by the dispatch path to scale the user-supplied
+    # temperature so T=1.0 reproduces the LLM's natural output variance
+    # (analogous to the auction's T=1 Bernoulli sampling convention).
+    model.eval()
+    with torch.no_grad():
+        train_pred = model(torch.from_numpy(X_tr).to(device)).cpu().numpy()
+    residuals = train_pred - y_claim_tr
+    residual_std = residuals.std(axis=0).astype(np.float32)
+    print(f"  [{bidder_name}] residual std per-attr: {[round(float(x), 4) for x in residual_std]}")
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "alias": bidder_name,
@@ -192,6 +199,7 @@ def train_one(
         "hidden": args.hidden,
         "num_attrs": 5,
         "state_dict": model.state_dict(),
+        "residual_std": residual_std.tolist(),
     }, out_path)
     print(f"  [{bidder_name}] saved -> {out_path}")
     return {
@@ -199,6 +207,7 @@ def train_one(
         "n_train": int(len(train_rows)),
         "n_val": int(len(val_rows)),
         "best_val_loss": float(best_val),
+        "residual_std": [float(x) for x in residual_std],
     }
 
 
@@ -213,7 +222,6 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--claim-loss-weight", type=float, default=1.0)
     p.add_argument("--patience", type=int, default=25)
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)

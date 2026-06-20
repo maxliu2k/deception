@@ -917,13 +917,32 @@
         "Math-T5": "Math-RL",
       };
 
-      function modelDisplayName(alias) {
+      // Deception tiers have different semantics from auction tiers. Canonical
+      // aliases are the semantic names (Math-Trivial-Max etc.); legacy aliases
+      // (Math-T1..T5) map to the same display name for back-compat with old
+      // save slots that wrote the T-numbered alias to disk.
+      const MODEL_DISPLAY_NAMES_DECEPTION = {
+        "Math-T1": "Math-Trivial-Max",
+        "Math-T2": "Math-Truth-Anchored",
+        "Math-T3": "Math-Self-Aware",
+        "Math-T4": "Math-Pack-Aware",
+        "Math-T5": "Math-RL",
+        // Canonical names pass through unchanged.
+        "Math-Trivial-Max":   "Math-Trivial-Max",
+        "Math-Truth-Anchored": "Math-Truth-Anchored",
+        "Math-Self-Aware":    "Math-Self-Aware",
+        "Math-Pack-Aware":    "Math-Pack-Aware",
+        "Math-RL":            "Math-RL",
+      };
+
+      function modelDisplayName(alias, mode) {
         if (!alias) return alias;
         const s = String(alias);
-        // Mimics keep their short alias to avoid bloating chart legends and
-        // tables with "Mimic-Claude Opus 4.6" etc. Only base LLMs get expanded.
         if (s.startsWith("Mimic-")) {
           return s;
+        }
+        if (mode === "deception" && MODEL_DISPLAY_NAMES_DECEPTION[s]) {
+          return MODEL_DISPLAY_NAMES_DECEPTION[s];
         }
         return MODEL_DISPLAY_NAMES[s] || s;
       }
@@ -1172,33 +1191,38 @@
 
       function folderDistributionHtml(dist) {
         if (!dist || !dist.bidders || !dist.bidders.length || !dist.total_paintings) {
-          return `<div class="folder-dist-empty">No completed auctions yet.</div>`;
+          return `<div class="folder-dist-empty">No completed runs yet.</div>`;
         }
-        const total = dist.total_paintings;
         const ppa = dist.paintings_per_auction || 12;
-        const totalAuctions = Math.max(1, dist.completed_slots || 1);
-        // Normalize by participation: rate = wins / (paintings the bidder was
-        // actually IN). Without this, mimics displaced from some math-tier
-        // batches look weaker than they are. Sort by win_rate too.
+        const totalRuns = Math.max(1, dist.completed_slots || 1);
+        const isDeception = (dist.mode === "deception");
+        const runLabel = isDeception ? "episode" : "auction";
+        const itemLabel = isDeception ? "round" : "painting";
+        // Normalize by participation: rate = wins / (rounds the bidder was
+        // actually IN). Without this, mimics displaced from some batches
+        // look weaker than they are. Sort by win_rate too.
         const sorted = dist.bidders.slice().sort((a, b) => (b.win_rate || 0) - (a.win_rate || 0));
         const rows = sorted.map((b) => {
           const rate = (b.win_rate || 0);
           const ratePct = (rate * 100).toFixed(1);
           const color = bidderColor(b.bidder);
           const widthPct = Math.max(2, rate * 100);
-          const displayLabel = modelDisplayName(b.bidder);
+          const displayLabel = modelDisplayName(b.bidder, dist.mode);
           const presence = b.auctions_in || 0;
-          const presencePct = totalAuctions ? (presence / totalAuctions * 100) : 0;
+          const presencePct = totalRuns ? (presence / totalRuns * 100) : 0;
           return `
             <div class="folder-dist-row">
-              <div class="folder-dist-label" title="${escapeHtml(displayLabel)} — ${b.won} wins / ${presence} auctions (${presencePct.toFixed(0)}% present)">${escapeHtml(displayLabel)}</div>
+              <div class="folder-dist-label" title="${escapeHtml(displayLabel)} — ${b.won} wins / ${presence} ${runLabel}s (${presencePct.toFixed(0)}% present)">${escapeHtml(displayLabel)}</div>
               <div class="folder-dist-bar"><div class="folder-dist-fill" style="width:${widthPct}%;background:${color}"></div></div>
               <div class="folder-dist-val">${b.won}/${presence * ppa} (${ratePct}%)</div>
             </div>`;
         }).join("");
+        const nestedTag = (dist.nested_folder_count || 0) > 0
+          ? ` · includes ${dist.nested_folder_count} nested folder${dist.nested_folder_count === 1 ? "" : "s"}`
+          : "";
         return `
           <div class="folder-dist">
-            <div class="folder-dist-head">${dist.completed_slots}/${dist.total_slots} auctions · ${ppa} paintings each · % = wins ÷ paintings-bidder-was-in</div>
+            <div class="folder-dist-head">${dist.completed_slots}/${dist.total_slots} ${runLabel}s · ${ppa} ${itemLabel}s each${nestedTag} · % = wins ÷ ${itemLabel}s-bidder-was-in</div>
             ${rows}
           </div>`;
       }
@@ -1316,7 +1340,6 @@
             parallel: 5,
             loadout: ["Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T1"],
             slotPrefix: "D-Math",
-            threshold: 0.3,
             estimateNote: null,
           });
         };
@@ -1329,7 +1352,6 @@
             parallel: 4,
             loadout: ["Grok", "Opus", "GPT-5.4", "Pro", "Llama"],
             slotPrefix: "D-LLM",
-            threshold: 0.3,
             estimateNote: "Heads-up: 20 deception episodes × 5 LLMs × 12 rounds = 1,200 LLM calls (~$50). Continue?",
           });
         };
@@ -1540,7 +1562,7 @@
         });
       }
 
-      async function startDeceptionBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, threshold, estimateNote = null }) {
+      async function startDeceptionBatchPreset({ kind, defaultName, count, parallel, loadout, slotPrefix, estimateNote = null }) {
         showInput("Start Deception Batch",
           `Folder name (will hold ${count} deception episodes, 12 rounds each):`,
           defaultName,
@@ -1608,7 +1630,6 @@
                   selected_models: loadouts[idx],
                   seed: startSeed + idx,
                   truth_seed: truthSeedStart + idx,
-                  threshold: threshold,
                   num_rounds: 12,
                 });
                 if (!resetRes.ok) {
@@ -2908,20 +2929,27 @@
         card.classList.remove("hidden");
         const completedRounds = Array.isArray(ep.rounds) ? ep.rounds.length : 0;
         if (label) label.textContent =
-          `round ${Math.min(ep.round_idx, ep.num_rounds)}/${ep.num_rounds} · τ=${(+ep.threshold).toFixed(2)} · ${ep.complete ? "complete" : "in progress"}`;
+          `round ${Math.min(ep.round_idx, ep.num_rounds)}/${ep.num_rounds} · ${ep.complete ? "complete" : "in progress"}`;
 
-        // 1. Per-agent summary table
+        // 1. Per-agent summary table — trust is per-attribute (5-vector).
         const agents = Array.isArray(ep.agents) ? ep.agents : [];
+        const trustVec = (t) => Array.isArray(t) ? t : [t, t, t, t, t];
+        const meanOf = (arr) => arr.length ? arr.reduce((a, b) => a + (+b), 0) / arr.length : 0;
+        const fmtVec = (arr) => arr.map((v) => (+v).toFixed(2)).join(",");
         let html = `<div class="section-head">Agents</div>`;
-        html += `<table class="batch-table"><thead><tr><th>Agent</th><th>Alias</th><th>Trust</th><th>Total reward</th><th>Wins</th><th>Sum discrepancy</th></tr></thead><tbody>`;
+        html += `<table class="batch-table"><thead><tr><th>Agent</th><th>Alias</th><th>Trust (b,f,p,r,s)</th><th>Trust mean</th><th>Total reward</th><th>Wins</th><th>Sum disc.</th></tr></thead><tbody>`;
         for (const a of agents) {
+          const tVec = trustVec(a.trust);
+          const sdVec = Array.isArray(a.sum_discrepancy_when_won) ? a.sum_discrepancy_when_won : [a.sum_discrepancy_when_won || 0];
+          const sdSum = sdVec.reduce((s, v) => s + (+v), 0);
           html += `<tr>` +
             `<td>${a.agent_id}</td>` +
             `<td>${modelDisplayName(a.alias) || a.alias}</td>` +
-            `<td><span class="val-zero">${(+a.trust).toFixed(2)}</span></td>` +
+            `<td style="font-family:monospace;font-size:11px;">${fmtVec(tVec)}</td>` +
+            `<td><span class="val-zero">${meanOf(tVec).toFixed(2)}</span></td>` +
             `<td><span class="val-zero">${(+a.total_reward).toFixed(3)}</span></td>` +
             `<td>${a.win_count}</td>` +
-            `<td><span class="val-zero">${(+(a.sum_discrepancy_when_won || 0)).toFixed(3)}</span></td>` +
+            `<td><span class="val-zero">${sdSum.toFixed(3)}</span></td>` +
             `</tr>`;
         }
         html += `</tbody></table>`;
@@ -2943,19 +2971,21 @@
             svg += `<line x1="${xs(i)}" y1="${H - padB}" x2="${xs(i)}" y2="${H - padB + 3}" stroke="#9ca3af"/>`;
             if (i % 2 === 0) svg += `<text x="${xs(i)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="#6b7280">${i + 1}</text>`;
           }
-          // one polyline per agent
+          // one polyline per agent — plot mean per-attribute trust over rounds.
           for (const a of agents) {
             const aid = a.agent_id;
             const color = bidderColor ? bidderColor(a.alias || aid) : "#3b82f6";
-            // Start at trust=1.0 (initial), then trust_after for each completed round.
+            // Start at trust=1.0 (initial), then mean(trust_after_vec) for each completed round.
             const points = [[0, 1.0]];
             for (const r of ep.rounds) {
-              const t = (r.trust_after && r.trust_after[aid] !== undefined) ? +r.trust_after[aid] : null;
-              if (t !== null) points.push([r.round_idx + 1, t]);
+              const raw = r.trust_after && r.trust_after[aid];
+              if (raw === undefined || raw === null) continue;
+              const vec = Array.isArray(raw) ? raw : [raw];
+              const m = vec.reduce((s, v) => s + (+v), 0) / Math.max(1, vec.length);
+              points.push([r.round_idx + 1, m]);
             }
             const poly = points.map(([i, v]) => `${xs(i)},${ys(v)}`).join(" ");
             svg += `<polyline points="${poly}" fill="none" stroke="${color}" stroke-width="1.6"/>`;
-            // dot at last point with label
             const [lastI, lastV] = points[points.length - 1];
             svg += `<circle cx="${xs(lastI)}" cy="${ys(lastV)}" r="2.5" fill="${color}"/>`;
           }
@@ -2977,7 +3007,11 @@
           for (const r of ep.rounds) {
             const truth = (r.truth || []).map((v) => (+v).toFixed(2)).join(", ");
             const discSummary = Object.entries(r.discrepancy_by_agent || {})
-              .map(([aid, v]) => `${aid.replace("agent_", "")}:${(+v).toFixed(2)}`).join(" ");
+              .map(([aid, v]) => {
+                const vec = Array.isArray(v) ? v : [v];
+                const total = vec.reduce((s, x) => s + (+x), 0);
+                return `${aid.replace("agent_", "")}:${total.toFixed(2)}`;
+              }).join(" ");
             const winnersSummary = (r.winners || []).map((aid) => aid.replace("agent_", "")).join(",") || "—";
             const rewardsSummary = Object.entries(r.rewards_by_agent || {})
               .map(([aid, v]) => `${aid.replace("agent_", "")}:${(+v).toFixed(2)}`).join(" ");

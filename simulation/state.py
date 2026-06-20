@@ -411,18 +411,25 @@ class DeceptionResort:
 class DeceptionAgentState:
     """Per-agent state carried across rounds within an episode.
 
-    Trust is derived from running averages, NOT a per-round multiplicative state:
-        trust = 1 - sum_discrepancy_when_won / max(1, win_count)
-    Stored explicitly here for cheap access during scoring.
+    Trust is per-attribute (5 floats), derived from a running average over
+    ALL rounds played so far (not just wins):
+        trust_a = 1 - sum_discrepancy_a_when_won / max(1, rounds_played)
+    A round-win adds this round's per-attr discrepancy to the numerator
+    (the buyer experiences all 5 attributes after booking). Non-win rounds
+    add 0 to the numerator but still increment the denominator — the buyer
+    didn't observe you this round, treats it as if you didn't lie. Net
+    effect: trust naturally recovers over rounds without winning, with no
+    retroactive "averaging trick" exploitable by lucky high-truth wins.
     """
     agent_id: str                        # "agent_1" .. "agent_5"
     agent_index: int                     # 0..4 slot
     alias: str = ""                      # display alias (e.g. "Math-T1", "Opus")
-    trust: float = DECEPTION_INITIAL_TRUST
+    trust: List[float] = field(default_factory=lambda: [DECEPTION_INITIAL_TRUST] * DECEPTION_NUM_ATTRS)
     last_claim: List[float] = field(default_factory=list)
     total_reward: float = 0.0
-    win_count: int = 0
-    sum_discrepancy_when_won: float = 0.0   # running sum of discrepancies in rounds this agent won
+    win_count: int = 0                   # kept for stats display; NOT in the trust formula anymore
+    rounds_played: int = 0               # denominator of the trust running average
+    sum_discrepancy_when_won: List[float] = field(default_factory=lambda: [0.0] * DECEPTION_NUM_ATTRS)
 
 
 @dataclass
@@ -432,20 +439,26 @@ class DeceptionRoundRecord:
     truth: List[float]
     population_mean: List[float] = field(default_factory=list)            # μ_j (informational only under R)
     claims_by_agent: Dict[str, List[float]] = field(default_factory=dict)
-    score_by_agent: Dict[str, float] = field(default_factory=dict)        # w·c × (0.5+0.5·trust)
-    discrepancy_by_agent: Dict[str, float] = field(default_factory=dict)  # max(0, w·(c-t)); computed for all
+    score_by_agent: Dict[str, float] = field(default_factory=dict)        # (Σ c_a × trust_a) / 5
+    discrepancy_by_agent: Dict[str, List[float]] = field(default_factory=dict)  # per-attr [max(0, c_a - t_a)]
     winners: List[str] = field(default_factory=list)
     rewards_by_agent: Dict[str, float] = field(default_factory=dict)
-    trust_before: Dict[str, float] = field(default_factory=dict)
-    trust_after: Dict[str, float] = field(default_factory=dict)           # only winners' trust changes
+    trust_before: Dict[str, List[float]] = field(default_factory=dict)    # per-agent, per-attr
+    trust_after: Dict[str, List[float]] = field(default_factory=dict)     # only winners' trust changes
+    thoughts_by_agent: Dict[str, str] = field(default_factory=dict)       # LLM reasoning trace (empty for non-LLM seats)
 
 
 @dataclass
 class DeceptionEpisodeState:
-    """Full deception-competition episode (12 rounds)."""
+    """Full deception-competition episode (12 rounds).
+
+    Under Option R there are no game knobs: the buyer books the highest-scored
+    pitch every round (winners split 1/|winners|). All attributes are weighted
+    equally — the only configurable parameter is `num_rounds`.
+
+    Score formula: `score = (Σ_a c_a × trust_a) / 5`.
+    """
     num_rounds: int = 12
-    preferences: List[float] = field(default_factory=list)   # w, 5 floats summing to 1
-    threshold: float = 0.4                                   # τ — the only game knob
     truth_seed: int = 0                                      # for reproducibility
     truth_schedule: List[List[float]] = field(default_factory=list)   # 12 pre-sampled 5-float truths
     round_idx: int = 0                                       # next round to play (0..num_rounds)

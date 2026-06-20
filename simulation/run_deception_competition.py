@@ -75,9 +75,7 @@ def run_one(
     truth_seed: int,
     slot_name: str,
     loadout: list[str],
-    threshold: float,
     num_rounds: int,
-    preferences: list[float] | None,
     poll_interval_s: float,
     timeout_s: float,
 ) -> dict:
@@ -92,12 +90,9 @@ def run_one(
         "mode": "deception_competition",
         "seed": int(seed),
         "truth_seed": int(truth_seed),
-        "threshold": float(threshold),
         "num_rounds": int(num_rounds),
         "save_slot": slot_id,
     }
-    if preferences:
-        reset_payload["preferences"] = list(preferences)
     reset_resp = post(base, "/api/reset", reset_payload)
     if reset_resp.get("ok") is not True and reset_resp.get("_status", 200) >= 400:
         return {"slot_id": slot_id, "ok": False, "error": f"reset failed: {reset_resp}"}
@@ -142,31 +137,18 @@ def main() -> int:
                    help="Seed for sampling distinct random permutations of the loadout.")
     p.add_argument("--loadout", default=",".join(DEFAULT_LOADOUT),
                    help="Comma-separated list of 5 model aliases for the agent slots.")
-    p.add_argument("--threshold", type=float, default=0.3,
-                   help="Buyer's booking threshold τ — the only game knob under Option R.")
     p.add_argument("--num-rounds", type=int, default=12)
-    p.add_argument("--preferences", default="",
-                   help="Optional 5 comma-separated preference weights (must sum to 1). "
-                        "Default is the scenario builder's [0.25, 0.20, 0.20, 0.20, 0.15].")
     args = p.parse_args()
 
     loadout = [m.strip() for m in args.loadout.split(",") if m.strip()]
     if len(loadout) != 5:
         print(f"ERROR: loadout must have exactly 5 models, got {len(loadout)}: {loadout}")
         return 1
-    preferences = None
-    if args.preferences:
-        preferences = [float(x) for x in args.preferences.split(",")]
-        if len(preferences) != 5:
-            print(f"ERROR: preferences must have 5 values, got {len(preferences)}")
-            return 1
-        if abs(sum(preferences) - 1.0) > 1e-3:
-            print(f"WARN: preferences sum to {sum(preferences)}, expected 1.0")
 
     folder_id = find_or_create_folder(args.base, args.folder)
     print(f"Folder '{args.folder}' = {folder_id}")
     print(f"Loadout: {loadout}")
-    print(f"Threshold = {args.threshold}, num_rounds = {args.num_rounds}")
+    print(f"num_rounds = {args.num_rounds}")
     print(f"Running {args.count} episodes, {args.parallel} at a time")
 
     # Sample distinct random permutations of the agent slot order.
@@ -195,9 +177,7 @@ def main() -> int:
             truth_seed=truth_seed,
             slot_name=slot_name,
             loadout=slot_loadout,
-            threshold=args.threshold,
             num_rounds=args.num_rounds,
-            preferences=preferences,
             poll_interval_s=args.poll_interval,
             timeout_s=args.timeout,
         )
