@@ -22,13 +22,13 @@ plt.rcParams.update({"font.family": "serif", "font.size": 8, "axes.linewidth": 0
 
 STYLE = {  # same deepened palette as the auction figures
     "GPT":   ("#08519C", "o"),
-    "Opus":  ("#D26E00", "s"),
-    "Pro":   ("#1A7A3D", "^"),
+    "Claude": ("#D26E00", "s"),
+    "Gemini": ("#1A7A3D", "^"),
     "Grok":  ("#000000", "D"),
     "Llama": ("#A8327D", "v"),
 }
-ORDER = ["Pro", "Opus", "Llama", "GPT", "Grok"]  # by win rate
-norm = lambda m: str(m).replace("Mimic-", "").replace("GPT-5.4", "GPT")
+ORDER = ["Gemini", "Claude", "Llama", "GPT", "Grok"]  # by win rate
+norm = lambda m: str(m).replace("Mimic-", "").replace("GPT-5.4", "GPT").replace("Pro", "Gemini").replace("Opus", "Claude")
 
 # ---- load real episodes (folder_65) for Fig 1 ----
 cat = json.load(open(HERE / ".runtime" / "save_slots.json", encoding="utf-8"))

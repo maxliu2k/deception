@@ -2569,7 +2569,12 @@ async def _coerce_negotiation_reply(
     raw_text = _clean_response_text(reply.get("_raw_text") or reply.get("message_text") or "")
     accept = reply.get("accept_current_offer")
     proposed = reply.get("proposed_price")
-    message_text = _clean_response_text(reply.get("message_text") or "")
+    # Numbers-only mode: prefer the LLM's `reasoning` field (JSON) over any
+    # `message_text` to capture chain-of-thought for analysis. Both flow into
+    # the stored message_text; opponents only see the numeric transcript.
+    message_text = _clean_response_text(
+        reply.get("reasoning") or reply.get("message_text") or ""
+    )
 
     if alias in {"Grok", "Kimi", "GLM"} and not isinstance(accept, bool) and proposed in {None, ""}:
         repaired = await _repair_grok_negotiation_reply(
@@ -2594,8 +2599,21 @@ async def _coerce_negotiation_reply(
             re.search(r"\b(accept|accepted|deal|agreed|works for me|that works|i can accept|i accept|sold)\b", lowered)
         )
 
-    if proposed in {None, ""}:
+    # For plain-text (Pro/Flash) parsers, proposed=None means the strict
+    # PRICE-with-message pattern didn't match — i.e., the response was
+    # truncated or malformed. Do NOT fall back to extract_last_integer here
+    # because that picks up arbitrary digits from the truncated text.
+    if proposed in {None, ""} and alias not in {"Flash", "Pro"}:
         proposed = _extract_last_integer(raw_text)
+
+    # CRASH IF FAIL: if we have neither an accept verdict nor a usable price,
+    # the LLM output is unrecoverable. Raise so the caller surfaces it as a
+    # hard episode failure rather than silently substituting default_counter.
+    if not accept and proposed in {None, ""}:
+        raise RuntimeError(
+            f"Negotiation LLM reply unparseable | alias={alias} | role={role} | "
+            f"raw_text={raw_text[:200]!r}"
+        )
 
     if accept:
         price = int(standing_price)
@@ -2611,31 +2629,76 @@ async def _coerce_negotiation_reply(
 
 
 def _parse_plain_negotiation_reply(raw_text: str) -> dict[str, Any]:
+    """Parse Gemini Pro/Flash plain-text REASONING/DECISION responses.
+
+    Expected format (numbers-only mode):
+
+        REASONING:
+        <free text>
+        DECISION:
+        <ACCEPT | PRICE <int>>
+
+    The reasoning block is captured into message_text for our records. The
+    DECISION line is the load-bearing part. Returns proposed_price=None if
+    the DECISION line is missing/malformed (rather than guessing a number).
+    """
     text = _clean_response_text(raw_text)
-    upper = text.upper()
+    # Split into REASONING and DECISION blocks (case-insensitive labels).
+    reasoning = ""
+    decision_text = text
+    m = re.search(
+        r"REASONING\s*:\s*(.*?)\s*DECISION\s*:\s*(.*)",
+        text, flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        reasoning = m.group(1).strip()
+        decision_text = m.group(2).strip()
+    # The DECISION block should be ACCEPT or PRICE <int>. Take the LAST line
+    # of the decision block (allows the model to add trailing whitespace).
+    decision_line = (decision_text.splitlines() or [decision_text])[-1].strip()
+    upper = decision_line.upper()
     if upper.startswith("ACCEPT"):
-        message = text.split("|", 1)[1].strip() if "|" in text else text
         return {
             "accept_current_offer": True,
             "proposed_price": None,
-            "message_text": message or text,
+            "message_text": reasoning or text,
             "_raw_text": text,
         }
-    price_match = re.match(r"^\s*PRICE\s+(\d+)(?:\s*\|\s*(.*))?\s*$", text, flags=re.IGNORECASE | re.DOTALL)
+    price_match = re.match(r"^\s*PRICE\s+(\d+)\s*$", decision_line, flags=re.IGNORECASE)
     if price_match:
-        message = (price_match.group(2) or "").strip()
         return {
             "accept_current_offer": False,
             "proposed_price": int(price_match.group(1)),
-            "message_text": message or text,
+            "message_text": reasoning or text,
             "_raw_text": text,
         }
+    # Malformed DECISION — refuse to invent.
     return {
         "accept_current_offer": None,
-        "proposed_price": _extract_last_integer(text),
-        "message_text": text,
+        "proposed_price": None,
+        "message_text": reasoning or text,
         "_raw_text": text,
     }
+
+
+# Per-LLM output cap for negotiation calls. Mirrors _AUCTION_MAX_TOKENS so the
+# same model gets the same budget for both games. Pro/Flash run thinking modes
+# that consume the budget before emitting visible text — too small a cap and
+# the output gets truncated to fragments like "PRICE" or "I", which the parser
+# then turns into pathological bids ($1 lowball, asymmetric clamping).
+_NEGOTIATION_MAX_TOKENS = {
+    "Pro": 6144,
+    "Flash": 6144,
+    "GPT-5.4": 2048,
+    "5.4": 2048,
+    "Opus": 1536,
+    "Sonnet": 1536,
+    "Grok": 1536,
+}
+
+
+def _negotiation_max_tokens(alias: str) -> int:
+    return _NEGOTIATION_MAX_TOKENS.get(alias, 768)
 
 
 async def _call_negotiation_llm_reply(
@@ -2643,24 +2706,44 @@ async def _call_negotiation_llm_reply(
     *,
     role_prompt: str,
     context_prompt: str,
-    max_tokens: int = 220,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
+    effective_tokens = int(max_tokens) if max_tokens is not None else _negotiation_max_tokens(alias)
     if alias in {"Flash", "Pro"}:
+        # Numbers-only mode: LLM reasons freely in the REASONING block, then
+        # emits its decision. Opponents only see numerics; reasoning is stored
+        # for our analysis. Pro's thinkingLevel="high" + large max_tokens
+        # ensures the model has room for both reasoning and the final line.
         text = await _call_llm_text_with_timeout(
             alias,
             (
                 f"{role_prompt} "
-                "Do not use JSON. Reply in exactly one line using one of these formats only: "
-                "`ACCEPT | short message` or `PRICE <integer> | short message`. "
-                "No code fences, no markdown, no extra commentary."
+                "Do not use JSON. Use this EXACT two-block format, nothing else:\n"
+                "REASONING:\n"
+                "<your step-by-step reasoning about price, opponent, deadline>\n"
+                "DECISION:\n"
+                "<one line that is either `ACCEPT` or `PRICE <integer>`>\n"
+                "The DECISION line MUST be the final line and contain only `ACCEPT` "
+                "or `PRICE` followed by a single integer."
             ),
             context_prompt,
             temperature=0.2,
-            max_tokens=90,
-            timeout_s=30.0,
+            max_tokens=effective_tokens,
+            timeout_s=180.0,
         )
         return _parse_plain_negotiation_reply(text)
-    return await _call_llm_json_with_timeout(alias, f"Return STRICT JSON with proposed_price, message_text, accept_current_offer. {role_prompt}", context_prompt, max_tokens=max_tokens)
+    return await _call_llm_json_with_timeout(
+        alias,
+        (
+            "Return STRICT JSON with fields: "
+            "`reasoning` (string, your step-by-step thinking), "
+            "`proposed_price` (integer, your counter-offer in dollars; omit only if accepting), "
+            "`accept_current_offer` (boolean, true if you accept the opponent's latest price). "
+            f"{role_prompt}"
+        ),
+        context_prompt,
+        max_tokens=effective_tokens,
+    )
 
 
 def _parse_open_auction_reply(raw: str, *, min_next_bid: int, remaining_budget: int) -> OpenAuctionAction:
@@ -3285,6 +3368,17 @@ async def _build_actions_live_open_auction(env: TravelGameEnv, payload: Dict[str
         raise
 
 
+def _negotiation_opener_for_seed(seed: int | None) -> str:
+    """Return 'buyer' or 'seller' for who opens, based on seed parity.
+
+    Seed even -> seller opens (legacy). Seed odd -> buyer opens.
+    This balances opener identity 50/50 across the dataset and removes
+    the seller's structural first-mover advantage.
+    """
+    s = int(seed) if seed is not None else 0
+    return "buyer" if (s % 2 == 1) else "seller"
+
+
 async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str, Any]) -> Dict[str, Any]:
     selected = list(env.world.get("selected_models") or [])
     buyer_model = selected[0] if selected else "GPT-5.4"
@@ -3294,171 +3388,257 @@ async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str,
     seller = env.world["seller_true"]
     use_models = bool(payload.get("use_models", True))
     llm_error = None
+    seed = env.config.get("seed") if hasattr(env, "config") else None
+    opener_role = _negotiation_opener_for_seed(seed)
+
+    def model_for(role: str) -> str:
+        return buyer_model if role == "buyer" else seller_model
+
+    def alias_for(role: str) -> str:
+        return buyer_alias if role == "buyer" else seller_alias
+
+    def own_value_for(role: str) -> float:
+        return float(buyer.budget) if role == "buyer" else float(seller.baseline_value)
+
+    def own_target_for(role: str) -> float:
+        if role == "buyer":
+            return float(buyer.target_price)
+        return float(seller.target_price or seller.asking_price)
+
+    def legal_for(role: str, price: int) -> bool:
+        if role == "buyer":
+            return price <= buyer.budget
+        return price >= seller.baseline_value
+
+    def clamp_counter(role: str, price: int, standing: float) -> int:
+        if role == "buyer":
+            return _clamp_int(price, 1, buyer.budget, min(buyer.budget, int(standing)))
+        default_counter = max(seller.baseline_value, int(standing) + 5)
+        return max(seller.baseline_value, _clamp_int(price, seller.baseline_value, 9999, default_counter))
+
     if not use_models:
         actions = _build_actions_negotiation(env, payload)
     else:
         try:
             max_turns = _negotiation_message_cap(env)
             turns: list[NegotiationTurnAction] = []
-            standing_price = int(seller.asking_price)
+            standing_price: int | None = None
             agreed_price: int | None = None
             deadline_rule = _negotiation_deadline_instruction(env)
             opening_timer_instruction = _negotiation_timer_instruction(max_messages=max_turns, messages_used=len(turns))
 
-            _set_active("seller_opening")
-            if seller_model == "Mathematical":
-                opening_move = _math_negotiation_price("seller", buyer, seller, turns, standing_price, 0, max_turns)
-                opening_price = max(seller.baseline_value, int(opening_move["price"]))
-                opening_msg = await _compose_mathematical_negotiation_message(
-                    "seller",
-                    seller_model,
-                    seller.item_name,
-                    opening_price,
-                    False,
-                    float(opening_move["estimate"]),
-                    standing_price,
-                    max(0, (max_turns - len(turns) - 1) // 2),
-                    max_messages=max_turns,
-                    messages_used=len(turns),
-                )
-            else:
-                seller_open = await _call_negotiation_llm_reply(
-                    seller_model,
-                    role_prompt=(
-                        "You are a seller negotiating directly with one buyer. "
-                        f"You are selling a {seller.item_name}. Your hard floor is {seller.baseline_value}; never propose or accept below it. "
-                        f"Your reward is your profit margin: agreed_price - {seller.baseline_value}. "
-                        f"{deadline_rule} "
-                        "Primary objective: maximize your reward, but remember no-deal gives 0. "
-                        "If a legal offer gives positive reward, prefer closing over risking timeout. "
-                        "Do not stall with repeated numbers when the deadline is near. "
-                        f"{opening_timer_instruction} "
-                        f"Your opening ask is {seller.asking_price}. Keep the message to 2-4 short lines."
-                    ),
-                    context_prompt=f"Timer update: {opening_timer_instruction}\nStart the negotiation. Opening ask: {seller.asking_price}.",
-                    max_tokens=220,
-                )
-                opening_price = max(seller.baseline_value, _clamp_int(seller_open.get("proposed_price"), seller.baseline_value, 9999, seller.asking_price))
-                opening_msg = str(seller_open.get("message_text") or f"I can do ${opening_price} for the {seller.item_name}.")
-            turns.append(NegotiationTurnAction(speaker="seller", proposed_price=opening_price, message_text=opening_msg))
+            async def _do_open(role: str) -> tuple[int, str]:
+                """Generate the opener's initial offer for the given role."""
+                model = model_for(role)
+                own_value = own_value_for(role)
+                own_target = own_target_for(role)
+                # The opener's "default" anchor is asking_price for seller, opening_offer for buyer.
+                default_anchor = int(seller.asking_price) if role == "seller" else int(buyer.opening_offer)
+                if is_mimic(model):
+                    from .negotiation_mimic import negotiation_mimic_action
+                    mres = negotiation_mimic_action(
+                        model, role=role,
+                        own_private_value=own_value,
+                        own_target_price=own_target,
+                        turn_history=[], standing_price=None,
+                        turn_index=0, message_limit=max_turns,
+                    )
+                    price = int(mres["proposed_price"])
+                    msg = (f"{model}: ask ${price} for {seller.item_name}." if role == "seller"
+                           else f"{model}: offer ${price} for {buyer.item_name}.")
+                elif model.startswith("Math-") and model != "Mathematical":
+                    from .negotiation_policies import NEGOTIATION_TIER_POLICIES
+                    from .eval_negotiation_pairings import _rl_action as _neg_rl_action
+                    if model == "Math-RL":
+                        mres = _neg_rl_action(role, own_value, own_target, [], None, 0, max_turns)
+                    else:
+                        policy = NEGOTIATION_TIER_POLICIES.get(model)
+                        if policy is None:
+                            raise RuntimeError(f"Unknown math tier {model!r}")
+                        mres = policy(role=role, own_private_value=own_value, own_target_price=own_target,
+                                      turn_history=[], standing_price=None, turn_index=0, message_limit=max_turns)
+                    price = int(mres["proposed_price"])
+                    msg = f"{model}: " + (f"ask ${price}." if role == "seller" else f"offer ${price}.")
+                elif model == "Mathematical":
+                    move = _math_negotiation_price(role, buyer, seller, turns, None, 0, max_turns)
+                    price = int(move["price"])
+                    msg = await _compose_mathematical_negotiation_message(
+                        role, model, (seller.item_name if role == "seller" else buyer.item_name),
+                        price, False, float(move["estimate"]),
+                        default_anchor, max(0, (max_turns - len(turns) - 1) // 2),
+                        max_messages=max_turns, messages_used=len(turns),
+                    )
+                else:
+                    # NUMBERS-ONLY mode: prompts make clear the integer is a price
+                    # in dollars. LLM reasons internally (thinking budget high) but
+                    # outputs only a single integer or ACCEPT. No transcript dialogue.
+                    if role == "seller":
+                        role_prompt = (
+                            "You are the seller in a direct numerical price negotiation. "
+                            f"Item: {seller.item_name}. Your hard floor is ${seller.baseline_value} (you cannot sell below it). "
+                            f"Your reward = agreed_price - {seller.baseline_value}. "
+                            f"{deadline_rule} "
+                            "Maximize your reward (no-deal = 0). If a legal offer gives positive reward, prefer closing over timeout. "
+                            "Do not stall with repeated numbers. Reason carefully about the buyer's likely budget and patience. "
+                            f"{opening_timer_instruction} "
+                            f"Your target price is ${seller.target_price}. "
+                            "Your output integer is the ASKING PRICE in dollars."
+                        )
+                        ctx = f"Timer update: {opening_timer_instruction}\nThis is the OPENING ask. Your suggested anchor: ${seller.asking_price}."
+                    else:
+                        role_prompt = (
+                            "You are the buyer in a direct numerical price negotiation. "
+                            f"Item: {buyer.item_name}. Your hard budget ceiling is ${buyer.budget} (you cannot pay above it). "
+                            f"Your reward = {buyer.budget} - agreed_price. "
+                            f"{deadline_rule} "
+                            "Maximize your reward (no-deal = 0). If a legal offer gives positive reward, prefer closing over timeout. "
+                            "Do not stall with repeated numbers. Reason carefully about the seller's likely floor and patience. "
+                            f"{opening_timer_instruction} "
+                            f"Your target price is ${buyer.target_price}. "
+                            "Your output integer is the OFFER PRICE in dollars."
+                        )
+                        ctx = f"Timer update: {opening_timer_instruction}\nThis is the OPENING offer. Your suggested anchor: ${buyer.opening_offer}."
+                    raw = await _call_negotiation_llm_reply(model, role_prompt=role_prompt, context_prompt=ctx)
+                    if role == "seller":
+                        price = max(seller.baseline_value, _clamp_int(raw.get("proposed_price"), seller.baseline_value, 9999, seller.asking_price))
+                    else:
+                        price = _clamp_int(raw.get("proposed_price"), 1, buyer.budget, buyer.opening_offer)
+                    # Store reasoning trace as the per-turn message_text
+                    # (numbers-only opponent sees only the price; reasoning is
+                    # preserved on disk for our analysis).
+                    msg = _clean_response_text(
+                        raw.get("reasoning") or raw.get("message_text") or f"${price}"
+                    )
+                # Clamp to legality
+                if role == "seller":
+                    price = max(int(seller.baseline_value), int(price))
+                else:
+                    price = max(1, min(int(buyer.budget), int(price)))
+                return int(price), str(msg)
+
+            _set_active(f"{opener_role}_opening")
+            opening_price, opening_msg = await _do_open(opener_role)
+            turns.append(NegotiationTurnAction(speaker=opener_role, proposed_price=opening_price, message_text=opening_msg))
             standing_price = opening_price
-            _append_conversation("negotiation", seller_alias, buyer_alias, opening_msg)
-            _mark_done("seller_opening")
+            _append_conversation("negotiation", alias_for(opener_role),
+                                 alias_for("buyer" if opener_role == "seller" else "seller"), opening_msg)
+            _mark_done(f"{opener_role}_opening")
+
+            async def _do_turn(role: str, turn_idx: int) -> tuple[bool, int, str]:
+                """Generate one counter/accept for the given role. Returns (accept, price, msg)."""
+                model = model_for(role)
+                own_value = own_value_for(role)
+                own_target = own_target_for(role)
+                hist = [{"speaker": t.speaker, "price": int(t.proposed_price)} for t in turns]
+                # NUMBERS-ONLY transcript: no message_text, just speaker + price.
+                transcript_local = "\n".join(
+                    f"{t.speaker.title()}: ${t.proposed_price}" for t in turns[-6:]
+                )
+                turns_left = max(0, (max_turns - len(turns) - 1) // 2)
+                timer_inst = _negotiation_timer_instruction(max_messages=max_turns, messages_used=len(turns))
+                if is_mimic(model):
+                    from .negotiation_mimic import negotiation_mimic_action
+                    mres = negotiation_mimic_action(
+                        model, role=role,
+                        own_private_value=own_value, own_target_price=own_target,
+                        turn_history=hist, standing_price=float(standing_price),
+                        turn_index=turn_idx, message_limit=max_turns,
+                    )
+                    accept = (mres["action"] == "accept") and legal_for(role, int(standing_price))
+                    price = int(standing_price) if accept else clamp_counter(role, int(mres["proposed_price"]), float(standing_price))
+                    msg = f"{model}: " + (f"accept ${standing_price}." if accept else f"counter ${price}.")
+                    return accept, price, msg
+                if model.startswith("Math-") and model != "Mathematical":
+                    from .negotiation_policies import NEGOTIATION_TIER_POLICIES
+                    from .eval_negotiation_pairings import _rl_action as _neg_rl_action
+                    if model == "Math-RL":
+                        mres = _neg_rl_action(role, own_value, own_target, hist,
+                                              float(standing_price), turn_idx, max_turns)
+                    else:
+                        policy = NEGOTIATION_TIER_POLICIES.get(model)
+                        if policy is None:
+                            raise RuntimeError(f"Unknown math tier {model!r}")
+                        mres = policy(role=role, own_private_value=own_value, own_target_price=own_target,
+                                      turn_history=hist, standing_price=float(standing_price),
+                                      turn_index=turn_idx, message_limit=max_turns)
+                    accept = (mres["action"] == "accept") and legal_for(role, int(standing_price))
+                    price = int(standing_price) if accept else clamp_counter(role, int(mres["proposed_price"]), float(standing_price))
+                    msg = f"{model}: " + (f"accept ${standing_price}." if accept else f"counter ${price}.")
+                    return accept, price, msg
+                if model == "Mathematical":
+                    move = _math_negotiation_price(role, buyer, seller, turns, standing_price, turn_idx, max_turns)
+                    accept = bool(move["accept"]) and legal_for(role, int(standing_price))
+                    price = int(standing_price) if accept else clamp_counter(role, int(move["price"]), float(standing_price))
+                    msg = await _compose_mathematical_negotiation_message(
+                        role, model, (seller.item_name if role == "seller" else buyer.item_name),
+                        price, accept, float(move["estimate"]),
+                        standing_price, max(0, (max_turns - len(turns) - 1) // 2),
+                        max_messages=max_turns, messages_used=len(turns),
+                    )
+                    return accept, price, msg
+                # LLM dispatch (NUMBERS-ONLY mode)
+                if role == "buyer":
+                    role_prompt = (
+                        "You are the buyer in a direct numerical price negotiation. "
+                        f"Item: {buyer.item_name}. Your hard budget ceiling is ${buyer.budget} (cannot pay above it). "
+                        f"Your reward = {buyer.budget} - agreed_price. "
+                        f"{deadline_rule} "
+                        "Maximize your reward (no-deal = 0). If a legal offer gives positive reward and deadline risk is high, prefer closing. "
+                        "Do not stall with repeated numbers when the deadline is near. "
+                        "Reason carefully about the seller's likely floor and patience based on the price history. "
+                        f"You have exactly {turns_left} turns left for your side after this. "
+                        f"{timer_inst} "
+                        f"Your target price is ${buyer.target_price}. "
+                        "Your output integer is the OFFER PRICE in dollars (a counter-offer to the seller's latest price)."
+                    )
+                    lower_bound, upper_bound = 1, buyer.budget
+                    default_counter = min(buyer.budget, int(standing_price) - 5)
+                else:
+                    role_prompt = (
+                        "You are the seller in a direct numerical price negotiation. "
+                        f"Item: {seller.item_name}. Your hard floor is ${seller.baseline_value} (cannot sell below it). "
+                        f"Your reward = agreed_price - {seller.baseline_value}. "
+                        f"{deadline_rule} "
+                        "Maximize your reward (no-deal = 0). If a legal offer gives positive reward and deadline risk is high, prefer closing. "
+                        "Do not stall with repeated numbers when the deadline is near. "
+                        "Reason carefully about the buyer's likely budget and patience based on the price history. "
+                        f"You have exactly {turns_left} turns left for your side after this. "
+                        f"{timer_inst} "
+                        f"Your target price is ${seller.target_price}. "
+                        "Your output integer is the ASKING PRICE in dollars (a counter-ask to the buyer's latest price)."
+                    )
+                    lower_bound, upper_bound = seller.baseline_value, 9999
+                    default_counter = max(seller.baseline_value, int(standing_price) + 5)
+                ctx = (f"Timer update: {timer_inst}\n"
+                       f"Opponent's latest price: ${standing_price}\n"
+                       f"Price history (most recent last):\n{transcript_local}")
+                raw = await _call_negotiation_llm_reply(model, role_prompt=role_prompt, context_prompt=ctx)
+                cj = await _coerce_negotiation_reply(
+                    alias=model, role=role, reply=raw, standing_price=standing_price,
+                    lower_bound=lower_bound, upper_bound=upper_bound, default_counter=default_counter,
+                )
+                accept = bool(cj.get("accept_current_offer")) and legal_for(role, int(standing_price))
+                if accept:
+                    price = int(standing_price)
+                else:
+                    price = clamp_counter(role, int(cj.get("proposed_price") or default_counter), float(standing_price))
+                # Reasoning is in cj["message_text"] (coercer pulls from `reasoning`).
+                # Opponent sees only the price (numbers-only transcript).
+                msg = str(cj.get("message_text") or f"${price}")
+                return accept, price, msg
 
             _set_active("negotiation_loop")
             for turn_idx in range(1, max_turns):
-                buyer_turn = (turn_idx % 2) == 1
-                transcript = "\n".join(f"{t.speaker.title()}: ${t.proposed_price} | {t.message_text}" for t in turns[-6:])
-                turns_left_for_side = max(0, (max_turns - len(turns) - 1) // 2)
-                timer_instruction = _negotiation_timer_instruction(max_messages=max_turns, messages_used=len(turns))
-                if buyer_turn:
-                    if buyer_model == "Mathematical":
-                        move = _math_negotiation_price("buyer", buyer, seller, turns, standing_price, turn_idx, max_turns)
-                        accept = bool(move["accept"]) and standing_price <= buyer.budget
-                        proposed_price = standing_price if accept else _clamp_int(move["price"], 1, buyer.budget, min(buyer.budget, standing_price))
-                        message_text = await _compose_mathematical_negotiation_message(
-                            "buyer",
-                            buyer_model,
-                            buyer.item_name,
-                            proposed_price,
-                            accept,
-                            float(move["estimate"]),
-                            standing_price,
-                            max(0, (max_turns - len(turns) - 1) // 2),
-                            max_messages=max_turns,
-                            messages_used=len(turns),
-                        )
-                    else:
-                        raw_bjson = await _call_negotiation_llm_reply(
-                            buyer_model,
-                            role_prompt=(
-                                "You are the buyer in a direct negotiation. "
-                                f"You are trying to buy a {buyer.item_name}. Your hard budget ceiling is {buyer.budget}; never propose or accept above it. "
-                                f"Your reward is remaining money: {buyer.budget} - agreed_price. "
-                                f"{deadline_rule} "
-                                "Primary objective: maximize your reward, but remember no-deal gives 0. "
-                                "If the current legal price gives non-negative reward and deadline risk is high, prefer closing the deal. "
-                                "Do not stall with repeated numbers when the deadline is near. "
-                                f"You have exactly {turns_left_for_side} turns left for your side after this message. "
-                                f"{timer_instruction} "
-                                f"Your target price is {buyer.target_price}. Keep the message to 2-4 short lines."
-                            ),
-                            context_prompt=f"Timer update: {timer_instruction}\nCurrent seller ask: {standing_price}\nRecent transcript:\n{transcript}",
-                            max_tokens=220,
-                        )
-                        bjson = await _coerce_negotiation_reply(
-                            alias=buyer_model,
-                            role="buyer",
-                            reply=raw_bjson,
-                            standing_price=standing_price,
-                            lower_bound=1,
-                            upper_bound=buyer.budget,
-                            default_counter=min(buyer.budget, standing_price - 5),
-                        )
-                        accept = bool(bjson.get("accept_current_offer")) and standing_price <= buyer.budget
-                        proposed_price = standing_price if accept else _clamp_int(bjson.get("proposed_price"), 1, buyer.budget, min(buyer.budget, standing_price - 5))
-                        message_text = str(bjson.get("message_text") or (f"I accept ${standing_price}." if accept else f"I can do ${proposed_price}."))
-                    turns.append(NegotiationTurnAction(speaker="buyer", proposed_price=proposed_price, message_text=message_text))
-                    _append_conversation("negotiation", buyer_alias, seller_alias, message_text)
-                    if accept:
-                        agreed_price = standing_price
-                        break
-                    standing_price = proposed_price
-                else:
-                    if seller_model == "Mathematical":
-                        move = _math_negotiation_price("seller", buyer, seller, turns, standing_price, turn_idx, max_turns)
-                        accept = bool(move["accept"]) and standing_price >= seller.baseline_value
-                        default_counter = max(seller.baseline_value, standing_price + 5)
-                        proposed_price = standing_price if accept else max(seller.baseline_value, _clamp_int(move["price"], seller.baseline_value, 9999, default_counter))
-                        message_text = await _compose_mathematical_negotiation_message(
-                            "seller",
-                            seller_model,
-                            seller.item_name,
-                            proposed_price,
-                            accept,
-                            float(move["estimate"]),
-                            standing_price,
-                            max(0, (max_turns - len(turns) - 1) // 2),
-                            max_messages=max_turns,
-                            messages_used=len(turns),
-                        )
-                    else:
-                        raw_sjson = await _call_negotiation_llm_reply(
-                            seller_model,
-                            role_prompt=(
-                                "You are the seller in a direct negotiation. "
-                                f"You are selling a {seller.item_name}. Your hard floor is {seller.baseline_value}; never propose or accept below it. "
-                                f"Your reward is your profit margin: agreed_price - {seller.baseline_value}. "
-                                f"{deadline_rule} "
-                                "Primary objective: maximize your reward, but remember no-deal gives 0. "
-                                "If a current legal offer gives positive reward and deadline risk is high, prefer closing the deal. "
-                                "Do not stall with repeated numbers when the deadline is near. "
-                                f"You have exactly {turns_left_for_side} turns left for your side after this message. "
-                                f"{timer_instruction} "
-                                "Keep the message to 2-4 short lines."
-                            ),
-                            context_prompt=f"Timer update: {timer_instruction}\nCurrent buyer offer: {standing_price}\nRecent transcript:\n{transcript}",
-                            max_tokens=220,
-                        )
-                        sjson = await _coerce_negotiation_reply(
-                            alias=seller_model,
-                            role="seller",
-                            reply=raw_sjson,
-                            standing_price=standing_price,
-                            lower_bound=seller.baseline_value,
-                            upper_bound=9999,
-                            default_counter=max(seller.baseline_value, standing_price + 5),
-                        )
-                        accept = bool(sjson.get("accept_current_offer")) and standing_price >= seller.baseline_value
-                        default_counter = max(seller.baseline_value, standing_price + 5)
-                        proposed_price = standing_price if accept else max(seller.baseline_value, _clamp_int(sjson.get("proposed_price"), seller.baseline_value, 9999, default_counter))
-                        message_text = str(sjson.get("message_text") or (f"I accept ${standing_price}." if accept else f"I can do ${proposed_price}."))
-                    turns.append(NegotiationTurnAction(speaker="seller", proposed_price=proposed_price, message_text=message_text))
-                    _append_conversation("negotiation", seller_alias, buyer_alias, message_text)
-                    if accept:
-                        agreed_price = standing_price
-                        break
-                    standing_price = proposed_price
+                # Alternate from opener: turn 0=opener, turn 1=other, turn 2=opener, ...
+                role = opener_role if (turn_idx % 2 == 0) else ("buyer" if opener_role == "seller" else "seller")
+                accept, proposed_price, message_text = await _do_turn(role, turn_idx)
+                turns.append(NegotiationTurnAction(speaker=role, proposed_price=proposed_price, message_text=message_text))
+                _append_conversation("negotiation", alias_for(role),
+                                     alias_for("buyer" if role == "seller" else "seller"), message_text)
+                if accept:
+                    agreed_price = int(standing_price)
+                    break
+                standing_price = proposed_price
 
             _mark_done("negotiation_loop")
             _set_active("agreement")
@@ -3476,9 +3656,12 @@ async def _build_actions_live_negotiation(env: TravelGameEnv, payload: Dict[str,
                 "llm_error": None,
             }
         except Exception as exc:
-            llm_error = str(exc)
-            actions = _build_actions_negotiation(env, payload)
-            _append_fallback_notice("negotiation", llm_error)
+            # CRASH IF FAIL: re-raise so the batch runner sees a hard failure
+            # rather than silently substituting a math-heuristic fallback
+            # (which would attribute non-LLM decisions to the LLM and
+            # contaminate the dataset). Mirrors the auction path.
+            _append_fallback_notice("negotiation", exc)
+            raise
 
     _set_active("seller_opening")
     if actions["negotiation_turns"]:
@@ -5879,6 +6062,66 @@ def _read_slot_deception_summary(slot_id: str) -> dict[str, Any] | None:
     return {"wins": wins, "num_rounds": num_rounds}
 
 
+def _read_slot_negotiation_summary(slot_id: str) -> dict[str, Any] | None:
+    """Read a buyer/seller negotiation episode's runtime.pkl and return
+    per-alias surplus captured.
+
+    Returns dict {alias: int_surplus} keyed by buyer + seller aliases, with
+    `welfare` (total surplus generated this episode). Returns None if no
+    completed negotiation episode is found.
+    """
+    import pickle as _pickle
+    pkl = _session_runtime_dir(slot_id) / "runtime.pkl"
+    if not pkl.exists():
+        return None
+    try:
+        with pkl.open("rb") as f:
+            runtime = _pickle.load(f)
+    except Exception:
+        return None
+    if not isinstance(runtime, dict):
+        return None
+    env = runtime.get("env")
+    if env is None or env.result is None:
+        return None
+    if str(env.config.get("mode") or "") != "buyer_seller_negotiation":
+        return None
+    sel = env.config.get("selected_models") or []
+    if len(sel) < 2:
+        return None
+    d = env.result.derived
+    # Deal capacity = total surplus available in this scenario regardless of
+    # whether the deal closed. = buyer.budget - seller.baseline. This is the
+    # correct per-episode denominator for "% of available surplus captured".
+    budget = float(d.get("buyer_budget") or 0)
+    baseline = float(d.get("seller_baseline_value") or 0)
+    deal_capacity = max(0, int(round(budget - baseline)))
+    if not bool(d.get("agreement_reached", 0)):
+        # No-deal: zero surplus on both sides, but the capacity still counts
+        # toward the denominator (the LLMs faced a real opportunity and failed
+        # to close, which is a strategic outcome, not a missing data point).
+        return {
+            "surplus": {sel[0]: 0, sel[1]: 0},
+            "welfare": 0,
+            "deal_capacity": deal_capacity,
+        }
+    price = d.get("agreed_price")
+    if price is None:
+        return None
+    buyer_surplus = max(0, int(round(budget - float(price))))
+    seller_surplus = max(0, int(round(float(price) - baseline)))
+    # Sum buyer + seller surpluses to one dict — same alias appearing as both
+    # buyer and seller in different episodes will accumulate cleanly.
+    out: dict[str, int] = {}
+    out[sel[0]] = out.get(sel[0], 0) + buyer_surplus
+    out[sel[1]] = out.get(sel[1], 0) + seller_surplus
+    return {
+        "surplus": out,
+        "welfare": buyer_surplus + seller_surplus,
+        "deal_capacity": deal_capacity,
+    }
+
+
 def _read_slot_paintings_won(slot_id: str) -> dict[str, int] | None:
     """Read the latest auction_tables.csv for a slot's exports and return
     {bidder: paintings_won}. Returns None if no completed export exists."""
@@ -5935,21 +6178,30 @@ def _folder_distribution(folder_id: str) -> dict[str, Any]:
 
     bidder_totals: dict[str, int] = {}
     bidder_appearances: dict[str, int] = {}
+    bidder_capacity: dict[str, int] = {}   # negotiation: sum of deal_capacity across LLM's eps
     completed = 0
     items_per_episode = 0   # paintings_per_auction OR rounds_per_episode
-    mode_counts: dict[str, int] = {"auction": 0, "deception": 0}
+    mode_counts: dict[str, int] = {"auction": 0, "deception": 0, "negotiation": 0}
+    welfare_total = 0   # negotiation only: sum of welfare across episodes
     for sid in slot_ids:
-        # Prefer the deception export when present; fall back to auction.
+        # Prefer deception, then negotiation, then auction.
         deception = _read_slot_deception_summary(sid)
+        negotiation = _read_slot_negotiation_summary(sid) if deception is None else None
+        capacity_here = 0
         if deception is not None:
             wins_map = deception["wins"]
             mode_here = "deception"
-            # Deception: items_per_episode is the actual round count from the
-            # episode log, NOT the sum of win-credits. Tied rounds inflate the
-            # sum past num_rounds (e.g., a 12-round episode with 2 split ties
-            # has 14 win-credits), so summing would produce a > num_rounds
-            # denominator and understate per-bidder shares.
             rounds_here = int(deception.get("num_rounds") or 12)
+        elif negotiation is not None:
+            wins_map = negotiation["surplus"]
+            mode_here = "negotiation"
+            # Negotiation: per-episode "items_per_episode" is the deal capacity
+            # (budget - baseline), which varies per episode. We accumulate
+            # bidder_capacity[b] = sum of capacity across episodes b was in,
+            # used as the per-bidder denominator in the win-rate formula below.
+            capacity_here = int(negotiation.get("deal_capacity", 0))
+            rounds_here = capacity_here
+            welfare_total += int(negotiation.get("welfare", 0))
         else:
             wins_map = _read_slot_paintings_won(sid)
             mode_here = "auction" if wins_map else None
@@ -5963,16 +6215,26 @@ def _folder_distribution(folder_id: str) -> dict[str, Any]:
         for b, n in wins_map.items():
             bidder_totals[b] = bidder_totals.get(b, 0) + n
             bidder_appearances[b] = bidder_appearances.get(b, 0) + 1
+            if mode_here == "negotiation":
+                bidder_capacity[b] = bidder_capacity.get(b, 0) + capacity_here
     total_items = sum(bidder_totals.values())
+    # Negotiation: rate = surplus / total_capacity_in_my_games (correct denominator).
+    # Auction/deception: rate = wins / (appearances × items_per_episode).
+    def _rate(b: str, n: int) -> float:
+        if mode_counts.get("negotiation", 0) >= max(mode_counts.get("auction", 0), mode_counts.get("deception", 0)):
+            cap = bidder_capacity.get(b, 0)
+            return (n / cap) if cap > 0 else 0.0
+        if bidder_appearances.get(b) and items_per_episode:
+            return n / (bidder_appearances[b] * items_per_episode)
+        return 0.0
     bidders = sorted(
         (
             {
                 "bidder": b,
                 "won": n,
                 "auctions_in": bidder_appearances.get(b, 0),
-                "win_rate": (n / (bidder_appearances[b] * items_per_episode))
-                if (bidder_appearances.get(b) and items_per_episode)
-                else 0.0,
+                "capacity_in": bidder_capacity.get(b, 0),   # negotiation only
+                "win_rate": _rate(b, n),
                 "share": (n / total_items) if total_items else 0.0,
             }
             for b, n in bidder_totals.items()

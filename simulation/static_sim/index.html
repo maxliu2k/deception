@@ -1196,33 +1196,43 @@
         const ppa = dist.paintings_per_auction || 12;
         const totalRuns = Math.max(1, dist.completed_slots || 1);
         const isDeception = (dist.mode === "deception");
-        const runLabel = isDeception ? "episode" : "auction";
-        const itemLabel = isDeception ? "round" : "painting";
+        const isNegotiation = (dist.mode === "negotiation");
+        const runLabel = isNegotiation ? "episode" : (isDeception ? "episode" : "auction");
+        const itemLabel = isNegotiation ? "$ surplus" : (isDeception ? "round" : "painting");
         // Normalize by participation: rate = wins / (rounds the bidder was
         // actually IN). Without this, mimics displaced from some batches
         // look weaker than they are. Sort by win_rate too.
         const sorted = dist.bidders.slice().sort((a, b) => (b.win_rate || 0) - (a.win_rate || 0));
         const rows = sorted.map((b) => {
-          const rate = (b.win_rate || 0);
+          const rate = Math.min(1, (b.win_rate || 0));
           const ratePct = (rate * 100).toFixed(1);
           const color = bidderColor(b.bidder);
           const widthPct = Math.max(2, rate * 100);
           const displayLabel = modelDisplayName(b.bidder, dist.mode);
           const presence = b.auctions_in || 0;
           const presencePct = totalRuns ? (presence / totalRuns * 100) : 0;
+          // For negotiation: denominator = capacity_in (sum of deal_capacity =
+          // budget-baseline across episodes the bidder was in). Numerator = $
+          // surplus captured. Rate = fraction of available surplus captured.
+          const valDisplay = isNegotiation
+            ? `$${b.won}/$${b.capacity_in || 0} (${ratePct}%)`
+            : `${b.won}/${presence * ppa} (${ratePct}%)`;
           return `
             <div class="folder-dist-row">
-              <div class="folder-dist-label" title="${escapeHtml(displayLabel)} — ${b.won} wins / ${presence} ${runLabel}s (${presencePct.toFixed(0)}% present)">${escapeHtml(displayLabel)}</div>
+              <div class="folder-dist-label" title="${escapeHtml(displayLabel)} — ${b.won} ${itemLabel} / ${presence} ${runLabel}s (${presencePct.toFixed(0)}% present)">${escapeHtml(displayLabel)}</div>
               <div class="folder-dist-bar"><div class="folder-dist-fill" style="width:${widthPct}%;background:${color}"></div></div>
-              <div class="folder-dist-val">${b.won}/${presence * ppa} (${ratePct}%)</div>
+              <div class="folder-dist-val">${valDisplay}</div>
             </div>`;
         }).join("");
         const nestedTag = (dist.nested_folder_count || 0) > 0
           ? ` · includes ${dist.nested_folder_count} nested folder${dist.nested_folder_count === 1 ? "" : "s"}`
           : "";
+        const headerStats = isNegotiation
+          ? `${dist.completed_slots}/${dist.total_slots} episodes${nestedTag} · % = $ surplus captured ÷ $ surplus available in episodes the agent played`
+          : `${dist.completed_slots}/${dist.total_slots} ${runLabel}s · ${ppa} ${itemLabel}s each${nestedTag} · % = wins ÷ ${itemLabel}s-bidder-was-in`;
         return `
           <div class="folder-dist">
-            <div class="folder-dist-head">${dist.completed_slots}/${dist.total_slots} ${runLabel}s · ${ppa} ${itemLabel}s each${nestedTag} · % = wins ÷ ${itemLabel}s-bidder-was-in</div>
+            <div class="folder-dist-head">${headerStats}</div>
             ${rows}
           </div>`;
       }

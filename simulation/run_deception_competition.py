@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 DEFAULT_LOADOUT = ["Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T1"]
 
 
-def _request(method: str, base: str, path: str, body: dict | None = None, timeout: float = 30.0) -> dict:
+def _request(method: str, base: str, path: str, body: dict | None = None, timeout: float = 90.0) -> dict:
     url = base.rstrip("/") + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(

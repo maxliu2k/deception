@@ -21,22 +21,37 @@ MODEL_POOL = [
     "Math-Trivial-Max", "Math-Truth-Anchored", "Math-Self-Aware", "Math-Pack-Aware", "Math-RL",
     "Math-T1", "Math-T2", "Math-T3", "Math-T4", "Math-T5",  # back-compat aliases
     "Math-Naive", "Math-Smart", "Math-Calibrated",
+    # Negotiation math tiers
+    "Math-Trivial-Open", "Math-Reactive", "Math-Deadline-Aware",
 ]
 
 
 def negotiation_mid_market(selected_models: List[str]) -> Dict:
+    """Fully symmetric base template.
+
+    Midpoint = 130. Half-gap = 12 → budget=142, baseline=118 (equidistant from 130).
+    Both sides parameterized by parallel extraction ratios:
+        target_extraction  = 0.25   (the "goal" the agent realistically aims for)
+        opening_extraction = 0.50   (the aggressive opening anchor)
+
+    Buyer:  target = budget   × (1 - 0.25) = 107
+            opening = budget  × (1 - 0.50) = 71
+    Seller: target = baseline × (1 + 0.25) = 148
+            asking  = baseline × (1 + 0.50) = 177
+    """
     del selected_models
     item_name = "vintage guitar"
     buyer = NegotiationBuyerState(
         item_name=item_name,
         budget=142,
-        target_price=128,
-        opening_offer=116,
+        target_price=107,
+        opening_offer=71,
     )
     seller = NegotiationSellerState(
         item_name=item_name,
         baseline_value=118,
-        asking_price=164,
+        target_price=148,
+        asking_price=177,
     )
     return {"buyer": buyer, "seller": seller}
 
