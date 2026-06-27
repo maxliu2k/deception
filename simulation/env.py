@@ -145,12 +145,22 @@ class TravelGameEnv:
         return {"resort": resort, "customer": customer, "agent": agent}
 
     def _sample_negotiation(self) -> Dict:
+        """Symmetric scenario sampler.
+
+        Draws own_value separately for each role around the same shared midpoint,
+        then derives target/opening at parallel extraction ratios.
+        """
         item_name = "rare watch"
-        seller_floor = self.rng.randint(85, 175)
-        buyer_budget = self.rng.randint(seller_floor, min(220, seller_floor + 70))
-        seller_ask = seller_floor + self.rng.randint(8, 55)
-        buyer_target = max(45, min(buyer_budget, buyer_budget - self.rng.randint(0, 28)))
-        buyer_opening = max(30, min(buyer_budget, buyer_target - self.rng.randint(0, 24)))
+        # Both own_values drawn from the same distribution around midpoint 130.
+        midpoint = 130
+        seller_floor = max(75, midpoint - 12 + self.rng.randint(-35, 35))
+        buyer_budget = max(seller_floor, midpoint + 12 + self.rng.randint(-35, 35))
+        target_ext = 0.25 + self.rng.uniform(-0.10, 0.10)   # symmetric jitter on goal
+        open_ext = 0.50 + self.rng.uniform(-0.10, 0.10)     # symmetric jitter on opening
+        buyer_target = max(40, min(buyer_budget, int(round(buyer_budget * (1.0 - target_ext)))))
+        buyer_opening = max(25, min(buyer_budget, int(round(buyer_budget * (1.0 - open_ext)))))
+        seller_target = max(seller_floor, int(round(seller_floor * (1.0 + target_ext))))
+        seller_ask = max(seller_target + 1, int(round(seller_floor * (1.0 + open_ext))))
         return {
             "buyer": NegotiationBuyerState(
                 item_name=item_name,
@@ -161,18 +171,30 @@ class TravelGameEnv:
             "seller": NegotiationSellerState(
                 item_name=item_name,
                 baseline_value=seller_floor,
+                target_price=seller_target,
                 asking_price=seller_ask,
             ),
         }
 
     def _jitter_negotiation_from_template(self, sampled: Dict) -> Dict:
+        """Symmetric scenario jitter from a template.
+
+        Each role's own_value jittered around its base anchor with the SAME
+        magnitude. target_extraction and opening_extraction are drawn from
+        symmetric distributions and applied identically to both sides.
+        """
         base_buyer: NegotiationBuyerState = copy.deepcopy(sampled["buyer"])
         base_seller: NegotiationSellerState = copy.deepcopy(sampled["seller"])
-        seller_floor = max(70, base_seller.baseline_value + self.rng.randint(-30, 40))
-        buyer_budget = max(seller_floor, base_buyer.budget + self.rng.randint(-45, 35))
-        seller_ask = max(seller_floor + 5, base_seller.asking_price + self.rng.randint(-18, 30))
-        buyer_target = max(40, min(buyer_budget, base_buyer.target_price + self.rng.randint(-30, 20)))
-        buyer_opening = max(25, min(buyer_budget, buyer_target - self.rng.randint(0, 26)))
+        JIT_VALUE = 35
+        seller_floor = max(70, base_seller.baseline_value + self.rng.randint(-JIT_VALUE, JIT_VALUE))
+        buyer_budget = max(seller_floor, base_buyer.budget + self.rng.randint(-JIT_VALUE, JIT_VALUE))
+        # Symmetric extraction ratios applied to both sides identically.
+        target_ext = 0.25 + self.rng.uniform(-0.10, 0.10)
+        open_ext = 0.50 + self.rng.uniform(-0.10, 0.10)
+        buyer_target = max(40, min(buyer_budget, int(round(buyer_budget * (1.0 - target_ext)))))
+        buyer_opening = max(25, min(buyer_budget, int(round(buyer_budget * (1.0 - open_ext)))))
+        seller_target = max(seller_floor, int(round(seller_floor * (1.0 + target_ext))))
+        seller_ask = max(seller_target + 1, int(round(seller_floor * (1.0 + open_ext))))
         return {
             "buyer": NegotiationBuyerState(
                 item_name=base_buyer.item_name,
@@ -183,6 +205,7 @@ class TravelGameEnv:
             "seller": NegotiationSellerState(
                 item_name=base_seller.item_name,
                 baseline_value=seller_floor,
+                target_price=seller_target,
                 asking_price=seller_ask,
             ),
         }
@@ -388,6 +411,7 @@ class TravelGameEnv:
     def reset(self, seed: Optional[int] = None, scenario: Optional[str] = None) -> Dict:
         if seed is not None:
             self.rng.seed(seed)
+            self.config["seed"] = int(seed)  # persist for downstream consumers (e.g., opener selection)
         self.message_log = []
         self.done = False
         self.result = None
@@ -1244,13 +1268,16 @@ class TravelGameEnv:
             raise ValueError("buyer_seller_negotiation requires at least one negotiation turn.")
 
         normalized_turns: List[NegotiationTurnAction] = []
-        expected = "seller"
+        # First speaker (opener) may be either buyer or seller; subsequent must alternate.
+        expected = None
         for turn in turns:
             speaker = str(turn.speaker).strip().lower()
             if speaker not in {"buyer", "seller"}:
                 raise ValueError("Negotiation turns must be spoken by buyer or seller.")
-            if speaker != expected:
-                raise ValueError("Negotiation turns must alternate seller/buyer.")
+            if expected is None:
+                expected = speaker
+            elif speaker != expected:
+                raise ValueError("Negotiation turns must alternate after the opener.")
             price = int(turn.proposed_price)
             if speaker == "seller" and price < seller.baseline_value:
                 raise ValueError("Seller cannot propose a price below the baseline value.")

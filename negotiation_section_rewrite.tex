@@ -1,0 +1,153 @@
+% =====================================================================
+% BUYER-SELLER NEGOTIATION -- section with the architecture description
+% corrected to match the actual code (negotiation_mimic.py /
+% train_negotiation_nn.py).
+%   CHUNK 1 -> goes in \section{Methodology}
+%   CHUNK 2 -> goes in \section{Experimental Results}
+%
+% CORRECTED (paper text disagreed with the implementation):
+%  - NOT "independent action network and price network": a SINGLE role-
+%    conditioned network with a shared trunk + two heads.
+%  - hidden width is 64, not 32: action path is 32->64->64->3 (was 32->32->32->3).
+%  - activations are Tanh, not sigmoid.
+%  - price head is a plain Linear(64,1): no separate ReLU net, no softplus output.
+%  - no Dropout layer found in the code (paper said dropout 0.2) -> dropped.
+%  - typo "we trains" -> "we train".
+% STILL TO VERIFY: price loss (paper says Huber delta=0.1; not yet confirmed
+%  against train_negotiation_nn.py). Also "v1 mimics" in the Synthesis is
+%  undefined; left as-is.
+% =====================================================================
+
+
+% #####################################################################
+% ## CHUNK 1 -- METHODOLOGY
+% #####################################################################
+
+\subsection{Buyer-Seller Negotiation}
+
+To study bargaining under asymmetric private constraints, we designed a bilateral negotiation in which two LLM agents must balance surplus extraction against the risk of leaving mutually beneficial gains unrealized. Each agent observes its own hard price bound and a short public interaction history, while the opponent's bound remains hidden. The setting exposes role-dependent offering, concession, acceptance, and walk-away behavior in a compact action space that can be logged at the turn level and distilled into behavioral mimics.
+
+\subsubsection{Environment and Action Protocol}
+
+We implement a finite bilateral alternating-offer game between a buyer $B$ and seller $S$. The buyer privately observes a hard budget $v_B$ and a target-price prompt anchor; the seller privately observes a hard reservation floor $v_S$ and an opening-ask anchor. Let $\mathsf{U}_{\mathbb{Z}}[a,b]$ denote the discrete uniform distribution on the integers from $a$ to $b$. The engine first samples $v_S\sim\mathsf{U}_{\mathbb{Z}}[85,175]$, then samples one of three valuation regimes:
+\begin{equation}
+v_B\sim
+\begin{cases}
+\mathsf{U}_{\mathbb{Z}}[v_S,b_f], & \text{feasible},\\
+\mathsf{U}_{\mathbb{Z}}[v_S,b_t], & \text{tight},\\
+\mathsf{U}_{\mathbb{Z}}[\ell_i,u_i], & \text{infeasible},
+\end{cases}
+\end{equation}
+where $b_f=\min(220,v_S+70)$, $b_t=\min(220,v_S+15)$, $\ell_i=\max(40,v_S-35)$, and $u_i=\max(40,v_S-5)$. The seller's initial ask anchor is $v_S+\mathsf{U}_{\mathbb{Z}}[8,55]$; the buyer target is its budget minus a random amount in $[0,28]$, subject to the engine's lower bound. The experiments reported in Section~IV-A use only the \emph{feasible} regime. Tight and infeasible regimes are implemented for the expanded rejection study but are not included in the reported estimates.
+
+The seller sends the first message, which the engine constrains to be an offer, and the parties then alternate for at most $H=8$ total messages. On later turns the acting model selects
+\begin{equation}
+a_t\in\{\texttt{continue}(p_t),\texttt{accept},\texttt{reject}\}.
+\end{equation}
+Each live-model prompt contains the acting role's private bound and anchor, the current standing offer, an explicit deadline counter, and up to the six most recent public offers/messages; it never contains the opponent's private bound. Calls use temperature $0.2$ and a structured action schema. The engine parses the reply and applies a legality layer: buyer proposals are clipped to $[1,v_B]$, seller proposals to $[v_S,9999]$, and accept is legal only when the standing offer respects the acting agent's bound. Accept closes at the standing price, reject ends immediately with no deal, and exhausting the message limit produces a timeout. The recorded behavior is therefore the canonical action after parsing and legality enforcement---the LLM-plus-wrapper policy---rather than unconstrained text.
+
+For agreement at price $p$, utilities are $U_B=v_B-p$ and $U_S=p-v_S$; both are zero without agreement. Let $G=v_B-v_S$ denote available bargaining surplus. For $G>0$ we report
+\begin{equation}
+z=\frac{p-v_S}{G},\qquad
+u_B=\frac{U_B}{G},\qquad
+u_S=\frac{U_S}{G},
+\end{equation}
+where $z=0$ gives the buyer all available surplus and $z=1$ gives it to the seller. Zero- or negative-surplus episodes have no normalized price and are evaluated by their terminal outcome.
+
+\subsubsection{Live-Model Data and State Encoding}
+
+The source population comprises GPT-5.4, Grok 4.3, Llama 4 Maverick, Claude Opus 4.6, and Gemini 3.1 Pro. We run all $5\times5=25$ directed buyer--seller pairings once under each of ten matched environment seeds. Holding the seed fixed presents identical private values to every pairing, yielding 250 live-model episodes and 1{,}060 canonical turn decisions: 811 continue, 218 accept, and 31 explicit reject. Each completed log records model and role, seed, both private bounds for offline outcome analysis, the public offer sequence, canonical action, termination reason, and final price.
+
+The mimic input is a leakage-safe 32-dimensional pre-action vector. It encodes role; turn and remaining-message fractions; the acting agent's private bound and target; presence, level, and change of the standing offer; counts and summary statistics of public prices; separate own and opponent offer counts, best offers, and total/last concessions; the latest buyer--seller gap; and first/deadline indicators. Monetary features are expressed either relative to the acting agent's private bound or on a fixed \$1{,}000 scale. Opponent private values, the current action, terminal outcome, final price, and message text are excluded. Buyer and seller examples share a model-specific network because role is included in the state vector.
+
+\subsubsection{Mimic Training and Deployment}
+
+For each source LLM we train a single role-conditioned network with a shared trunk and two output heads. The trunk is two fully-connected layers of width $64$ with Tanh activations ($32\!\to\!64\!\to\!64$); from its representation an action head ($64\!\to\!3$) emits logits over continue, accept, and reject, and a price head ($64\!\to\!1$) emits the proposed price as a fraction of the acting agent's private bound. The action head is trained with weighted cross-entropy: for class $c$ with $n_c>0$ training examples, the fold-specific weight is
+\begin{equation}
+w_c=\min\!\left(3,\sqrt{n_{\max}/n_c}\right),
+\end{equation}
+which raises the influence of terminal actions without fully inverse-weighting the 31 sparse rejects. The price head is trained only on continue actions, using Huber loss ($\delta=0.1$). Inputs are standardized using training-fold statistics. Training uses AdamW (learning rate $10^{-3}$, weight decay $10^{-4}$), batch size 32, at most 300 epochs, and early stopping with patience 40.
+
+All splits are grouped by environment seed. For each cross-fitted checkpoint, one seed is held out for testing and a second seed from the remaining pool is used for early stopping; no turn from the test valuation scenario enters that checkpoint's training or validation data. Seeds 0--4 form the rollout-development subset used to select deployment stochasticity, while fidelity is reported on seeds 5--9. The selection objective is the sum of terminal-outcome total-variation distance (TVD), absolute agreement-rate gap, and conditional-price Wasserstein distance on development rollouts. It selects action temperature $0$ (argmax after masking illegal actions) and price temperature $0.5$. For a continue action, deployment adds zero-mean Gaussian noise at one half of the model-specific training-residual standard deviation, then clips the resulting offer to the legal interval.
+
+\subsubsection{Fidelity and Baseline Protocol}
+
+Decision-level fidelity scores the five evaluation seeds with the corresponding seed-held-out checkpoints and reports accuracy, macro-F1, per-class recall, action-distribution TVD, and conditional offer-price MAE. Outcome-level fidelity compares the 125 real episodes on seeds 5--9 with three mimic replicates of every matched seed/pairing, for 375 mimic episodes. We report agreement, explicit rejection, timeout, normalized utilities, conditional $z$, message count, terminal-outcome TVD, and conditional-price Wasserstein distance. The environment seed is the independent unit: bootstrap intervals use 4{,}000 resamples of seeds and retain all pairings and mimic replicates within a sampled seed.
+
+For baseline screening, each mimic plays both buyer and seller against a deterministic mathematical policy over the same five evaluation seeds and three mimic replicates, giving 15 episodes per model/role cell. The mathematical policy estimates an opponent bound from public offers, scores candidate prices with a smooth acceptance model and a deadline-dependent no-deal cost, and accepts when the standing offer is competitive with its best counteroffer; it does not explicitly reject. We additionally report mathematical self-play. These comparisons are mimic-mediated: because the baseline has not yet been run against the real LLMs, Section~IV-A does not claim that its ranking transfers.
+
+
+% #####################################################################
+% ## CHUNK 2 -- EXPERIMENTAL RESULTS
+% #####################################################################
+
+\subsection{Buyer-Seller Negotiation}
+
+\subsubsection{Model Behavior Characterization}
+
+Table~\ref{tab:neg_behavior} characterizes each source model in both roles on the five held-out seeds (25 episodes per model/role). The buyer and seller columns are not symmetric duplicates: they measure the source model against all five opponents while occupying the indicated role. Grok and Claude are the strongest buyers, achieving nearly identical agreement ($92\%$) and normalized buyer utility ($0.661$ and $0.658$); their accepted prices allocate only $z=0.282$ and $0.285$ of the available surplus to the seller. In the seller role, GPT, Grok, and Claude form a middle cluster near $u_S=0.43$--$0.44$. Gemini closes most often as seller ($96\%$) but captures only $u_S=0.194$ and $z=0.202$, a high-closure, buyer-favorable signature. Llama is the clearest outlier: as seller it agrees in only $72\%$ of episodes and explicitly rejects $28\%$, compared with $4$--$12\%$ rejection for the other seller profiles.
+
+\begin{table}[htbp]
+\caption{Real-LLM negotiation behavior on held-out seeds. $AR_B$ and $u_B$ evaluate a model as buyer; $AR_S$ and $u_S$ evaluate it as seller. Utilities are normalized by available surplus and include zero for no deal ($n=25$ episodes per model/role; five independent seeds).}
+\label{tab:neg_behavior}
+\centering
+\begin{tabular}{lcccc}
+\hline
+Model & $AR_B$ (\%) & $u_B$ & $AR_S$ (\%) & $u_S$ \\
+\hline
+GPT-5.4 & 92 & 0.498 & 92 & 0.434 \\
+Grok    & 92 & 0.661 & 92 & 0.434 \\
+Llama   & 80 & 0.350 & 72 & 0.296 \\
+Claude  & 92 & 0.658 & 88 & 0.438 \\
+Gemini  & 84 & 0.437 & 96 & 0.194 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Mimic Fidelity}
+\label{sec:neg-fidelity}
+
+At the decision level, cross-fitted mimics recover $85.0\%$ of the 566 held-out actions (macro-F1 $0.518$). Continue and accept recall are $0.946$ and $0.582$, and the conditional offer-price MAE is \$13.3 (0.083 in own-bound ratio units). Explicit rejection is the unresolved class: recall is zero on 15 held-out reject actions. This is not hidden by the high aggregate accuracy, which is dominated by continue decisions.
+
+At the rollout level the principal aggregates align much more closely than in the unweighted mimic. Agreement is $88.0\%$ for 125 real episodes and $89.3\%$ for 375 matched mimic episodes, a $+1.3$ percentage-point difference whose seed-clustered $95\%$ interval includes zero (Table~\ref{tab:neg_fidelity}). Conditional deal splits are also close ($z=0.408$ vs. $0.388$; Wasserstein distance $0.034$). Terminal-outcome TVD is $0.069$ with a wide five-seed interval $[0.045,0.200]$. The remaining mismatch is interpretable: mimics explicitly reject in $5.1\%$ of episodes versus $12.0\%$ for real models and take about $0.62$ more messages. Thus the surrogate is faithful for aggregate closure and price screening, but not yet for the mechanism of walking away.
+
+\begin{table}[htbp]
+\caption{Negotiation rollout fidelity. Differences and intervals are mimic minus real; intervals resample the five seeds while retaining all pairings and mimic replicates. Deal price $z$ is conditional on agreement.}
+\label{tab:neg_fidelity}
+\centering
+\begin{tabular}{lccc}
+\hline
+Metric & Real & Mimic & Comparison \\
+\hline
+Agreement rate & 0.880 & 0.893 & $+0.013$ [$-0.075,0.155$] \\
+Explicit rejection & 0.120 & 0.051 & $-0.069$ [$-0.200,0.021$] \\
+Deal price $z$ & 0.408 & 0.388 & $W_1=0.034$ \\
+Messages & 4.528 & 5.147 & $+0.619$ [$0.051,1.137$] \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Baseline Comparison}
+
+Table~\ref{tab:neg_baseline} screens each mimic against the deterministic mathematical policy in both roles (15 episodes per cell: five seeds and three mimic replicates). Buyer performance separates sharply: Claude and Grok retain $u_B=0.742$ and $0.737$, with seed-clustered intervals $[0.595,0.870]$ and $[0.610,0.887]$, while Gemini reaches only $0.288$. Grok is also the strongest seller ($u_S=0.609$); Llama and Gemini concede most of the surplus as sellers ($0.253$ and $0.170$). Mathematical self-play always agrees, with $z=0.412$, allocating normalized utilities $u_B=0.588$ and $u_S=0.412$. These are mimic-mediated screening results. Unlike the auction and deception ladders, they have not yet been repeated against the real LLMs, so we do not claim that the ranking transfers.
+
+\begin{table}[htbp]
+\caption{Mimic performance against the mathematical policy. $u_B$ is the focal mimic as buyer; $u_S$ is the focal mimic as seller. Each cell has 15 episodes but only five independent seeds.}
+\label{tab:neg_baseline}
+\centering
+\begin{tabular}{lcccc}
+\hline
+Mimic & $AR_B$ (\%) & $u_B$ & $AR_S$ (\%) & $u_S$ \\
+\hline
+GPT-5.4 & 100.0 & 0.469 & 93.3 & 0.422 \\
+Grok    & 100.0 & 0.737 & 100.0 & 0.609 \\
+Llama   & 100.0 & 0.432 & 100.0 & 0.253 \\
+Claude  & 100.0 & 0.742 & 93.3 & 0.435 \\
+Gemini  & 86.7 & 0.288 & 86.7 & 0.170 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Synthesis}
+
+The negotiation results reveal stable role-dependent signatures rather than one universally strong model: Grok and Claude extract buyer surplus, Gemini trades seller surplus for closure, and Llama walks away most readily. Capped class weighting corrects the v1 mimics' aggregate closure deficit without materially disturbing the deal-price distribution, bringing real and mimic agreement within $1.3$ percentage points. The unresolved boundary is explicit rejection and trajectory length, both rare-event, compounding-error problems. Consequently, the present mimics support price characterization and low-cost baseline screening, but not training a deployable negotiation policy or asserting baseline transfer. The next experiment therefore adds tight and infeasible bargaining regimes, more independent seeds, and real-LLM baseline transfer runs; these conditions supply genuine rejection examples instead of synthetically oversampling the 31 rejects in the current training set.

@@ -137,6 +137,7 @@ class NegotiationSellerState:
     item_name: str
     baseline_value: int
     asking_price: int
+    target_price: int = 0  # symmetric to NegotiationBuyerState.target_price
 
 
 @dataclass
