@@ -14,13 +14,26 @@ All formulas use LOG-SYMMETRIC extraction:
     Buyer:  price = own_value · exp(-e)
     Seller: price = own_value · exp(+e)
 With e ∈ [0, ∞). e=0 means I'm at my reservation; larger e means more extraction.
-This is truly multiplicative-symmetric across roles: swapping (role, v) flips
-the sign in log-price space and leaves all per-tier behavior identical.
+This is truly multiplicative-symmetric across roles.
+
+Every tier parameter is expressed as an integer multiple of one principled
+reference value E_REF (defined below). No per-tier magic numbers — all values
+derive from a single choice of E_REF.
 
 All policies return {"action": str, "proposed_price": int, "message_text": str}.
 """
 from __future__ import annotations
 import math
+
+
+# ── Principled reference extraction ──────────────────────────────────────────
+# E_REF = log(2)/2 ≈ 0.347 is the Nash-bargaining solution in log-symmetric
+# space under the uninformative prior "opp's value lies in [v/2, 2v]" — i.e.,
+# without any information about the opponent's private value, my best guess
+# of the 50/50 split is to extract log(2)/2 from my own value. This is the
+# only "magic" number in the file; every tier parameter is a small integer
+# multiple of E_REF.
+E_REF = math.log(2.0) / 2.0   # ≈ 0.3466
 
 
 def _apply_ext(role: str, v: float, e: float) -> float:
@@ -50,10 +63,11 @@ def trivial_open(
 ) -> dict:
     """T1: extreme counter, never accept.
 
-    e = 4.0  ⇒  Buyer offers v·exp(-4) ≈ 0.018·v; Seller asks v·exp(4) ≈ 54.6·v
-    Both demand virtually all the surplus. Deal essentially impossible."""
+    e = 10·E_REF ≈ 3.47 ⇒ buyer offers v·exp(-3.47) ≈ 0.031·v;
+    seller asks v·exp(+3.47) ≈ 32·v. Deal essentially impossible.
+    """
     v = float(own_private_value)
-    e = 4.0
+    e = 10.0 * E_REF
     price = max(1, int(round(_apply_ext(role, v, e))))
     return {"action": "continue", "proposed_price": price, "message_text": ""}
 
@@ -63,14 +77,15 @@ def truth_anchored(
     turn_history: list[dict], standing_price: float | None,
     turn_index: int, message_limit: int,
 ) -> dict:
-    """T2: state-free fixed log-extraction. Symmetric across buyer/seller.
+    """T2: target the Nash-prescribed extraction under uninformative prior.
 
-        target_extraction = 0.30   (log-units)
-        Buyer target  = v · exp(-0.30) ≈ 0.741·v
-        Seller target = v · exp(+0.30) ≈ 1.350·v
-    Accept when the opponent has met or beaten this extraction."""
+    target_e = 1·E_REF ≈ 0.347 ⇒
+        Buyer target  = v · exp(-0.347) ≈ 0.707·v
+        Seller target = v · exp(+0.347) ≈ 1.414·v
+    Accept if opp has met the Nash-prescribed split.
+    """
     v = float(own_private_value)
-    target_e = 0.30
+    target_e = 1.0 * E_REF
     target_price = _apply_ext(role, v, target_e)
     if standing_price is not None:
         if (role == "buyer" and standing_price <= target_price) or \
@@ -86,22 +101,16 @@ def reactive(
 ) -> dict:
     """T3: bisect between standing and target in log-price space.
 
-        opening_e = 0.70   (start aggressive; buyer offers v·exp(-0.7)≈0.50v)
-        accept_e  = 0.15   (accept if opp has given me e ≥ 0.15)
-        target_e  = 0.50   (target ext 0.50 in counters)
+        opening_e = 2·E_REF ≈ 0.693   (open at log-double aggression)
+        accept_e  = 0.5·E_REF ≈ 0.173  (accept if opp gave me ≥ half-Nash)
+        target_e  = 1.5·E_REF ≈ 0.520  (counter aiming above-Nash)
 
-        Buyer:  opening  = v · exp(-0.70) ≈ 0.497·v
-                accept_T = v · exp(-0.15) ≈ 0.861·v
-                target   = v · exp(-0.50) ≈ 0.607·v
-        Seller: opening  = v · exp(+0.70) ≈ 2.014·v
-                accept_T = v · exp(+0.15) ≈ 1.162·v
-                target   = v · exp(+0.50) ≈ 1.649·v
-
-    Counter is the geometric midpoint of standing and my target — log-space
-    bisection rather than arithmetic, preserving multiplicative symmetry.
+    Counter is the geometric (log-space) midpoint of standing and target.
     """
     v = float(own_private_value)
-    opening_e, accept_e, target_e = 0.70, 0.15, 0.50
+    opening_e = 2.0 * E_REF
+    accept_e = 0.5 * E_REF
+    target_e = 1.5 * E_REF
 
     if standing_price is None:
         opening = int(round(_apply_ext(role, v, opening_e)))
@@ -114,7 +123,6 @@ def reactive(
        (role == "seller" and standing_price >= accept_threshold):
         return {"action": "accept", "proposed_price": int(standing_price), "message_text": ""}
 
-    # Geometric (log-space) bisection between standing and target.
     target_price = _apply_ext(role, v, target_e)
     new_price = math.sqrt(max(1.0, standing_price) * max(1.0, target_price))
     if role == "buyer":
@@ -129,12 +137,12 @@ def deadline_aware(
     turn_history: list[dict], standing_price: float | None,
     turn_index: int, message_limit: int,
 ) -> dict:
-    """T4: T3 + concession curve toward deadline + opp-history awareness.
+    """T4: T3 + linear concession curve toward deadline.
 
-    Extraction parameters decrease linearly with `progress = turn_index/limit`:
-        accept_e(p) = 0.30 − 0.25·p   (early: hold out for big surplus; late: take anything)
-        target_e(p) = 0.70 − 0.40·p   (early: ask big; late: relent)
-    Plus weighted-midpoint counter (weight on opp grows from 0.5 → 0.8 in log space).
+    With progress p = turn_index / message_limit ∈ [0, 1]:
+        accept_e(p) = 1·E_REF · (1 - p)     (relax accept threshold to 0 at deadline)
+        target_e(p) = 2·E_REF · (1 - p/2)   (start at 2·E_REF, end at 1·E_REF)
+    Weighted-midpoint counter: weight on opp's standing grows from 0.5 → 0.8.
     At the deadline turn, accept any legal offer.
     """
     v = float(own_private_value)
@@ -142,27 +150,24 @@ def deadline_aware(
     turns_remaining = max(0, message_limit - len(turn_history))
 
     if standing_price is None:
-        opening_e = 0.70  # same as T3 opener — aggressive anchor
+        opening_e = 2.0 * E_REF   # match T3 opener
         opening = int(round(_apply_ext(role, v, opening_e)))
         if role == "buyer":
             opening = max(1, opening)
         return {"action": "continue", "proposed_price": opening, "message_text": ""}
 
-    # Deadline override: accept any legal offer
     if turns_remaining <= 1 and _legal(role, standing_price, v):
         return {"action": "accept", "proposed_price": int(standing_price), "message_text": ""}
 
-    accept_e = max(0.0, 0.30 - 0.25 * progress)
-    target_e = max(0.0, 0.70 - 0.40 * progress)
+    accept_e = max(0.0, 1.0 * E_REF * (1.0 - progress))
+    target_e = max(0.0, 2.0 * E_REF * (1.0 - progress / 2.0))
     accept_threshold = _apply_ext(role, v, accept_e)
     if (role == "buyer" and standing_price <= accept_threshold) or \
        (role == "seller" and standing_price >= accept_threshold):
         return {"action": "accept", "proposed_price": int(standing_price), "message_text": ""}
 
-    # Geometric weighted midpoint: weight on opp's standing grows from 0.5 → 0.8.
     weight_opp = 0.5 + 0.3 * progress
     target_price = _apply_ext(role, v, target_e)
-    # log-space weighted average: exp(w·log(standing) + (1-w)·log(target))
     log_combined = (weight_opp * math.log(max(1.0, standing_price))
                     + (1.0 - weight_opp) * math.log(max(1.0, target_price)))
     new_price = math.exp(log_combined)

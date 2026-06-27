@@ -67,6 +67,8 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base", default="http://localhost:8010")
     p.add_argument("--folder", default="Negotiation Math vs Real LLM v1")
+    p.add_argument("--llms", default=",".join(LLMS),
+                   help="Comma-separated opponent aliases (replace default LLMs with e.g. mimic aliases)")
     p.add_argument("--episodes-per-pair", type=int, default=2,
                    help="Episodes per (math_tier, LLM, role) combo (default 2 → 80 total)")
     p.add_argument("--parallel", type=int, default=3)
@@ -78,10 +80,12 @@ def main() -> int:
     folder_id = find_or_create_folder(args.base, args.folder)
     print(f"Folder = {folder_id}", flush=True)
 
+    opponents = [s.strip() for s in args.llms.split(",") if s.strip()]
+    print(f"Opponents: {opponents}", flush=True)
     jobs = []
     seed = args.start_seed
     for tier in MATH_TIERS:
-        for llm in LLMS:
+        for llm in opponents:
             for role in ("buyer", "seller"):
                 for _ in range(args.episodes_per_pair):
                     buyer = tier if role == "buyer" else llm
@@ -90,7 +94,7 @@ def main() -> int:
                     jobs.append({"buyer": buyer, "seller": seller, "seed": seed,
                                  "tier": tier, "llm": llm, "tier_role": role, "name": name})
                     seed += 1
-    print(f"Total: {len(jobs)} episodes ({len(MATH_TIERS)} tiers × {len(LLMS)} LLMs × 2 roles × {args.episodes_per_pair} eps)", flush=True)
+    print(f"Total: {len(jobs)} episodes ({len(MATH_TIERS)} tiers × {len(opponents)} opps × 2 roles × {args.episodes_per_pair} eps)", flush=True)
 
     completed = {"n": 0, "fail": 0}
     lock = threading.Lock()
