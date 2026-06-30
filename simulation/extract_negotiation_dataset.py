@@ -3,10 +3,10 @@
 Reads runtime.pkl files from save_slots/<sid>/ and produces a JSONL dataset
 in the same schema as the existing negotiation_nn_dataset_nn.jsonl:
     x: 32-float feature vector (built by build_feature_vector)
-    y_action: 0=continue, 1=accept, 2=reject
-    y_accept, y_continue, y_reject: one-hot
+    y_action: 0=continue, 1=accept   (binary — there is no reject in this game)
+    y_accept, y_continue: one-hot
     y_price: raw $
-    y_price_ratio: y_price / own_private_value
+    y_extraction: log-symmetric extraction label
     y_price_delta, y_price_delta_ratio
     y_offer_mask: 1 when action involves a new price
     model_index, role_index, turn_number, episode_index, source_log_index, seed
@@ -117,7 +117,6 @@ def build_rows_from_runtime(sid: str, pkl_path: Path, episode_index: int,
             "y_action": y_action,
             "y_accept": 1.0 if y_action == 1 else 0.0,
             "y_continue": 1.0 if y_action == 0 else 0.0,
-            "y_reject": 1.0 if y_action == 2 else 0.0,
             "y_price": float(price),
             "y_extraction": float(y_extraction),
             "y_price_delta": y_price_delta,
@@ -195,14 +194,14 @@ def main() -> int:
         ],
         "input_dim": 32,
         "model_vocab": DEFAULT_MODEL_VOCAB,
-        "action_definition": {"continue": 0, "accept": 1, "reject": 2},
+        "action_definition": {"continue": 0, "accept": 1},
         "role_definition": {"buyer": 0, "seller": 1},
         "n_episodes": n_eps,
         "n_rows": len(all_rows),
         "per_alias_rows": dict(by_alias),
         "source_folder": args.folder,
         "schema_version": "v4-symmetric",
-        "extraction_label": "y_extraction = surplus/own_value, positive = favors me",
+        "extraction_label": "y_extraction = log-symmetric extraction; buyer=log(own_value/price), seller=log(price/own_value); positive favors me",
     }
     meta_path.write_text(json.dumps(meta, indent=2))
     print(f"Wrote meta -> {meta_path}", flush=True)

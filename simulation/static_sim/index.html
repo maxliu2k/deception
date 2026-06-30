@@ -4,6 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Agent Simulation</title>
+    <script>
+      // Apply the saved theme before first paint to avoid a flash of light mode.
+      (function () {
+        try {
+          var saved = localStorage.getItem("sim-theme");
+          if (!saved) saved = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          if (saved === "dark") document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
     <style>
       html, body { height: 100%; }
       body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #f5f4f0; color: #1c1917; margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
@@ -136,6 +146,10 @@
       .folder-card:hover { border-color: #9a3412; box-shadow: 0 3px 10px rgba(0,0,0,.07); }
       .folder-card .folder-icon { font-size: 28px; margin-bottom: 4px; }
       .folder-card-back { background: #f5f4f0; }
+      /* Large folders (many slots) get their own full-width row so their
+         distribution panel has room to breathe instead of being squeezed into
+         one narrow grid column. */
+      .folder-card-wide { grid-column: 1 / -1; }
       .slot-card[draggable="true"] { cursor: grab; }
       .slot-card.dnd-dragging { opacity: 0.4; }
       .slot-card.dnd-drop-target { outline: 2px dashed #9a3412; outline-offset: -3px; background: #fef3c7; }
@@ -183,6 +197,78 @@
       .confirm-card-title { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
       .confirm-card-body { font-size: 13px; color: #78716c; margin-bottom: 20px; line-height: 1.5; }
       .confirm-card-btns { display: flex; gap: 8px; justify-content: flex-end; }
+
+      /* Theme toggle button */
+      .theme-toggle { background: transparent; border: 1px solid #e7e5e0; color: #57534e; border-radius: 7px; padding: 6px 10px; font-size: 14px; line-height: 1; cursor: pointer; }
+      .theme-toggle:hover { background: #fafaf9; }
+
+      /* ───────────────────────── Dark mode ─────────────────────────
+         Additive overrides keyed on the root [data-theme="dark"] attribute,
+         so the light theme above is untouched. Warm-stone dark palette. */
+      [data-theme="dark"] { color-scheme: dark; }
+      [data-theme="dark"] body { background: #1a1816; color: #ede9e3; }
+      [data-theme="dark"] header { background: #232020; border-bottom-color: #3a3531; }
+      [data-theme="dark"] .header-sub { color: #9a938b; }
+      [data-theme="dark"] .card,
+      [data-theme="dark"] .msg,
+      [data-theme="dark"] .matchup-details,
+      [data-theme="dark"] #t5ChartCard,
+      [data-theme="dark"] .confirm-card { background: #262321; border-color: #3a3531; }
+      [data-theme="dark"] select, [data-theme="dark"] input { background: #1f1d1b; border-color: #3a3531; color: #ede9e3; }
+      [data-theme="dark"] .label, [data-theme="dark"] .section-head,
+      [data-theme="dark"] .hint, [data-theme="dark"] .small,
+      [data-theme="dark"] .turn-card .small, [data-theme="dark"] .meta,
+      [data-theme="dark"] .folder-dist-empty { color: #8a837b; }
+      [data-theme="dark"] .header-sub, [data-theme="dark"] .slot-meta,
+      [data-theme="dark"] .menu-header p, [data-theme="dark"] .mini-episode-head,
+      [data-theme="dark"] .breadcrumb, [data-theme="dark"] .confirm-card-body { color: #9a938b; }
+      [data-theme="dark"] .folder-dist-head, [data-theme="dark"] .folder-dist-val,
+      [data-theme="dark"] button.ghost, [data-theme="dark"] .t5-progress-bar .t5-line,
+      [data-theme="dark"] .t5-chart-title { color: #b8b2aa; }
+      [data-theme="dark"] .folder-dist-label, [data-theme="dark"] .t5-progress-bar .t5-label { color: #ede9e3; }
+      /* surfaces that were subtle off-white */
+      [data-theme="dark"] .turn-card, [data-theme="dark"] .reward-box,
+      [data-theme="dark"] .policy-box, [data-theme="dark"] .mini-episode,
+      [data-theme="dark"] .matchup-details summary, [data-theme="dark"] .t5-progress-bar,
+      [data-theme="dark"] .batch-table th, [data-theme="dark"] .attr-table th,
+      [data-theme="dark"] .batch-table tr.summary-row td { background: #2e2a27; border-color: #3a3531; }
+      [data-theme="dark"] .turn-card.skipped { background: #2e2a27; border-color: #3a3531; }
+      [data-theme="dark"] .slot-card { background: #262321; border-color: #3a3531; }
+      [data-theme="dark"] .slot-card:hover { border-color: #4a443e; }
+      [data-theme="dark"] .slot-title, [data-theme="dark"] .who,
+      [data-theme="dark"] .folder-dist-label { color: #ede9e3; }
+      /* borders / dividers */
+      [data-theme="dark"] .cfg-section, [data-theme="dark"] .batch-table td,
+      [data-theme="dark"] .attr-table td { border-color: #332f2b; }
+      [data-theme="dark"] .batch-table th, [data-theme="dark"] .attr-table th,
+      [data-theme="dark"] .batch-table tr.summary-row td { border-bottom-color: #3a3531; }
+      [data-theme="dark"] .t5-progress-bar .t5-bar-outer,
+      [data-theme="dark"] .folder-dist-bar { background: #3a3531; }
+      /* buttons */
+      [data-theme="dark"] button.ghost { background: transparent; border-color: #3a3531; }
+      [data-theme="dark"] button.ghost:hover { background: #2e2a27; }
+      [data-theme="dark"] button.alt { background: #4a443e; }
+      [data-theme="dark"] .theme-toggle { border-color: #3a3531; color: #b8b2aa; }
+      [data-theme="dark"] .theme-toggle:hover { background: #2e2a27; }
+      /* state cards (semantic) */
+      [data-theme="dark"] .turn-card.thinking { background: #1e2a3d; border-color: #34507a; }
+      [data-theme="dark"] .turn-card.done { background: #152a1d; border-color: #2f6b41; }
+      [data-theme="dark"] .booked-yes { background: #152a1d; color: #86efac; border-color: #2f6b41; }
+      [data-theme="dark"] .booked-no { background: #2e1717; color: #fca5a5; border-color: #7a3434; }
+      [data-theme="dark"] .bool-yes, [data-theme="dark"] .badge-agent { background: #1d3a26; color: #86efac; }
+      [data-theme="dark"] .bool-no { background: #3a1d1d; color: #fca5a5; }
+      [data-theme="dark"] .badge-customer, [data-theme="dark"] .slot-badge.filled { background: #1e2f4d; color: #93c5fd; }
+      [data-theme="dark"] .badge-verified { background: #152a1d; color: #86efac; }
+      [data-theme="dark"] .slot-badge.empty { background: #2e2a27; color: #9a938b; }
+      [data-theme="dark"] .slot-badge.running { background: #1d3a26; color: #86efac; }
+      [data-theme="dark"] .lie-caught { background: #3a3017; color: #fde047; }
+      [data-theme="dark"] .lie-hidden { background: #2e1d3a; color: #d8b4fe; }
+      /* folders */
+      [data-theme="dark"] .folder-card { background: #2a241c; border-color: #4a3f2a; }
+      [data-theme="dark"] .folder-card-back { background: #232020; }
+      /* accent stays orange but slightly brighter for dark contrast */
+      [data-theme="dark"] .breadcrumb a, [data-theme="dark"] .slot-card-new:hover { color: #e2703a; }
+      [data-theme="dark"] .t5-progress-bar:hover { border-color: #e2703a; }
     </style>
   </head>
   <body>
@@ -221,7 +307,10 @@
         <div class="header-sub">Choose a session, configure, and run.</div>
       </div>
       <div id="t5ProgressContainer" title="T5 (PPO) training progress — click any bar for charts"></div>
-      <button id="openSlotMenuBtn" class="ghost" type="button">Sessions</button>
+      <div class="header-row">
+        <button id="themeToggleBtn" class="theme-toggle" type="button" title="Toggle dark mode" aria-label="Toggle dark mode">🌙</button>
+        <button id="openSlotMenuBtn" class="ghost" type="button">Sessions</button>
+      </div>
     </header>
     <div id="slotMenu" class="menu-screen">
       <div class="menu-header">
@@ -1166,6 +1255,12 @@
         if (key === "math-t3") return "#22c55e";
         if (key === "math-t4") return "#06b6d4";
         if (key === "math-t5") return "#a855f7";
+        // Negotiation info-ladder shares the same T1→T5 color scale (weakest→RL).
+        if (key === "math-trivial-open")   return "#ef4444";  // T1
+        if (key === "math-truth-anchored") return "#fde047";  // T2
+        if (key === "math-reactive")       return "#22c55e";  // T3
+        if (key === "math-deadline-aware") return "#06b6d4";  // T4
+        if (key === "math-rl")             return "#a855f7";  // T5
         if (key === "mimic-pro") return "#4285f4";
         if (key === "mimic-gpt-5.4" || key === "mimic-5.4") return "#d1d5db";
         if (key === "mimic-grok") return "#4b5563";
@@ -1938,8 +2033,12 @@
           if (childFolderCount > 0) subtitleParts.push(`${childFolderCount} folder${childFolderCount === 1 ? "" : "s"}`);
           const dist = cachedFolderDistributions[folder.folder_id];
           const distHtml = dist ? folderDistributionHtml(dist) : `<div class="folder-dist-empty">Loading distribution…</div>`;
+          // A "large" folder (≥100 slots, counting nested) takes its own full-
+          // width row so its distribution bars are readable.
+          const folderSlotTotal = dist ? (dist.total_slots || 0) : directSlotCount;
+          const wideClass = folderSlotTotal >= 100 ? " folder-card-wide" : "";
           cards.push(`
-            <div class="slot-card folder-card"
+            <div class="slot-card folder-card${wideClass}"
                  data-enter-folder="${folder.folder_id}"
                  draggable="true"
                  data-drag-kind="folder"
@@ -3248,6 +3347,25 @@
         await refreshSaveSlots();
         showSlotMenu();
       };
+
+      // Dark-mode toggle: flip [data-theme] on <html>, persist, update icon.
+      (function () {
+        const btn = document.getElementById("themeToggleBtn");
+        if (!btn) return;
+        const sync = () => {
+          const dark = document.documentElement.getAttribute("data-theme") === "dark";
+          btn.textContent = dark ? "☀️" : "🌙";
+          btn.title = dark ? "Switch to light mode" : "Switch to dark mode";
+        };
+        sync();
+        btn.onclick = () => {
+          const dark = document.documentElement.getAttribute("data-theme") === "dark";
+          if (dark) document.documentElement.removeAttribute("data-theme");
+          else document.documentElement.setAttribute("data-theme", "dark");
+          try { localStorage.setItem("sim-theme", dark ? "light" : "dark"); } catch (e) {}
+          sync();
+        };
+      })();
 
 
       document.getElementById("stopAllStepWorkersBtn").onclick = () => {

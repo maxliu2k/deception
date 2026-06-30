@@ -125,18 +125,21 @@ def main() -> int:
     folder_id = find_or_create_folder(args.base, args.folder)
     print(f"Folder '{args.folder}' = {folder_id}", flush=True)
 
+    # Canonical seed assignment: ONE seed per batch, shared across all pairings.
+    # Each scenario (seed) is thus tested by every (buyer, seller) cross-pairing
+    # in that batch — enabling factorial-paired comparisons across pairings AND
+    # across runs (LLM-vs-LLM ↔ mimic-vs-mimic on the same (scenario, pair)).
     jobs = []
     for batch_idx in range(args.batches):
+        seed = args.start_seed + batch_idx
         for pair_idx, (buyer, seller) in enumerate(base_pairings):
-            slot_idx = batch_idx * len(base_pairings) + pair_idx
-            seed = args.start_seed + slot_idx
-            name = f"b{batch_idx + 1}-{buyer[:4]}-{seller[:4]}-{seed}"
+            name = f"b{batch_idx + 1}-{buyer[:4]}-{seller[:4]}-s{seed}-p{pair_idx}"
             jobs.append({
                 "buyer": buyer, "seller": seller, "seed": seed,
                 "slot_name": name, "batch": batch_idx + 1,
             })
     total = len(jobs)
-    print(f"Total episodes: {total} ({args.batches} batches × {len(base_pairings)} pairings)", flush=True)
+    print(f"Total episodes: {total} ({args.batches} scenarios × {len(base_pairings)} pairings)", flush=True)
 
     completed = {"n": 0, "fail": 0}
     lock = Lock()

@@ -4,7 +4,7 @@ Information ladder (each tier uses strictly more state than the prior):
 
 Tier         | Info used                              | Strategy core
 -------------|----------------------------------------|--------------------------------
-Trivial-Open | (none)                                 | always counter at extreme; never accept
+Trivial-Open | (none)                                 | counter at the prior-support edge; never accept
 Truth-Anchor | own_private_value                      | concede to a fixed fraction of own value
 Reactive     | + standing offer                       | bisect between standing and own value
 Deadline     | + turn_index, opp offer history        | concede curve toward opp; accept at deadline
@@ -61,13 +61,18 @@ def trivial_open(
     turn_history: list[dict], standing_price: float | None,
     turn_index: int, message_limit: int,
 ) -> dict:
-    """T1: extreme counter, never accept.
+    """T1: plant a flag at the edge of the prior support; never accept, never move.
 
-    e = 10·E_REF ≈ 3.47 ⇒ buyer offers v·exp(-3.47) ≈ 0.031·v;
-    seller asks v·exp(+3.47) ≈ 32·v. Deal essentially impossible.
+    e = 2·E_REF = log(2) ⇒ buyer offers v·exp(-log2) = 0.5·v;
+    seller asks v·exp(+log2) = 2·v. This is the greediest anchor the
+    uninformative prior (opp ∈ [v/2, 2v]) can justify — asking for more would
+    demand a price the opponent's value provably cannot support. The tier is
+    weak not because the anchor is absurd, but because it never adapts: it only
+    closes when the opponent capitulates all the way to this edge, and it never
+    accepts an offer no matter how good.
     """
     v = float(own_private_value)
-    e = 10.0 * E_REF
+    e = 2.0 * E_REF
     price = max(1, int(round(_apply_ext(role, v, e))))
     return {"action": "continue", "proposed_price": price, "message_text": ""}
 

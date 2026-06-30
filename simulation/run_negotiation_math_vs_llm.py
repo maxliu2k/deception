@@ -82,18 +82,24 @@ def main() -> int:
 
     opponents = [s.strip() for s in args.llms.split(",") if s.strip()]
     print(f"Opponents: {opponents}", flush=True)
+    # Canonical eval-pool seed allocation: every cell uses the SAME first N
+    # seeds (seed = start_seed + ep_idx, no cell offset). Each ep_idx maps to
+    # one canonical scenario shared across all (tier, llm, role) cells AND
+    # across runs that draw from the same pool (math-vs-mimic, math-vs-LLM,
+    # mimic-vs-mimic, LLM-vs-LLM holdout). Enables paired analysis on every
+    # comparison dimension.
     jobs = []
-    seed = args.start_seed
     for tier in MATH_TIERS:
         for llm in opponents:
             for role in ("buyer", "seller"):
-                for _ in range(args.episodes_per_pair):
+                for ep_idx in range(args.episodes_per_pair):
+                    seed = args.start_seed + ep_idx
                     buyer = tier if role == "buyer" else llm
                     seller = tier if role == "seller" else llm
                     name = f"{tier[:8]}-{role[:1]}-{llm[:4]}-{seed}"
                     jobs.append({"buyer": buyer, "seller": seller, "seed": seed,
-                                 "tier": tier, "llm": llm, "tier_role": role, "name": name})
-                    seed += 1
+                                 "tier": tier, "llm": llm, "tier_role": role,
+                                 "ep_idx": ep_idx, "name": name})
     print(f"Total: {len(jobs)} episodes ({len(MATH_TIERS)} tiers × {len(opponents)} opps × 2 roles × {args.episodes_per_pair} eps)", flush=True)
 
     completed = {"n": 0, "fail": 0}
