@@ -27,6 +27,7 @@ from typing import Any, Dict
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from openai import AsyncOpenAI
 
 try:
@@ -178,6 +179,7 @@ class _Slot:
             "done": getattr(runtime.env, "done", None) if runtime.env else None,
         }
         _write_json_atomic(self.runtime_meta_path, meta)
+        _invalidate_slot_display()
 
     def clear(self) -> None:
         self.runtime = None
@@ -193,6 +195,22 @@ SESSION_ID_CTX: ContextVar[str] = ContextVar("simulation_session_id", default="d
 SESSION_RUNTIMES: dict[str, _SessionRuntime] = {}
 SLOT_OBJECTS: dict[str, _Slot] = {}
 _SAVE_SLOT_CATALOG_CACHE: dict[str, Any] | None = None
+# Bumped whenever a slot's persisted display state changes in-place (single-slot
+# step persist) so the cached /api/save_slots response invalidates even when the
+# catalog shape (slot count / next_index) is unchanged.
+_SLOT_DISPLAY_EPOCH: int = 0
+
+
+def _invalidate_slot_display() -> None:
+    global _SLOT_DISPLAY_EPOCH
+    _SLOT_DISPLAY_EPOCH += 1
+    # Drop the persisted display caches too, so an in-place change (which doesn't
+    # alter the catalog shape the disk caches are keyed on) forces a rebuild.
+    for _p in (_SAVE_SLOTS_DISPLAY_CACHE_PATH, _FOLDER_DIST_CACHE_PATH):
+        try:
+            _p.unlink(missing_ok=True)
+        except Exception:
+            pass
 FIVE_ATTR_MODE_ALIASES = {
     "five_attr",
     "five_attr_—_boolean_partial_info",
@@ -797,6 +815,7 @@ def _persist_runtime(session_id: str | None = None) -> None:
         "done": getattr(runtime.env, "done", None) if runtime and runtime.env else None,
     }
     _write_json_atomic(_session_runtime_meta_path(sid), meta)
+    _invalidate_slot_display()
 
 
 def _delete_save_slot(session_id: str | None) -> None:
@@ -809,8 +828,30 @@ def _delete_save_slot(session_id: str | None) -> None:
 
 def _save_slot_info(session_id: str, slot_name: str | None = None, folder_id: str | None = None) -> dict[str, Any]:
     sid = _normalize_session_id(session_id)
-    runtime = _get_slot(sid).get_runtime(create_if_missing=False)
+    # Fast path: for a persisted, COMPLETED slot, all display fields live in the
+    # lightweight runtime_meta.json sidecar — return from it without unpickling
+    # the full torch runtime (and without the per-slot mega-batch status read,
+    # which a finished archived slot never has). This keeps /api/save_slots
+    # O(one json read per slot) instead of O(unpickle full env) per slot, which
+    # otherwise hangs once the catalog grows to thousands of slots. Active /
+    # in-progress slots fall through to the slow path below (only ever a few).
+    _meta = _read_json_file(_session_runtime_meta_path(sid), None)
+    if isinstance(_meta, dict) and _meta.get("mode") and _meta.get("done") is True:
+        return {
+            "slot_id": sid,
+            "name": slot_name or sid.replace("save_slot_", "Save Slot "),
+            "filled": True,
+            "mode": _canonical_mode(_meta.get("mode") or ""),
+            "updated_at": _meta.get("updated_at"),
+            "phase": _meta.get("phase"),
+            "done": True,
+            "step_running": False,
+            "mega_batch_running": False,
+            "mega_batch_done": False,
+            "folder_id": folder_id,
+        }
     mega_status = _load_mega_batch_status_from_disk(sid)
+    runtime = _get_slot(sid).get_runtime(create_if_missing=False)
     filled = runtime is not None and runtime.env is not None
     mode = None
     updated_at = None
@@ -6008,20 +6049,65 @@ async def api_t5_training_status() -> JSONResponse:
     })
 
 
+_SAVE_SLOTS_RESPONSE_CACHE: dict[str, Any] = {"key": None, "payload": None}
+_SAVE_SLOTS_DISPLAY_CACHE_PATH = RUNTIME_DIR / "save_slots_display_cache.json"
+
+
+def _save_slots_shape(slots: list[dict[str, Any]], folders: list[dict[str, Any]]) -> list[int]:
+    """Catalog-shape fingerprint persisted with the disk cache (survives restart,
+    so it deliberately excludes the in-memory epoch). Changes whenever a slot or
+    folder is added/removed/moved. In-place display changes are handled by
+    _invalidate_slot_display(), which also drops the disk cache."""
+    catalog = _load_slot_catalog()
+    return [
+        len(slots),
+        len(folders),
+        int(catalog.get("next_index") or 1),
+        int(catalog.get("next_folder_index") or 1),
+    ]
+
+
+def _save_slots_cache_key(slots: list[dict[str, Any]], folders: list[dict[str, Any]]) -> tuple:
+    return (*_save_slots_shape(slots, folders), _SLOT_DISPLAY_EPOCH)
+
+
+def _build_save_slots_payload(slots: list[dict[str, Any]], folders: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "slots": [
+            _save_slot_info(item["slot_id"], item.get("name"), item.get("folder_id"))
+            for item in slots
+        ],
+        "folders": folders,
+    }
+
+
 @app.get("/api/save_slots")
 async def api_save_slots() -> JSONResponse:
     slots = _slot_list()
     folders = _folder_list()
-    return JSONResponse(
-        {
-            "ok": True,
-            "slots": [
-                _save_slot_info(item["slot_id"], item.get("name"), item.get("folder_id"))
-                for item in slots
-            ],
-            "folders": folders,
-        }
-    )
+    key = _save_slots_cache_key(slots, folders)
+    if _SAVE_SLOTS_RESPONSE_CACHE["key"] == key and _SAVE_SLOTS_RESPONSE_CACHE["payload"] is not None:
+        return JSONResponse(_SAVE_SLOTS_RESPONSE_CACHE["payload"])
+    shape = _save_slots_shape(slots, folders)
+    # On a cold process the in-memory cache is empty; a disk cache written by a
+    # previous run lets us skip the multi-second per-slot scan entirely if the
+    # catalog shape is unchanged.
+    disk = _read_json_file(_SAVE_SLOTS_DISPLAY_CACHE_PATH, None)
+    if isinstance(disk, dict) and disk.get("shape") == shape and isinstance(disk.get("payload"), dict):
+        _SAVE_SLOTS_RESPONSE_CACHE["key"] = key
+        _SAVE_SLOTS_RESPONSE_CACHE["payload"] = disk["payload"]
+        return JSONResponse(disk["payload"])
+    # Build off the event loop so the per-slot sidecar scan over a large catalog
+    # doesn't freeze every other endpoint meanwhile.
+    payload = await run_in_threadpool(_build_save_slots_payload, slots, folders)
+    _SAVE_SLOTS_RESPONSE_CACHE["key"] = key
+    _SAVE_SLOTS_RESPONSE_CACHE["payload"] = payload
+    try:
+        _write_json_atomic(_SAVE_SLOTS_DISPLAY_CACHE_PATH, {"shape": shape, "payload": payload})
+    except Exception:
+        pass
+    return JSONResponse(payload)
 
 
 def _read_slot_deception_wins(slot_id: str) -> dict[str, int] | None:
@@ -6063,13 +6149,36 @@ def _read_slot_deception_summary(slot_id: str) -> dict[str, Any] | None:
 
 
 def _read_slot_negotiation_summary(slot_id: str) -> dict[str, Any] | None:
-    """Read a buyer/seller negotiation episode's runtime.pkl and return
-    per-alias surplus captured.
+    """Per-alias negotiation surplus for a slot, read from the lightweight meta
+    sidecar when possible (so /api/folder_distributions over thousands of slots
+    doesn't unpickle every runtime.pkl). On a sidecar miss, fall back to
+    unpickling once and cache the result back into the sidecar under "neg".
+    Returns {"surplus": {alias: int}, "welfare": int, "deal_capacity": int} or
+    None if the slot holds no completed negotiation episode."""
+    meta = _read_json_file(_session_runtime_meta_path(slot_id), None)
+    if isinstance(meta, dict):
+        neg = meta.get("neg")
+        if isinstance(neg, dict):
+            return neg
+        # If the sidecar records a non-negotiation mode, there is definitively no
+        # negotiation summary here — short-circuit without unpickling anything.
+        mode = meta.get("mode")
+        if mode and mode != "buyer_seller_negotiation":
+            return None
+    summary = _compute_slot_negotiation_summary(slot_id)
+    if summary is not None:
+        base = dict(meta) if isinstance(meta, dict) else {}
+        base["neg"] = summary
+        try:
+            _write_json_atomic(_session_runtime_meta_path(slot_id), base)
+        except Exception:
+            pass
+    return summary
 
-    Returns dict {alias: int_surplus} keyed by buyer + seller aliases, with
-    `welfare` (total surplus generated this episode). Returns None if no
-    completed negotiation episode is found.
-    """
+
+def _compute_slot_negotiation_summary(slot_id: str) -> dict[str, Any] | None:
+    """Unpickle a slot's runtime.pkl and derive the negotiation surplus summary.
+    The uncached worker behind _read_slot_negotiation_summary."""
     import pickle as _pickle
     pkl = _session_runtime_dir(slot_id) / "runtime.pkl"
     if not pkl.exists():
@@ -6184,9 +6293,23 @@ def _folder_distribution(folder_id: str) -> dict[str, Any]:
     mode_counts: dict[str, int] = {"auction": 0, "deception": 0, "negotiation": 0}
     welfare_total = 0   # negotiation only: sum of welfare across episodes
     for sid in slot_ids:
-        # Prefer deception, then negotiation, then auction.
-        deception = _read_slot_deception_summary(sid)
-        negotiation = _read_slot_negotiation_summary(sid) if deception is None else None
+        # Read the lightweight sidecar once to learn the mode, then dispatch to
+        # exactly one summary reader. This avoids probing a deception export path
+        # (a deep .exists() per slot) for the thousands of negotiation/auction
+        # slots, and lets negotiation slots resolve from the cached "neg" summary
+        # in the sidecar with no extra file access.
+        _meta = _read_json_file(_session_runtime_meta_path(sid), None)
+        _mode = _meta.get("mode") if isinstance(_meta, dict) else None
+        deception = negotiation = None
+        if _mode == "buyer_seller_negotiation":
+            neg = _meta.get("neg") if isinstance(_meta, dict) else None
+            negotiation = neg if isinstance(neg, dict) else _read_slot_negotiation_summary(sid)
+        elif _mode == "deception_competition":
+            deception = _read_slot_deception_summary(sid)
+        elif not _mode:
+            # Unknown/legacy slot with no sidecar mode — fall back to probing.
+            deception = _read_slot_deception_summary(sid)
+            negotiation = _read_slot_negotiation_summary(sid) if deception is None else None
         capacity_here = 0
         if deception is not None:
             wins_map = deception["wins"]
@@ -6254,11 +6377,36 @@ def _folder_distribution(folder_id: str) -> dict[str, Any]:
     }
 
 
+_FOLDER_DIST_RESPONSE_CACHE: dict[str, Any] = {"key": None, "payload": None}
+_FOLDER_DIST_CACHE_PATH = RUNTIME_DIR / "folder_distributions_cache.json"
+
+
+def _build_folder_distributions(folders: list[dict[str, Any]]) -> dict[str, Any]:
+    out = {f["folder_id"]: _folder_distribution(f["folder_id"]) for f in folders}
+    return {"ok": True, "distributions": out}
+
+
 @app.get("/api/folder_distributions")
 async def api_folder_distributions() -> JSONResponse:
+    slots = _slot_list()
     folders = _folder_list()
-    out = {f["folder_id"]: _folder_distribution(f["folder_id"]) for f in folders}
-    return JSONResponse({"ok": True, "distributions": out})
+    key = _save_slots_cache_key(slots, folders)
+    if _FOLDER_DIST_RESPONSE_CACHE["key"] == key and _FOLDER_DIST_RESPONSE_CACHE["payload"] is not None:
+        return JSONResponse(_FOLDER_DIST_RESPONSE_CACHE["payload"])
+    shape = _save_slots_shape(slots, folders)
+    disk = _read_json_file(_FOLDER_DIST_CACHE_PATH, None)
+    if isinstance(disk, dict) and disk.get("shape") == shape and isinstance(disk.get("payload"), dict):
+        _FOLDER_DIST_RESPONSE_CACHE["key"] = key
+        _FOLDER_DIST_RESPONSE_CACHE["payload"] = disk["payload"]
+        return JSONResponse(disk["payload"])
+    payload = await run_in_threadpool(_build_folder_distributions, folders)
+    _FOLDER_DIST_RESPONSE_CACHE["key"] = key
+    _FOLDER_DIST_RESPONSE_CACHE["payload"] = payload
+    try:
+        _write_json_atomic(_FOLDER_DIST_CACHE_PATH, {"shape": shape, "payload": payload})
+    except Exception:
+        pass
+    return JSONResponse(payload)
 
 
 @app.post("/api/save_slot_create")
@@ -6280,6 +6428,15 @@ async def api_save_slot_move(payload: Dict[str, Any]) -> JSONResponse:
     slot_id = _normalize_session_id(payload.get("slot_id"))
     updated = _move_save_slot(slot_id, payload.get("folder_id"))
     return JSONResponse({"ok": True, "slot": updated})
+
+
+@app.get("/api/folders")
+async def api_folders() -> JSONResponse:
+    """Lightweight folder list — reads the catalog only, no per-slot runtime
+    unpickling. Batch runners use this (via find_or_create_folder) instead of
+    the heavy /api/save_slots, which loads every slot's runtime.pkl and scales
+    poorly past a few thousand slots."""
+    return JSONResponse({"ok": True, "folders": _folder_list()})
 
 
 @app.post("/api/folder_create")

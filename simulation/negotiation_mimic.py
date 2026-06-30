@@ -1,20 +1,26 @@
 """Negotiation mimic NN inference (fully symmetric, role-agnostic).
 
 The mimic processes both roles identically:
-  * 31-dim input vector built from role-agnostic features (no role flag)
-  * 3-class action head (continue / accept / reject)
-  * scalar extraction-ratio head applied symmetrically downstream
+  * 32-dim input vector built from role-agnostic features (no role flag)
+  * reservation-threshold head (accept iff standing_ext >= reservation_ext)
+  * counter-extraction head applied log-symmetrically downstream
 
-Symmetric extraction mapping:
-    buyer  price = round(own_value * (1.0 - e))     clipped to [1, own_value]
-    seller price = round(own_value * (1.0 + e))     clipped to [own_value, inf)
+The action space is binary — continue (counter) or accept. A negotiation ends
+only by acceptance or by hitting the message limit (no-deal); there is no
+explicit "reject" action, so none is modeled.
 
-All numeric features are expressed in "extraction relative to my own_value"
-units so the same value distribution applies regardless of role.
+Log-symmetric extraction mapping (multiplicative-symmetric across roles):
+    buyer  price = round(own_value * exp(-e))     clipped to [1, own_value]
+    seller price = round(own_value * exp(+e))     clipped to [own_value, inf)
+
+All numeric features are expressed in log-extraction units relative to my
+own_value, so the same value distribution applies regardless of role.
 """
 from __future__ import annotations
 
 import hashlib
+import math
+import os as _os
 import random as _random
 from pathlib import Path
 
@@ -23,14 +29,44 @@ import torch.nn as nn
 
 
 INPUT_DIM = 32
-ACTION_DIM = 3
 HIDDEN = 64
-MODELS_DIR = Path(__file__).parent / "models" / "negotiation_v5_sym"
+MODELS_DIR = Path(_os.environ.get(
+    "NEG_MIMIC_DIR",
+    str(Path(__file__).parent / "models" / "negotiation_v6_resv"),
+))
+# --- Stochasticity (matches the auction/deception mimic recipe) --------------
+# MIMIC_TEMPERATURE T:  0 → deterministic; 1 → sample at the trained
+#   probabilities (temperature-Bernoulli accept + Gaussian counter noise).
+# PRICE_NOISE: std-dev (log-extraction units) of the Gaussian added to the
+#   counter offer, scaled by T — analogous to the auction bid regressor noise.
+# ACCEPT_TEMP: sigmoid sharpness of the reservation-threshold accept classifier
+#   (must match the value used in training).
+MIMIC_TEMPERATURE = float(_os.environ.get("NEG_MIMIC_TEMPERATURE", "1.0"))
+PRICE_NOISE = float(_os.environ.get("NEG_PRICE_NOISE", "0.04"))
+ACCEPT_TEMP = float(_os.environ.get("NEG_ACCEPT_TEMP", "10.0"))
+# Reservation margin (log-extraction units): shifts the accept operating point.
+# 0.5 calibrated on TRAINING close-rate (matches the LLM's), validated on the
+# held-out eval (agreement 0/5 and extraction 0/5 rejected under the paired
+# McNemar/Wilcoxon tests).
+RESERVATION_MARGIN = float(_os.environ.get("NEG_RESV_MARGIN", "0.5"))
 _NET_CACHE: dict[str, "_NegotiationMimic"] = {}
 
 
 class _NegotiationMimic(nn.Module):
-    def __init__(self, input_dim: int = INPUT_DIM, hidden: int = HIDDEN, action_dim: int = ACTION_DIM):
+    """Reservation-threshold mimic (classic feedforward).
+
+    Two coupled scalar outputs per turn, both in log-extraction units:
+      * counter_ext     — the extraction I demand if I counter (the offer I make)
+      * reservation_ext — the worst extraction I'd still ACCEPT this turn
+
+    Inference: accept the standing offer iff standing_ext >= reservation_ext
+    (a deterministic threshold crossing), else counter at counter_ext. This
+    replaces the old 3-class softmax action head, which could not express
+    "accept an offer below my counter-target" — the concession behavior that
+    drove the mimic's under-closing in free-run duels.
+    """
+
+    def __init__(self, input_dim: int = INPUT_DIM, hidden: int = HIDDEN):
         super().__init__()
         self.register_buffer("input_mean", torch.zeros(input_dim))
         self.register_buffer("input_std", torch.ones(input_dim))
@@ -38,24 +74,40 @@ class _NegotiationMimic(nn.Module):
             nn.Linear(input_dim, hidden), nn.Tanh(),
             nn.Linear(hidden, hidden), nn.Tanh(),
         )
-        self.action_head = nn.Linear(hidden, action_dim)
-        self.ext_head = nn.Linear(hidden, 1)  # extraction ratio (>= 0)
+        self.ext_head = nn.Linear(hidden, 1)         # counter extraction
+        self.reservation_head = nn.Linear(hidden, 1)  # accept threshold
 
     def forward(self, x: torch.Tensor):
         x = (x - self.input_mean) / (self.input_std + 1e-6)
         h = self.trunk(x)
-        return self.action_head(h), self.ext_head(h).squeeze(-1)
+        return self.ext_head(h).squeeze(-1), self.reservation_head(h).squeeze(-1)
 
 
 def _safe_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
 
 
-def load_mimic(alias: str) -> _NegotiationMimic | None:
-    bare = alias[len("Mimic-"):] if alias.startswith("Mimic-") else alias
-    if bare in _NET_CACHE:
-        return _NET_CACHE[bare]
-    path = MODELS_DIR / f"mimic_{_safe_filename(bare)}.pt"
+# Ensemble size: if > 1, load K members from MODELS_DIR/seed{k}/mimic_{alias}.pt
+# and average their outputs (variance reduction → better held-out fidelity).
+ENSEMBLE_K = int(_os.environ.get("NEG_MIMIC_K", "1"))
+
+
+class _EnsembleMimic:
+    """Averages the (counter_ext, reservation_ext) outputs of K member nets.
+    Drop-in for a single _NegotiationMimic at the model(xt) call site."""
+
+    def __init__(self, members: list["_NegotiationMimic"]):
+        self.members = members
+
+    def __call__(self, x: torch.Tensor):
+        cs, rs = [], []
+        for m in self.members:
+            c, r = m(x)
+            cs.append(c); rs.append(r)
+        return torch.stack(cs).mean(0), torch.stack(rs).mean(0)
+
+
+def _load_one(path: Path) -> "_NegotiationMimic | None":
     if not path.exists():
         return None
     payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -65,12 +117,29 @@ def load_mimic(alias: str) -> _NegotiationMimic | None:
     model = _NegotiationMimic(
         input_dim=int(payload.get("input_dim", INPUT_DIM)),
         hidden=int(payload.get("hidden", HIDDEN)),
-        action_dim=int(payload.get("action_dim", ACTION_DIM)),
     )
     model.load_state_dict(sd)
     model.eval()
-    _NET_CACHE[bare] = model
     return model
+
+
+def load_mimic(alias: str):
+    bare = alias[len("Mimic-"):] if alias.startswith("Mimic-") else alias
+    if bare in _NET_CACHE:
+        return _NET_CACHE[bare]
+    fname = f"mimic_{_safe_filename(bare)}.pt"
+    if ENSEMBLE_K > 1:
+        members = [m for k in range(ENSEMBLE_K)
+                   if (m := _load_one(MODELS_DIR / f"seed{k}" / fname)) is not None]
+        if not members:
+            return None
+        net = _EnsembleMimic(members)
+    else:
+        net = _load_one(MODELS_DIR / fname)
+        if net is None:
+            return None
+    _NET_CACHE[bare] = net
+    return net
 
 
 def _price_to_extraction(price: float, own_value: float, role: str) -> float:
@@ -304,7 +373,7 @@ def negotiation_mimic_action(
 ) -> dict:
     """Run the mimic and return {action, proposed_price, message_text}.
 
-    action ∈ {"continue", "accept", "reject"}.
+    action ∈ {"continue", "accept"}.
     proposed_price is meaningful when action == "continue".
     """
     model = load_mimic(alias)
@@ -330,35 +399,49 @@ def negotiation_mimic_action(
     )
     xt = torch.tensor([x], dtype=torch.float32)
     with torch.no_grad():
-        action_logits, ext_pred = model(xt)
-    probs = torch.softmax(action_logits.squeeze(0), dim=-1).tolist()
-    raw_ext = float(ext_pred.squeeze(0))
+        counter_ext_t, reservation_ext_t = model(xt)
+    counter_ext = float(counter_ext_t.squeeze(0))
+    reservation_ext = float(reservation_ext_t.squeeze(0))
 
+    # Deterministic, reproducible RNG seeded from (alias, role, turn, values) —
+    # same pattern as the original mimic, so a given state always samples the
+    # same way (needed for paired/reproducible evaluation).
     h = hashlib.sha256()
-    h.update((alias or "").encode("utf-8"))
-    h.update((role or "").encode("utf-8"))
-    h.update(str(int(turn_index)).encode("utf-8"))
-    h.update(str(round(float(own_private_value), 4)).encode("utf-8"))
-    h.update(str(round(float(standing_price or 0.0), 4)).encode("utf-8"))
+    for part in (alias or "", role or "", str(int(turn_index)),
+                 str(round(float(own_private_value), 4)),
+                 str(round(float(standing_price or 0.0), 4))):
+        h.update(part.encode("utf-8"))
     rng = _random.Random(int.from_bytes(h.digest()[:8], "big"))
-    r = rng.random()
-    cum = 0.0
-    action_idx = 0
-    for i, p in enumerate(probs):
-        cum += p
-        if r < cum:
-            action_idx = i
-            break
-    action_name = ["continue", "accept", "reject"][action_idx]
 
-    proposed_price = extraction_to_price(raw_ext, float(own_private_value), role)
+    T = MIMIC_TEMPERATURE
+    # --- Counter price: regressor output + Gaussian noise (auction recipe) ---
+    noisy_counter = counter_ext + (rng.gauss(0.0, PRICE_NOISE * T) if T > 0 else 0.0)
+    proposed_price = extraction_to_price(noisy_counter, float(own_private_value), role)
 
-    if action_name == "accept" and standing_price is None:
-        action_name = "continue"
-    if action_name == "accept" and standing_price is not None:
+    # --- Accept decision: temperature-Bernoulli on the threshold classifier ---
+    # The reservation head defines P(accept) = sigmoid(temp·(standing_ext −
+    # reservation_ext)), exactly as trained by BCE. Stochastic inference samples
+    # from it (auction's Bernoulli recipe); T=0 recovers the deterministic
+    # threshold. A small margin shifts the operating point; deadline forces a
+    # legal close on the final turn.
+    action_name = "continue"
+    if standing_price is not None:
         legal = ((role == "buyer" and standing_price <= own_private_value) or
                  (role == "seller" and standing_price >= own_private_value))
-        if not legal:
-            action_name = "continue"
+        if legal:
+            standing_ext = _price_to_extraction(float(standing_price), float(own_private_value), role)
+            turns_remaining = max(0, int(message_limit) - len(turn_history))
+            margin_adj = standing_ext - reservation_ext - RESERVATION_MARGIN
+            p_accept = 1.0 / (1.0 + math.exp(-ACCEPT_TEMP * margin_adj))
+            if T > 0:
+                # Temperature-sharpen the Bernoulli (T<1 sharper, T>1 softer).
+                sa = p_accept ** (1.0 / T)
+                sb = (1.0 - p_accept) ** (1.0 / T)
+                p_accept = sa / max(1e-9, sa + sb)
+                accept = rng.random() < p_accept
+            else:
+                accept = p_accept >= 0.5
+            if accept or turns_remaining <= 1:
+                action_name = "accept"
 
     return {"action": action_name, "proposed_price": proposed_price, "message_text": ""}

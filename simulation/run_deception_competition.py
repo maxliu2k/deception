@@ -59,7 +59,13 @@ def post(base: str, path: str, body: dict) -> dict:
 
 
 def find_or_create_folder(base: str, name: str) -> str:
-    listing = get(base, "/api/save_slots")
+    # Use the lightweight /api/folders endpoint (catalog-only) rather than
+    # /api/save_slots, which unpickles every slot's runtime and times out once
+    # the catalog grows past a few thousand slots. Fall back to the heavy
+    # endpoint for older servers without /api/folders.
+    listing = get(base, "/api/folders")
+    if not listing.get("folders") and not listing.get("ok"):
+        listing = get(base, "/api/save_slots")
     for f in (listing.get("folders") or []):
         if f.get("name") == name:
             return f["folder_id"]

@@ -117,9 +117,9 @@ def _ensure_legal(role: str, price: int, buyer, seller, standing_price: float | 
     return max(int(seller.baseline_value), int(price))
 
 
-def run_one(buyer_alias: str, seller_alias: str, seed: int,
-            message_limit: int = 10) -> dict:
-    """Run one full negotiation between two agents and return outcome."""
+def _play_duel(buyer_alias: str, seller_alias: str, seed: int, message_limit: int):
+    """Run one full negotiation duel in-process. Returns
+    (env, buyer, seller, turns, agreed_price)."""
     env = TravelGameEnv({
         "mode": "buyer_seller_negotiation",
         "selected_models": [buyer_alias, seller_alias, "GPT-5.4"],
@@ -134,7 +134,6 @@ def run_one(buyer_alias: str, seller_alias: str, seed: int,
     standing_price = None
     agreed_price = None
 
-    # Opener is determined by seed parity (matches server.py _negotiation_opener_for_seed).
     opener_role = "buyer" if (int(seed) % 2 == 1) else "seller"
     other_role = "seller" if opener_role == "buyer" else "buyer"
 
@@ -144,14 +143,12 @@ def run_one(buyer_alias: str, seller_alias: str, seed: int,
     def legal_accept(role: str, p: float) -> bool:
         return (role == "buyer" and p <= buyer.budget) or (role == "seller" and p >= seller.baseline_value)
 
-    # Opener acts (no standing price)
     op_res = _dispatch(alias_for(opener_role), role=opener_role, buyer=buyer, seller=seller,
                        turns=turns, standing_price=None, turn_index=0, message_limit=message_limit)
     opening_price = _ensure_legal(opener_role, op_res["proposed_price"], buyer, seller, None)
     turns.append(NegotiationTurnAction(speaker=opener_role, proposed_price=int(opening_price), message_text=""))
     standing_price = float(opening_price)
 
-    # Alternating loop
     for turn_idx in range(1, message_limit):
         role = opener_role if (turn_idx % 2 == 0) else other_role
         res = _dispatch(alias_for(role), role=role, buyer=buyer, seller=seller,
@@ -168,7 +165,24 @@ def run_one(buyer_alias: str, seller_alias: str, seed: int,
             new_price = max(new_price, int(seller.baseline_value))
         turns.append(NegotiationTurnAction(speaker=role, proposed_price=int(new_price), message_text=""))
         standing_price = float(new_price)
+    return env, buyer, seller, turns, agreed_price
 
+
+def run_one_env(buyer_alias: str, seller_alias: str, seed: int, message_limit: int = 10):
+    """Like run_one but drives env.step to populate env.result, then returns the
+    env (ready to persist as a save slot). Mirrors the server's episode output."""
+    env, buyer, seller, turns, agreed_price = _play_duel(buyer_alias, seller_alias, seed, message_limit)
+    env.step({"negotiation_turns": turns, "agreed_price": agreed_price})
+    env.world["negotiation_turns"] = turns
+    env.world["agreed_price"] = agreed_price
+    return env
+
+
+def run_one(buyer_alias: str, seller_alias: str, seed: int,
+            message_limit: int = 10) -> dict:
+    """Run one full negotiation between two agents and return outcome."""
+    env, buyer, seller, turns, agreed_price = _play_duel(buyer_alias, seller_alias, seed, message_limit)
+    standing_price = None  # unused; kept for diff minimalism
     out = {
         "buyer": buyer_alias, "seller": seller_alias, "seed": seed,
         "agreed": agreed_price is not None,

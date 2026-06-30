@@ -1,14 +1,15 @@
 """Symmetric PPO for negotiation — role-agnostic policy.
 
-Key idea: the policy is TRULY symmetric across buyer/seller via two changes:
-  1. INPUT: drop role_is_seller (index 0 of the 32-dim vector). The remaining
-     31 features are already framed in "own" / "opponent" terms, so they
-     have the same MEANING regardless of which role I play. Result: 31-dim obs.
-  2. OUTPUT: instead of price_ratio, predict "extraction_ratio" ∈ [0, ∞)
-     = how much surplus I want as a fraction of my own_value.
-       - Buyer's price = own_value × (1 - extraction)
-       - Seller's price = own_value × (1 + extraction)
-     Same number, same interpretation — the policy never sees role.
+Key idea: the policy is TRULY symmetric across buyer/seller via two choices:
+  1. INPUT: 32-dim role-agnostic feature vector (no role flag). Every feature
+     is framed in "own" / "opponent" terms, so it has the same MEANING
+     regardless of which role I play.
+  2. OUTPUT: predict a log-symmetric "extraction" e ∈ [0, ∞)
+     = how much surplus I want, in log-units of my own_value.
+       - Buyer's price = own_value × exp(-e)
+       - Seller's price = own_value × exp(+e)
+     Same number, same interpretation — the policy never sees role. The two
+     role prices are exact multiplicative inverses for a given e.
 
 This guarantees the policy plays identically when faced with mirror-image
 states. The role only matters at the price-conversion wrapper.
